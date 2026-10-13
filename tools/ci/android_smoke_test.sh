@@ -18,7 +18,8 @@ fail() {
     exit 1
 }
 
-# Taps the centre of the first view whose uiautomator node matches the regex $1.
+# Taps the centre of the first view whose uiautomator node matches the regex $1, ignoring case
+# (newer Android reports button text in capitals).
 tap_node() {
     local attempt
     for attempt in 1 2 3; do
@@ -28,7 +29,7 @@ tap_node() {
         sleep 2
     done
     local bounds
-    bounds=$(adb shell cat /sdcard/ui.xml | tr '>' '\n' | grep -E "$1" | head -1 |
+    bounds=$(adb shell cat /sdcard/ui.xml | tr '>' '\n' | grep -iE "$1" | head -1 |
         grep -oE 'bounds="\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]"' | grep -oE '[0-9]+')
     [ -n "$bounds" ] || return 1
     set -- $bounds

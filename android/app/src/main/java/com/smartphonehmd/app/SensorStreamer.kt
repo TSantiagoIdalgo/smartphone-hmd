@@ -41,21 +41,21 @@ class SensorStreamer(private val sensorManager: SensorManager) : SensorEventList
         thread = newThread
         handler = newHandler
 
+        // An exception escaping this thread would close the app, so failures become lastError.
         newHandler.post {
             try {
                 target = InetAddress.getByName(host)
                 socket = DatagramSocket()
+                for (type in intArrayOf(Sensor.TYPE_GYROSCOPE, Sensor.TYPE_ACCELEROMETER, Sensor.TYPE_MAGNETIC_FIELD)) {
+                    val sensor = sensorManager.getDefaultSensor(type)
+                    if (sensor == null) {
+                        if (type == Sensor.TYPE_GYROSCOPE) lastError = "Este móvil no tiene giroscopio"
+                        continue
+                    }
+                    sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_FASTEST, newHandler)
+                }
             } catch (e: Exception) {
                 lastError = e.message ?: e.toString()
-                return@post
-            }
-            for (type in intArrayOf(Sensor.TYPE_GYROSCOPE, Sensor.TYPE_ACCELEROMETER, Sensor.TYPE_MAGNETIC_FIELD)) {
-                val sensor = sensorManager.getDefaultSensor(type)
-                if (sensor == null) {
-                    if (type == Sensor.TYPE_GYROSCOPE) lastError = "Este móvil no tiene giroscopio"
-                    continue
-                }
-                sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_FASTEST, newHandler)
             }
         }
     }
