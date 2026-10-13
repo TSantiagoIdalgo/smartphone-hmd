@@ -1,0 +1,40 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  android:
+    name: Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build and test
+        working-directory: android
+        run: ./gradlew assembleDebug testDebugUnitTest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smartphone-hmd-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+
+  driver:
+    name: SteamVR driver (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S driver -B driver/build -A x64
+      - name: Build
+        run: cmake --build driver/build --config Release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smartphone_hmd-driver
+          path: driver/build/smartphone_hmd

@@ -1,0 +1,7 @@
+{
+	"alwaysActivate": false,
+	"name": "smartphone_hmd",
+	"directory": "",
+	"resourceOnly": false,
+	"hmd_presence": [ "*.*" ]
+}

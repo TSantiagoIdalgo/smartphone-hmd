@@ -1,0 +1,14 @@
+# Android / Gradle
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+.cxx/
+captures/
+
+# Driver
+driver/build/
+out/
+.vs/
+CMakeSettings.json
