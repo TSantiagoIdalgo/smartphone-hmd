@@ -11,6 +11,7 @@
 		"render_height": 1440,
 		"fov_degrees": 90.0,
 		"display_frequency": 60.0,
-		"head_height_meters": 1.7
+		"head_height_meters": 1.7,
+		"udp_port": 9944
 	}
 }

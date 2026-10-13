@@ -34,6 +34,8 @@ jobs:
         run: cmake -S driver -B driver/build -A x64
       - name: Build
         run: cmake --build driver/build --config Release
+      - name: Test
+        run: ctest --test-dir driver/build -C Release --output-on-failure
       - uses: actions/upload-artifact@v4
         with:
           name: smartphone_hmd-driver

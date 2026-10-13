@@ -4,7 +4,15 @@
 #include <cmath>
 #include <cstring>
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 #include "driver_log.h"
+#include "protocol.h"
+#include "udp_socket.h"
 
 namespace {
 
@@ -15,6 +23,17 @@ std::string GetStringSetting(const char* key)
     char buffer[256] = {};
     vr::VRSettings()->GetString(kSettingsSection, key, buffer, sizeof(buffer));
     return buffer;
+}
+
+// Ctrl+Alt+R on the PC keyboard recenters the view.
+bool RecenterHotkeyDown()
+{
+#if defined(_WIN32)
+    return (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_MENU) & 0x8000) &&
+           (GetAsyncKeyState('R') & 0x8000);
+#else
+    return false;
+#endif
 }
 
 }  // namespace
@@ -94,6 +113,7 @@ HmdDevice::HmdDevice()
     model_number_ = GetStringSetting("model_number");
     display_frequency_ = vr::VRSettings()->GetFloat(kSettingsSection, "display_frequency");
     head_height_ = vr::VRSettings()->GetFloat(kSettingsSection, "head_height_meters");
+    udp_port_ = vr::VRSettings()->GetInt32(kSettingsSection, "udp_port");
 
     DisplayConfig config;
     config.window_x = vr::VRSettings()->GetInt32(kSettingsSection, "window_x");
@@ -126,14 +146,18 @@ vr::EVRInitError HmdDevice::Activate(uint32_t object_id)
     vr::VRProperties()->SetBoolProperty(container, vr::Prop_IsOnDesktop_Bool, false);
     vr::VRProperties()->SetBoolProperty(container, vr::Prop_DisplayDebugMode_Bool, true);
 
-    pose_thread_ = std::thread(&HmdDevice::PoseThread, this);
+    {
+        std::lock_guard<std::mutex> lock(pose_mutex_);
+        last_pose_ = MakePose(false);
+    }
+    tracking_thread_ = std::thread(&HmdDevice::TrackingThread, this);
     return vr::VRInitError_None;
 }
 
 void HmdDevice::Deactivate()
 {
-    if (active_.exchange(false) && pose_thread_.joinable()) {
-        pose_thread_.join();
+    if (active_.exchange(false) && tracking_thread_.joinable()) {
+        tracking_thread_.join();
     }
     device_index_ = vr::k_unTrackedDeviceIndexInvalid;
 }
@@ -157,23 +181,77 @@ void HmdDevice::DebugRequest(const char*, char* response_buffer, uint32_t respon
 
 vr::DriverPose_t HmdDevice::GetPose()
 {
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+    return last_pose_;
+}
+
+vr::DriverPose_t HmdDevice::MakePose(bool receiving) const
+{
     vr::DriverPose_t pose{};
     pose.qWorldFromDriverRotation.w = 1.0;
     pose.qDriverFromHeadRotation.w = 1.0;
-    // Fixed orientation for now; milestone 1 replaces it with the phone's sensors.
-    pose.qRotation.w = 1.0;
+
+    const Quat orientation = tracker_.Orientation();
+    pose.qRotation.w = orientation.w;
+    pose.qRotation.x = orientation.x;
+    pose.qRotation.y = orientation.y;
+    pose.qRotation.z = orientation.z;
+
+    const Vec3 angular_velocity = tracker_.AngularVelocity();
+    pose.vecAngularVelocity[0] = angular_velocity.x;
+    pose.vecAngularVelocity[1] = angular_velocity.y;
+    pose.vecAngularVelocity[2] = angular_velocity.z;
+
+    // 3DoF: the head stays at a fixed height; SteamVR's head model adds the neck movement.
     pose.vecPosition[1] = head_height_;
     pose.poseIsValid = true;
     pose.deviceIsConnected = true;
-    pose.result = vr::TrackingResult_Running_OK;
+    pose.result = receiving ? vr::TrackingResult_Running_OK : vr::TrackingResult_Running_OutOfRange;
     pose.shouldApplyHeadModel = true;
     return pose;
 }
 
-void HmdDevice::PoseThread()
+void HmdDevice::TrackingThread()
 {
+    UdpSocket socket;
+    if (socket.Open(static_cast<uint16_t>(udp_port_), 100)) {
+        DriverLog("Listening for the phone on UDP port %d", udp_port_);
+    } else {
+        DriverLog("Could not listen on UDP port %d", udp_port_);
+    }
+
+    using Clock = std::chrono::steady_clock;
+    Clock::time_point last_sample = Clock::now() - std::chrono::hours(1);
+    bool hotkey_was_down = false;
+    uint8_t buffer[1500];
+
     while (active_) {
-        vr::VRServerDriverHost()->TrackedDevicePoseUpdated(device_index_, GetPose(), sizeof(vr::DriverPose_t));
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        const int size = socket.Receive(buffer, sizeof(buffer));
+        protocol::Packet packet;
+        if (size > 0 && protocol::Parse(buffer, static_cast<size_t>(size), packet)) {
+            if (packet.type == protocol::PacketType::Sensors) {
+                if (tracker_.AddSample(packet)) {
+                    last_sample = Clock::now();
+                }
+            } else if (packet.type == protocol::PacketType::Recenter) {
+                tracker_.Recenter();
+                DriverLog("Recentered from the phone");
+            }
+        }
+
+        const bool hotkey_down = RecenterHotkeyDown();
+        if (hotkey_down && !hotkey_was_down) {
+            tracker_.Recenter();
+            DriverLog("Recentered from the keyboard");
+        }
+        hotkey_was_down = hotkey_down;
+
+        const bool receiving = Clock::now() - last_sample < std::chrono::seconds(1);
+        const vr::DriverPose_t pose = MakePose(receiving);
+        {
+            std::lock_guard<std::mutex> lock(pose_mutex_);
+            last_pose_ = pose;
+        }
+        vr::VRServerDriverHost()->TrackedDevicePoseUpdated(device_index_, pose, sizeof(vr::DriverPose_t));
     }
 }
