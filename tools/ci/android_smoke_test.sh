@@ -20,7 +20,13 @@ fail() {
 
 # Taps the centre of the first view whose uiautomator node matches the regex $1.
 tap_node() {
-    adb shell uiautomator dump /sdcard/ui.xml > /dev/null
+    local attempt
+    for attempt in 1 2 3; do
+        adb shell rm -f /sdcard/ui.xml
+        adb shell uiautomator dump /sdcard/ui.xml > /dev/null 2>&1
+        adb shell ls /sdcard/ui.xml > /dev/null 2>&1 && break
+        sleep 2
+    done
     local bounds
     bounds=$(adb shell cat /sdcard/ui.xml | tr '>' '\n' | grep -E "$1" | head -1 |
         grep -oE 'bounds="\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]"' | grep -oE '[0-9]+')

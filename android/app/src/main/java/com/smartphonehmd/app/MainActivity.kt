@@ -168,16 +168,24 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private fun updateStatus() {
         val error = streamer.lastError ?: receiver?.lastError
         if (!streaming) {
-            statusText.text = if (error != null) "Error: $error" else "Escribe la IP de la PC y pulsa Iniciar"
+            statusText.setIfChanged(if (error != null) "Error: $error" else "Escribe la IP de la PC y pulsa Iniciar")
             return
         }
         val frames = receiver?.framesShown?.get() ?: 0
-        videoStatus.visibility = if (frames == 0 || error != null) View.VISIBLE else View.GONE
-        videoStatus.text = when {
-            error != null -> "Error: $error"
-            else -> "Enviando sensores a ${pcIp()} (${streamer.packetsSent.get()} paquetes)\n" +
-                "Esperando el video de SteamVR…\nAtrás: detener · Volumen: recentrar"
-        }
+        val overlayVisibility = if (frames == 0 || error != null) View.VISIBLE else View.GONE
+        if (videoStatus.visibility != overlayVisibility) videoStatus.visibility = overlayVisibility
+        videoStatus.setIfChanged(
+            when {
+                error != null -> "Error: $error"
+                else -> "Enviando sensores a ${pcIp()} (${streamer.packetsSent.get()} paquetes)\n" +
+                    "Esperando el video de SteamVR…\nAtrás: detener · Volumen: recentrar"
+            },
+        )
+    }
+
+    // Avoids redrawing (and relayout) every tick when nothing changed.
+    private fun TextView.setIfChanged(value: String) {
+        if (text.toString() != value) text = value
     }
 
     private fun pcIp() = ipField.text.toString().trim()
