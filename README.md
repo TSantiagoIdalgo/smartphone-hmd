@@ -46,20 +46,30 @@ Para quitarlo, usa `removedriver` con la misma ruta.
 Si SteamVR no muestra el visor, abre `Steam\config\steamvr.vrsettings` y añade dentro de la sección
 `"steamvr"` la línea `"forcedDriver": "smartphone_hmd",`.
 
-## Probar el seguimiento de la cabeza
+## Probar con el móvil
 
 1. Instala el APK en el móvil y el driver en SteamVR (ver arriba).
-2. Conecta el móvil y la PC a la misma red Wi-Fi. Averigua la IP de la PC con `ipconfig`.
-3. Abre SteamVR. La primera vez Windows puede preguntar si `vrserver.exe` puede usar la red:
+2. Pon en el driver la resolución de la pantalla del móvil en horizontal: en
+   `smartphone_hmd\resources\settings\default.vrsettings` cambia `window_width` y `window_height`
+   (por ejemplo 2400 y 1080). Deben ser números pares.
+3. Conecta el móvil y la PC a la misma red Wi-Fi. Averigua la IP de la PC con `ipconfig`.
+4. Abre SteamVR. La primera vez Windows puede preguntar si `vrserver.exe` puede usar la red:
    permítelo en redes privadas. Si no pregunta y no llegan datos, permite el puerto UDP 9944 en el
    firewall de Windows.
-4. En el móvil escribe la IP de la PC y pulsa **Iniciar**.
-5. En SteamVR abre **Mostrar vista de VR** (Display VR View). Al girar el móvil, la vista estéreo
-   debe girar igual.
+5. En el móvil escribe la IP de la PC y pulsa **Iniciar**. El móvil pasa a pantalla completa y, en
+   unos segundos, muestra la imagen estéreo de SteamVR. Al girar el móvil, la vista gira igual.
+   **Atrás** detiene el envío.
 
 Para recentrar la vista, pulsa cualquier botón de volumen del móvil o **Ctrl+Alt+R** en la PC.
 
 El móvil va en horizontal dentro del visor, con la pantalla hacia los ojos y la parte de arriba del
 teléfono a la izquierda.
+
+La calidad del video se ajusta con `video_bitrate_mbps` (por defecto 20) en el mismo archivo de
+configuración. Si la imagen se corta o llega con retraso, prueba un router de 5 GHz, bajar ese valor
+o conectar el móvil por cable USB con el anclaje USB activado.
+
+Si no llega la imagen, busca las líneas que contienen `smartphone_hmd` en
+`Steam\logs\vrserver.txt`: dicen qué GPU y qué codificador se usan y si algo falló.
 
 Sin el móvil, `python tools/sim/send_imu.py` envía datos que giran la cabeza a izquierda y derecha.

@@ -60,6 +60,17 @@ bool UdpSocket::Open(uint16_t port, int timeout_ms)
     return true;
 }
 
+bool UdpSocket::OpenForSending()
+{
+    Close();
+    SocketHandle s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == kInvalid) {
+        return false;
+    }
+    socket_ = s;
+    return true;
+}
+
 void UdpSocket::Close()
 {
     if (socket_ != kInvalid) {
@@ -68,11 +79,34 @@ void UdpSocket::Close()
     }
 }
 
-int UdpSocket::Receive(uint8_t* buffer, size_t size)
+int UdpSocket::Receive(uint8_t* buffer, size_t size, uint32_t* sender_ipv4)
 {
     if (socket_ == kInvalid) {
         return -1;
     }
-    const auto received = recv(static_cast<SocketHandle>(socket_), reinterpret_cast<char*>(buffer), static_cast<int>(size), 0);
-    return received < 0 ? -1 : static_cast<int>(received);
+    sockaddr_in sender{};
+    socklen_t sender_size = sizeof(sender);
+    const auto received = recvfrom(static_cast<SocketHandle>(socket_), reinterpret_cast<char*>(buffer),
+                                   static_cast<int>(size), 0, reinterpret_cast<sockaddr*>(&sender), &sender_size);
+    if (received < 0) {
+        return -1;
+    }
+    if (sender_ipv4) {
+        *sender_ipv4 = sender.sin_addr.s_addr;
+    }
+    return static_cast<int>(received);
+}
+
+bool UdpSocket::SendTo(uint32_t ipv4, uint16_t port, const uint8_t* data, size_t size)
+{
+    if (socket_ == kInvalid) {
+        return false;
+    }
+    sockaddr_in target{};
+    target.sin_family = AF_INET;
+    target.sin_addr.s_addr = ipv4;
+    target.sin_port = htons(port);
+    const auto sent = sendto(static_cast<SocketHandle>(socket_), reinterpret_cast<const char*>(data),
+                             static_cast<int>(size), 0, reinterpret_cast<const sockaddr*>(&target), sizeof(target));
+    return sent >= 0 && static_cast<size_t>(sent) == size;
 }

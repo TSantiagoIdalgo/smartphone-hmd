@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 class SensorStreamer(private val sensorManager: SensorManager) : SensorEventListener {
     private var thread: HandlerThread? = null
-    private var handler: Handler? = null
+    @Volatile private var handler: Handler? = null
     private var socket: DatagramSocket? = null
     private var target: InetAddress? = null
 
@@ -72,9 +72,14 @@ class SensorStreamer(private val sensorManager: SensorManager) : SensorEventList
         handler = null
     }
 
-    fun recenter() {
+    fun recenter() = sendCommand(Protocol.TYPE_RECENTER)
+
+    /** Asks the PC for a video keyframe. Safe to call from any thread. */
+    fun requestKeyframe() = sendCommand(Protocol.TYPE_KEYFRAME_REQUEST)
+
+    private fun sendCommand(type: Byte) {
         handler?.post {
-            Protocol.writeCommand(buffer, Protocol.TYPE_RECENTER, ++seq, SystemClock.elapsedRealtimeNanos())
+            Protocol.writeCommand(buffer, type, ++seq, SystemClock.elapsedRealtimeNanos())
             send(Protocol.HEADER_SIZE)
         }
     }

@@ -21,6 +21,8 @@ set(DRIVER_OUTPUT_DIR ${CMAKE_BINARY_DIR}/smartphone_hmd)
 add_library(tracking STATIC
   src/protocol.cpp
   src/head_tracker.cpp
+  src/video_protocol.cpp
+  src/color_convert.cpp
 )
 target_include_directories(tracking PUBLIC src)
 set_target_properties(tracking PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -34,7 +36,14 @@ add_library(driver_smartphone_hmd SHARED
 target_include_directories(driver_smartphone_hmd SYSTEM PRIVATE third_party/openvr)
 target_link_libraries(driver_smartphone_hmd PRIVATE tracking)
 if(WIN32)
-  target_link_libraries(driver_smartphone_hmd PRIVATE ws2_32)
+  # Video streaming: D3D11 frame capture and Media Foundation H.264 encoding.
+  target_sources(driver_smartphone_hmd PRIVATE
+    src/frame_capture.cpp
+    src/h264_encoder.cpp
+    src/video_streamer.cpp
+    src/virtual_display.cpp
+  )
+  target_link_libraries(driver_smartphone_hmd PRIVATE ws2_32 d3d11 dxgi mfplat mfuuid strmiids ole32 oleaut32)
 endif()
 # "$<0:>" stops multi-config generators (Visual Studio) from adding a Release/ subfolder.
 set_target_properties(driver_smartphone_hmd PROPERTIES

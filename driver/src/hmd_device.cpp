@@ -5,14 +5,22 @@
 #include <cstring>
 
 #if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #endif
 
 #include "driver_log.h"
 #include "protocol.h"
 #include "udp_socket.h"
+#if defined(_WIN32)
+#include "video_streamer.h"
+#include "virtual_display.h"
+#endif
 
 namespace {
 
@@ -54,7 +62,7 @@ void DisplayComponent::GetWindowBounds(int32_t* x, int32_t* y, uint32_t* width, 
 
 bool DisplayComponent::IsDisplayOnDesktop()
 {
-    return true;
+    return config_.on_desktop;
 }
 
 bool DisplayComponent::IsDisplayRealDisplay()
@@ -123,10 +131,25 @@ HmdDevice::HmdDevice()
     config.render_width = vr::VRSettings()->GetInt32(kSettingsSection, "render_width");
     config.render_height = vr::VRSettings()->GetInt32(kSettingsSection, "render_height");
     config.fov_degrees = vr::VRSettings()->GetFloat(kSettingsSection, "fov_degrees");
+
+#if defined(_WIN32)
+    const int bitrate = vr::VRSettings()->GetInt32(kSettingsSection, "video_bitrate_mbps") * 1000000;
+    video_ = std::make_unique<VideoStreamer>();
+    if (video_->Start(static_cast<int>(display_frequency_), bitrate, &adapter_luid_)) {
+        virtual_display_ = std::make_unique<VirtualDisplay>(video_.get(), display_frequency_);
+        config.on_desktop = false;
+    } else {
+        DriverLog("Video streaming unavailable; showing the HMD in a desktop window instead");
+        video_.reset();
+        adapter_luid_ = 0;
+    }
+#endif
     display_ = std::make_unique<DisplayComponent>(config);
 
     DriverLog("Smartphone HMD created: %s (%s)", model_number_.c_str(), serial_number_.c_str());
 }
+
+HmdDevice::~HmdDevice() = default;
 
 vr::EVRInitError HmdDevice::Activate(uint32_t object_id)
 {
@@ -144,7 +167,12 @@ vr::EVRInitError HmdDevice::Activate(uint32_t object_id)
     vr::VRProperties()->SetFloatProperty(container, vr::Prop_UserHeadToEyeDepthMeters_Float, 0.0f);
     vr::VRProperties()->SetFloatProperty(container, vr::Prop_SecondsFromVsyncToPhotons_Float, 0.011f);
     vr::VRProperties()->SetBoolProperty(container, vr::Prop_IsOnDesktop_Bool, false);
-    vr::VRProperties()->SetBoolProperty(container, vr::Prop_DisplayDebugMode_Bool, true);
+    if (adapter_luid_ != 0) {
+        // Frames go to the phone: SteamVR must render on the same GPU we capture from.
+        vr::VRProperties()->SetUint64Property(container, vr::Prop_GraphicsAdapterLuid_Uint64, adapter_luid_);
+    } else {
+        vr::VRProperties()->SetBoolProperty(container, vr::Prop_DisplayDebugMode_Bool, true);
+    }
 
     {
         std::lock_guard<std::mutex> lock(pose_mutex_);
@@ -159,6 +187,11 @@ void HmdDevice::Deactivate()
     if (active_.exchange(false) && tracking_thread_.joinable()) {
         tracking_thread_.join();
     }
+#if defined(_WIN32)
+    if (video_) {
+        video_->Stop();
+    }
+#endif
     device_index_ = vr::k_unTrackedDeviceIndexInvalid;
 }
 
@@ -169,6 +202,11 @@ void* HmdDevice::GetComponent(const char* component_name_and_version)
     if (std::strcmp(component_name_and_version, vr::IVRDisplayComponent_Version) == 0) {
         return display_.get();
     }
+#if defined(_WIN32)
+    if (virtual_display_ && std::strcmp(component_name_and_version, vr::IVRVirtualDisplay_Version) == 0) {
+        return virtual_display_.get();
+    }
+#endif
     return nullptr;
 }
 
@@ -226,16 +264,28 @@ void HmdDevice::TrackingThread()
     uint8_t buffer[1500];
 
     while (active_) {
-        const int size = socket.Receive(buffer, sizeof(buffer));
+        uint32_t sender = 0;
+        const int size = socket.Receive(buffer, sizeof(buffer), &sender);
         protocol::Packet packet;
         if (size > 0 && protocol::Parse(buffer, static_cast<size_t>(size), packet)) {
             if (packet.type == protocol::PacketType::Sensors) {
                 if (tracker_.AddSample(packet)) {
                     last_sample = Clock::now();
+#if defined(_WIN32)
+                    if (video_) {
+                        video_->OnPhonePacket(sender);
+                    }
+#endif
                 }
             } else if (packet.type == protocol::PacketType::Recenter) {
                 tracker_.Recenter();
                 DriverLog("Recentered from the phone");
+            } else if (packet.type == protocol::PacketType::KeyframeRequest) {
+#if defined(_WIN32)
+                if (video_) {
+                    video_->RequestKeyframe();
+                }
+#endif
             }
         }
 

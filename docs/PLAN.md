@@ -81,8 +81,9 @@ Todos los números en little-endian. Puerto 9944 en la PC (móvil → PC) y 9945
 Tamaño: 56 bytes. Los paquetes de tipo 2 y 3 llevan solo los primeros 20 bytes.
 
 **PC → móvil (video):** cada fotograma H.264 se parte en trozos de hasta 1400 bytes con una cabecera
-de 12 bytes (número de fotograma, índice del trozo, total de trozos). Si el móvil pierde un trozo,
-descarta ese fotograma y pide uno clave (tipo 3).
+de 20 bytes: `'HMV1'`, número de fotograma (u32), índice del trozo (u16), total de trozos (u16),
+banderas (u8, bit 0 = fotograma clave), 3 bytes reservados, ancho (u16) y alto (u16). Si el móvil
+pierde un trozo, descarta ese fotograma y pide uno clave (tipo 3).
 
 ## 5. Estructura del repositorio
 
