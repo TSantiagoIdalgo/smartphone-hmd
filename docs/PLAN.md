@@ -30,7 +30,7 @@ Dos piezas, nada más:
 |---|---|---|
 | App de escritorio | Todo dentro del driver de SteamVR, sin `.exe` aparte | SteamVR exige un driver en C++ igualmente; un segundo programa solo añade IPC. |
 | Seguimiento | Solo rotación (3DoF), altura de la cabeza fija | Un móvil no puede medir posición de forma fiable sin cámaras. |
-| Fusión de sensores | En la PC, filtro Madgwick sobre los datos crudos | Cumple el requisito de enviar los datos "puros" y limpiarlos en la PC. |
+| Fusión de sensores | En la PC, filtro complementario (Mahony) sobre los datos crudos | Cumple el requisito de enviar los datos "puros" y limpiarlos en la PC, con menos código que otras opciones. |
 | Imagen hacia el móvil | Video H.264 por UDP, codificado con Media Foundation (incluido en Windows, usa la GPU) y decodificado con MediaCodec | Sin dependencias externas y funciona con GPU NVIDIA, AMD o Intel. |
 | Conexión | Wi-Fi. También funciona por cable USB con "Anclaje USB" activado, con el mismo código | El cable da menos latencia cuando el Wi-Fi no alcanza. |
 | Configuración de red | En el móvil se escribe la IP de la PC; la PC responde a la dirección de la que le llegan los sensores | Nada que configurar en la PC. |
@@ -46,9 +46,10 @@ Dos piezas, nada más:
 2. **La PC recibe, limpia y entrega a SteamVR.** El driver:
    - descarta paquetes duplicados, desordenados o con valores imposibles (NaN, giro > 35 rad/s);
    - estima el sesgo del giroscopio cuando el móvil está quieto;
-   - fusiona giroscopio + acelerómetro (+ magnetómetro opcional) con Madgwick;
+   - fusiona giroscopio + acelerómetro con un filtro complementario (el magnetómetro se envía, pero
+     solo se usará si la deriva horizontal molesta);
    - convierte los ejes del móvil (en horizontal dentro del visor) a los ejes de SteamVR;
-   - predice la orientación unos milisegundos hacia adelante para compensar la latencia;
+   - entrega también la velocidad angular, para que SteamVR prediga la orientación y compense la latencia;
    - informa la pose a SteamVR como un HMD.
 3. **Vista por ojo redimensionable.** El móvil recibe la imagen lado a lado (ojo izquierdo | ojo
    derecho) y dibuja cada mitad en un rectángulo configurable: ancho, alto, separación entre centros
@@ -77,7 +78,7 @@ Todos los números en little-endian. Puerto 9944 en la PC (móvil → PC) y 9945
 | accel x,y,z | f32 × 3 | m/s² |
 | mag x,y,z | f32 × 3 | µT (0 si no hay) |
 
-Tamaño: 56 bytes. Los paquetes de tipo 2 y 3 llevan solo la cabecera (16 bytes).
+Tamaño: 56 bytes. Los paquetes de tipo 2 y 3 llevan solo los primeros 20 bytes.
 
 **PC → móvil (video):** cada fotograma H.264 se parte en trozos de hasta 1400 bytes con una cabecera
 de 12 bytes (número de fotograma, índice del trozo, total de trozos). Si el móvil pierde un trozo,

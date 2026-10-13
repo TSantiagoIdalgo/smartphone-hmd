@@ -2,9 +2,11 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 
+#include "head_tracker.h"
 #include "openvr_driver.h"
 
 struct DisplayConfig {
@@ -49,15 +51,22 @@ public:
     const std::string& SerialNumber() const { return serial_number_; }
 
 private:
-    void PoseThread();
+    // Receives the phone's packets, updates the tracker and sends each new pose to SteamVR.
+    void TrackingThread();
+    vr::DriverPose_t MakePose(bool receiving) const;
 
     std::string serial_number_;
     std::string model_number_;
     float display_frequency_ = 60.0f;
     float head_height_ = 1.7f;
+    int32_t udp_port_ = 9944;
     std::unique_ptr<DisplayComponent> display_;
+
+    HeadTracker tracker_;  // only touched by the tracking thread
+    std::mutex pose_mutex_;
+    vr::DriverPose_t last_pose_{};
 
     std::atomic<bool> active_{false};
     std::atomic<uint32_t> device_index_{vr::k_unTrackedDeviceIndexInvalid};
-    std::thread pose_thread_;
+    std::thread tracking_thread_;
 };
