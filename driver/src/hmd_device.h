@@ -75,6 +75,7 @@ private:
     vr::VRInputComponentHandle_t proximity_ = vr::k_ulInvalidInputComponentHandle;
 
     HeadTracker tracker_;  // only touched by the tracking thread
+    double prediction_seconds_ = 0.0;  // same
     std::mutex pose_mutex_;
     vr::DriverPose_t last_pose_{};
 

@@ -5,11 +5,12 @@ import java.nio.ByteOrder
 
 /**
  * Rebuilds H.264 frames from the PC's UDP video packets (format in the driver's video_protocol.h).
- * Calls [onFrame] for every complete frame and [onLoss] when a frame went missing.
+ * Calls [onFrame] for every complete frame and [onLoss] when a frame went missing. `sensorSeq` is
+ * the low 24 bits of the newest sensor packet the PC had when it drew the frame (0 if unknown).
  * Not thread-safe: use it from the receiving thread only.
  */
 class FrameAssembler(
-    private val onFrame: (data: ByteArray, size: Int, keyframe: Boolean, width: Int, height: Int) -> Unit,
+    private val onFrame: (data: ByteArray, size: Int, keyframe: Boolean, width: Int, height: Int, sensorSeq: Int) -> Unit,
     private val onLoss: () -> Unit,
 ) {
     private var buffer = ByteArray(512 * 1024)
@@ -22,6 +23,7 @@ class FrameAssembler(
     private var keyframe = false
     private var width = 0
     private var height = 0
+    private var sensorSeq = 0
 
     fun addPacket(packet: ByteArray, length: Int) {
         if (length < HEADER_SIZE || packet[0] != 'H'.code.toByte() || packet[1] != 'M'.code.toByte() ||
@@ -58,7 +60,7 @@ class FrameAssembler(
 
         if (chunksReceived == chunkCount) {
             complete = true
-            onFrame(buffer, frameSize, keyframe, width, height)
+            onFrame(buffer, frameSize, keyframe, width, height, sensorSeq)
         }
     }
 
@@ -69,6 +71,7 @@ class FrameAssembler(
         frameSize = 0
         complete = false
         keyframe = (header.get(12).toInt() and FLAG_KEYFRAME) != 0
+        sensorSeq = header.getInt(12) ushr 8
         width = header.getShort(16).toInt() and 0xFFFF
         height = header.getShort(18).toInt() and 0xFFFF
         if (received.size < count) received = BooleanArray(count) else received.fill(false, 0, count)

@@ -1,4 +1,5 @@
 // Small self-contained tests for the parser and the head tracker. Run with ctest.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -104,6 +105,52 @@ void TestParse()
     CHECK(!protocol::Parse(unknown, sizeof(unknown), p));
 }
 
+void TestDiscoveryAndLatencyPackets()
+{
+    protocol::Packet p;
+    const uint8_t discover[20] = {'H', 'M', 'D', '1', 4};
+    CHECK(protocol::Parse(discover, sizeof(discover), p));
+    CHECK(p.type == protocol::PacketType::Discover);
+
+    // The PC's own answer is not a phone packet.
+    uint8_t reply[protocol::kHeaderSize];
+    CHECK(protocol::WritePcHere(reply) == protocol::kHeaderSize);
+    CHECK(std::memcmp(reply, "HMD1", 4) == 0 && reply[4] == 5);
+    CHECK(!protocol::Parse(reply, sizeof(reply), p));
+
+    std::vector<uint8_t> latency = {'H', 'M', 'D', '1', 6, 0, 0, 0};
+    PutU32(latency, 7);
+    PutU32(latency, 0);
+    PutU32(latency, 0);
+    PutF32(latency, 42.5f);
+    CHECK(latency.size() == protocol::kLatencyPacketSize);
+    CHECK(protocol::Parse(latency.data(), latency.size(), p));
+    CHECK(p.type == protocol::PacketType::Latency);
+    CHECK(p.latency_ms == 42.5f);
+    CHECK(!protocol::Parse(latency.data(), latency.size() - 1, p));  // truncated
+}
+
+void TestPredict()
+{
+    // Turning left (counter-clockwise seen from above, +y in OpenVR) at 90 degrees per second.
+    const Quat start;
+    const Vec3 omega{0, kPi / 2, 0};
+    const Vec3 forward = Rotate(Predict(start, omega, 1.0), Vec3{0, 0, -1});
+    CHECK_NEAR(forward.x, -1.0, 1e-9);  // a quarter turn later, looking left
+    CHECK_NEAR(forward.z, 0.0, 1e-9);
+
+    // Starting from a turned head, the prediction adds to it.
+    const Quat turned = AxisAngle(Vec3{0, 1, 0}, kPi / 4);
+    const Vec3 later = Rotate(Predict(turned, omega, 0.5), Vec3{0, 0, -1});
+    CHECK_NEAR(later.x, -1.0, 1e-9);
+
+    // No time or no motion: unchanged.
+    const Quat same = Predict(turned, omega, 0.0);
+    CHECK_NEAR(same.w, turned.w, 1e-12);
+    const Quat still = Predict(turned, Vec3{}, 0.05);
+    CHECK_NEAR(still.y, turned.y, 1e-12);
+}
+
 void TestStillUpright()
 {
     Feeder f;
@@ -195,6 +242,7 @@ void TestPacketize()
 
     video::FrameInfo info;
     info.frame_index = 0x01020304;
+    info.sensor_seq = 0xAB123456;
     info.keyframe = true;
     info.width = 1920;
     info.height = 1080;
@@ -212,6 +260,7 @@ void TestPacketize()
         CHECK(p[8] == i && p[9] == 0);
         CHECK(p[10] == 3 && p[11] == 0);
         CHECK(p[12] == video::kFlagKeyframe);
+        CHECK(p[13] == 0x56 && p[14] == 0x34 && p[15] == 0x12);  // low 24 bits of the sensor seq
         CHECK((p[16] | p[17] << 8) == 1920);
         CHECK((p[18] | p[19] << 8) == 1080);
         rebuilt.insert(rebuilt.end(), p.begin() + video::kHeaderSize, p.end());
@@ -265,6 +314,23 @@ void TestRgbaToNv12()
 
 }  // namespace
 
+void TestRgbaToNv12Parallel()
+{
+    // Odd band boundaries (66 rows on 4 threads) must give exactly the single-threaded result.
+    const int width = 10, height = 66, pitch = width * 4;
+    std::vector<uint8_t> src(pitch * height);
+    for (size_t i = 0; i < src.size(); ++i) src[i] = static_cast<uint8_t>(i * 31 + 7);
+    std::vector<uint8_t> y1(width * height), uv1(width * height / 2), y2(y1.size()), uv2(uv1.size());
+    RgbaToNv12(src.data(), pitch, width, height, false, y1.data(), uv1.data());
+    for (int threads : {1, 3, 4, 40}) {
+        std::fill(y2.begin(), y2.end(), 0);
+        std::fill(uv2.begin(), uv2.end(), 0);
+        RgbaToNv12Parallel(src.data(), pitch, width, height, false, y2.data(), uv2.data(), threads);
+        CHECK(y1 == y2);
+        CHECK(uv1 == uv2);
+    }
+}
+
 void TestMeanLuma()
 {
     // Left half black (16), right half white (235): the sparse grid sees both halves equally.
@@ -282,6 +348,8 @@ void TestMeanLuma()
 int main()
 {
     TestParse();
+    TestDiscoveryAndLatencyPackets();
+    TestPredict();
     TestStillUpright();
     TestTurnLeft();
     TestRecenter();
@@ -291,6 +359,7 @@ int main()
     TestPacketize();
     TestStartsWithSps();
     TestRgbaToNv12();
+    TestRgbaToNv12Parallel();
     TestMeanLuma();
     if (g_failures == 0) {
         std::printf("All tests passed\n");

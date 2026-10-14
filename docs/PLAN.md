@@ -70,7 +70,7 @@ Todos los números en little-endian. Puerto 9944 en la PC (móvil → PC) y 9945
 | Campo | Tipo | Notas |
 |---|---|---|
 | magic | u32 | `'HMD1'` |
-| type | u8 | 1 = sensores, 2 = recentrar, 3 = pedir fotograma clave |
+| type | u8 | 1 = sensores, 2 = recentrar, 3 = pedir fotograma clave, 4 = buscar la PC, 6 = latencia |
 | reserved | u8 × 3 | 0 |
 | seq | u32 | crece en cada paquete |
 | timestamp_ns | i64 | marca de tiempo del sensor (`SensorEvent.timestamp`) |
@@ -78,12 +78,22 @@ Todos los números en little-endian. Puerto 9944 en la PC (móvil → PC) y 9945
 | accel x,y,z | f32 × 3 | m/s² |
 | mag x,y,z | f32 × 3 | µT (0 si no hay) |
 
-Tamaño: 56 bytes. Los paquetes de tipo 2 y 3 llevan solo los primeros 20 bytes.
+Tamaño: 56 bytes. Los paquetes de tipo 2, 3 y 4 llevan solo los primeros 20 bytes. El de tipo 6
+lleva tras ellos la latencia medida en milisegundos (f32, 24 bytes en total; 0 = no anticipar).
+
+**Búsqueda de la PC:** el móvil envía el tipo 4 por difusión (broadcast) al puerto 9944 en cada red
+en la que está (Wi-Fi y anclaje USB), una vez por segundo. El driver responde a quien lo envió con
+una cabecera de tipo 5 (`'HMD1'`, tipo 5, 20 bytes), y el móvil toma la IP de esa respuesta.
 
 **PC → móvil (video):** cada fotograma H.264 se parte en trozos de hasta 1400 bytes con una cabecera
 de 20 bytes: `'HMV1'`, número de fotograma (u32), índice del trozo (u16), total de trozos (u16),
-banderas (u8, bit 0 = fotograma clave), 3 bytes reservados, ancho (u16) y alto (u16). Si el móvil
-pierde un trozo, descarta ese fotograma y pide uno clave (tipo 3).
+banderas (u8, bit 0 = fotograma clave), los 24 bits bajos del seq del último paquete de sensores
+que tenía la PC cuando SteamVR dibujó ese fotograma (u24, 0 = desconocido), ancho (u16) y alto
+(u16). Si el móvil pierde un trozo, descarta ese fotograma y pide uno clave (tipo 3).
+
+**Latencia:** el móvil guarda cuándo envió cada seq y, al mostrar un fotograma, mide el tiempo desde
+el envío del seq que lleva. Envía el promedio con el tipo 6 cada segundo, y el driver anticipa la
+orientación ese tiempo menos los 11 ms que ya cubre SteamVR (hasta 80 ms).
 
 ## 5. Estructura del repositorio
 

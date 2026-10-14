@@ -9,14 +9,18 @@ import org.junit.Test
 
 class FrameAssemblerTest {
     private val frames = mutableListOf<Pair<ByteArray, Boolean>>()
+    private val sensorSeqs = mutableListOf<Int>()
     private var losses = 0
     private val assembler = FrameAssembler(
-        onFrame = { data, size, keyframe, _, _ -> frames.add(data.copyOf(size) to keyframe) },
+        onFrame = { data, size, keyframe, _, _, sensorSeq ->
+            frames.add(data.copyOf(size) to keyframe)
+            sensorSeqs.add(sensorSeq)
+        },
         onLoss = { losses++ },
     )
 
     /** Same packet layout the driver's video::Packetize produces. */
-    private fun packets(frameIndex: Int, data: ByteArray, keyframe: Boolean = false): List<ByteArray> {
+    private fun packets(frameIndex: Int, data: ByteArray, keyframe: Boolean = false, sensorSeq: Int = 0): List<ByteArray> {
         val count = maxOf(1, (data.size + FrameAssembler.MAX_PAYLOAD - 1) / FrameAssembler.MAX_PAYLOAD)
         return (0 until count).map { chunk ->
             val start = chunk * FrameAssembler.MAX_PAYLOAD
@@ -27,7 +31,9 @@ class FrameAssemblerTest {
                 putShort(chunk.toShort())
                 putShort(count.toShort())
                 put((if (keyframe) 1 else 0).toByte())
-                put(ByteArray(3))
+                put(sensorSeq.toByte())
+                put((sensorSeq shr 8).toByte())
+                put((sensorSeq shr 16).toByte())
                 putShort(1920)
                 putShort(1080)
                 put(data, start, end - start)
@@ -81,6 +87,14 @@ class FrameAssemblerTest {
 
         assertEquals(1, frames.size)
         assertEquals(0, losses)
+    }
+
+    @Test
+    fun passesOnTheSensorSeqTheFrameWasDrawnWith() {
+        packets(0, frameData(100, 1), keyframe = true, sensorSeq = 0xABCDEF).forEach(::send)
+
+        assertEquals(listOf(0xABCDEF), sensorSeqs)
+        assertTrue(frames.single().second)
     }
 
     @Test

@@ -11,7 +11,8 @@
 //   8  u16     chunk_index
 //  10  u16     chunk_count
 //  12  u8      flags (bit 0: keyframe)
-//  13  u8[3]   reserved
+//  13  u24     sensor_seq: low 24 bits of the newest phone packet's seq when SteamVR presented
+//              this frame, so the phone can time the whole round trip (0 = unknown)
 //  16  u16     width
 //  18  u16     height
 // Every chunk except the last one carries exactly kMaxPayload bytes.
@@ -24,6 +25,7 @@ constexpr uint8_t kFlagKeyframe = 1;
 
 struct FrameInfo {
     uint32_t frame_index = 0;
+    uint32_t sensor_seq = 0;
     bool keyframe = false;
     uint16_t width = 0;
     uint16_t height = 0;

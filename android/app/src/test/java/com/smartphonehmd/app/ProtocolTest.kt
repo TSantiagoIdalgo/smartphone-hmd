@@ -3,6 +3,8 @@ package com.smartphonehmd.app
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ProtocolTest {
@@ -38,5 +40,29 @@ class ProtocolTest {
         assertEquals(2, buffer.get(4).toInt())
         assertEquals(7, buffer.getInt(8))
         assertEquals(99L, buffer.getLong(12))
+    }
+
+    @Test
+    fun latencyPacketCarriesMillisecondsAfterTheHeader() {
+        val out = ByteArray(Protocol.SENSOR_PACKET_SIZE)
+        Protocol.writeLatency(out, seq = 5, timestampNs = 77L, latencyMs = 42.5f)
+        val buffer = ByteBuffer.wrap(out).order(ByteOrder.LITTLE_ENDIAN)
+        assertEquals(6, buffer.get(4).toInt())
+        assertEquals(5, buffer.getInt(8))
+        assertEquals(42.5f, buffer.getFloat(20))
+    }
+
+    @Test
+    fun recognisesOnlyThePcsAnswer() {
+        val answer = ByteArray(Protocol.HEADER_SIZE)
+        Protocol.writeCommand(answer, Protocol.TYPE_PC_HERE, seq = 0, timestampNs = 0L)
+        assertTrue(Protocol.isPcHere(answer, answer.size))
+        assertFalse(Protocol.isPcHere(answer, Protocol.HEADER_SIZE - 1))
+
+        val discover = ByteArray(Protocol.HEADER_SIZE)
+        Protocol.writeCommand(discover, Protocol.TYPE_DISCOVER, seq = 0, timestampNs = 0L)
+        assertFalse(Protocol.isPcHere(discover, discover.size))
+        answer[0] = 'X'.code.toByte()
+        assertFalse(Protocol.isPcHere(answer, answer.size))
     }
 }

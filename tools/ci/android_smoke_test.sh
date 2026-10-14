@@ -96,6 +96,7 @@ sleep 2
 alive || fail "The app closed after tapping the screen"
 view_visible 'AdjustPanel' || fail "The eye adjustment did not open"
 has_node 'Ancho de cada ojo' || fail "The eye adjustment has no sliders"
+has_node 'Anticipar el movimiento' || fail "The eye adjustment has no prediction switch"
 adb shell input keyevent 4
 sleep 2
 alive || fail "The app closed after closing the eye adjustment"
@@ -122,6 +123,19 @@ sleep 2
 adb shell am start -W -n "$PKG/.MainActivity"
 sleep 3
 alive || fail "The app closed after coming back from the background"
+
+echo "== Starting with no IP, so the app searches for the PC"
+tap_node 'class="android.widget.EditText"' || fail "Could not find the IP field"
+adb shell input keyevent 123 # move to the end of the text
+adb shell input keyevent 67 67 67 67 67 67 67 67 67 67 67 67 67 67 67 67 # delete it
+adb shell input keyevent 111
+tap_node 'text="Iniciar"' || fail "Could not find the Iniciar button"
+sleep 5
+alive || fail "The app closed after pressing Iniciar with no IP"
+view_visible 'GLSurfaceView' || fail "The video screen did not appear with no IP"
+adb shell input keyevent 4
+sleep 2
+alive || fail "The app closed after stopping the search"
 
 echo "Smoke test passed"
 adb logcat -d | grep -E "AndroidRuntime" | tail -50 || true

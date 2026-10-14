@@ -52,18 +52,24 @@ Si SteamVR no muestra el visor, abre `Steam\config\steamvr.vrsettings` y añade 
 2. Pon en el driver la resolución de la pantalla del móvil en horizontal: en
    `smartphone_hmd\resources\settings\default.vrsettings` cambia `window_width` y `window_height`
    (por ejemplo 2400 y 1080). Deben ser números pares.
-3. Conecta el móvil y la PC a la misma red Wi-Fi. Averigua la IP de la PC con `ipconfig`.
+3. Conecta el móvil a la PC por cable USB con el anclaje USB activado, o pon los dos en la misma
+   red Wi-Fi.
 4. Abre SteamVR. La primera vez Windows puede preguntar si `vrserver.exe` puede usar la red:
    permítelo en redes privadas. Si no pregunta y no llegan datos, permite el puerto UDP 9944 en el
    firewall de Windows.
-5. En el móvil escribe la IP de la PC y pulsa **Iniciar**. El móvil pasa a pantalla completa y, en
-   unos segundos, muestra la imagen estéreo de SteamVR. Al girar el móvil, la vista gira igual.
-   **Atrás** detiene el envío.
+5. Abre la app en el móvil: busca la PC sola y, al encontrarla, muestra su IP. Pulsa **Iniciar**.
+   El móvil pasa a pantalla completa y, en unos segundos, muestra la imagen estéreo de SteamVR. Al
+   girar el móvil, la vista gira igual. **Atrás** detiene el envío.
 6. Abre SteamVR Home o un juego. Sin ninguna aplicación abierta, lo que dibuja SteamVR puede verse
    casi negro.
 7. Toca la pantalla del móvil para ajustar cada ojo a tu visor (ver más abajo).
 
 Para recentrar la vista, pulsa cualquier botón de volumen del móvil o **Ctrl+Alt+R** en la PC.
+
+Si la app no encuentra la PC (algunos routers bloquean la búsqueda), escribe su IP, que da
+`ipconfig` en la PC. Puedes pulsar **Iniciar** aunque aún no la haya encontrado: empieza en cuanto
+aparezca. Si el video se corta, por ejemplo al desenchufar el cable o porque la PC cambió de IP, la
+app vuelve a buscarla y sigue sola por la nueva conexión.
 
 El móvil va en horizontal dentro del visor, con la pantalla hacia los ojos y la parte de arriba del
 teléfono a la izquierda.
@@ -89,11 +95,20 @@ panel lo cierran.
 La imagen de cada ojo abarca 90° de ancho y de alto (`fov_degrees` en el driver), así que se ve sin
 estirar cuando el ancho y el alto son iguales.
 
+## Latencia
+
+El panel de ajuste muestra la **latencia medida**: el tiempo desde que el móvil envía un movimiento
+hasta que muestra la imagen dibujada con él. Con **Anticipar el movimiento de la cabeza** marcado
+(viene activado), la PC dibuja cada imagen con la posición que tendrá la cabeza cuando llegue a la
+pantalla, así que la vista sigue al giro sin arrastrarse. Si notas que la imagen se adelanta o
+tiembla en giros bruscos, desmárcalo. En `vrserver.txt` la línea `Phone latency` dice cuánto se
+anticipa.
+
 ## Calidad del video
 
 La calidad del video se ajusta con `video_bitrate_mbps` (por defecto 20) en `default.vrsettings`, el
-mismo archivo de la resolución. Si la imagen se corta o llega con retraso, prueba un router de
-5 GHz, bajar ese valor o conectar el móvil por cable USB con el anclaje USB activado.
+mismo archivo de la resolución. Si la imagen se corta o llega con retraso, conecta el móvil por
+cable USB con el anclaje USB activado, prueba un router de 5 GHz o baja ese valor.
 
 Si no llega la imagen:
 

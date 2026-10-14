@@ -5,6 +5,8 @@
     <!-- Sensors above 200 Hz. Without it, Android 12+ throws when a debug build asks for
          SENSOR_DELAY_FASTEST, and silently caps release builds at 200 Hz. -->
     <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />
+    <!-- A Wi-Fi lock while streaming, so power saving does not delay packets. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
         android:label="Smartphone HMD"

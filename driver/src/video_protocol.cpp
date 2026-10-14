@@ -31,7 +31,9 @@ void Packetize(const FrameInfo& info, const uint8_t* data, size_t size, const Se
     PutU32(packet + 4, info.frame_index);
     PutU16(packet + 10, static_cast<uint16_t>(chunk_count));
     packet[12] = info.keyframe ? kFlagKeyframe : 0;
-    packet[13] = packet[14] = packet[15] = 0;
+    packet[13] = static_cast<uint8_t>(info.sensor_seq);
+    packet[14] = static_cast<uint8_t>(info.sensor_seq >> 8);
+    packet[15] = static_cast<uint8_t>(info.sensor_seq >> 16);
     PutU16(packet + 16, info.width);
     PutU16(packet + 18, info.height);
 

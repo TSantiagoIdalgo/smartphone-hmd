@@ -48,3 +48,13 @@ inline Vec3 Rotate(Quat q, Vec3 v)
     const Quat r = q * Quat{0, v.x, v.y, v.z} * Conjugate(q);
     return {r.x, r.y, r.z};
 }
+
+// Where `orientation` will be after `seconds` turning at `world_angular_velocity` (rad/s).
+inline Quat Predict(Quat orientation, Vec3 world_angular_velocity, double seconds)
+{
+    const double speed = Length(world_angular_velocity);
+    if (speed <= 0.0 || seconds <= 0.0) {
+        return orientation;
+    }
+    return Normalize(AxisAngle(world_angular_velocity * (1.0 / speed), speed * seconds) * orientation);
+}

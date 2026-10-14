@@ -1,9 +1,15 @@
 #include "video_streamer.h"
 
+#include <array>
 #include <chrono>
 #include <cstring>
 #include <thread>
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <mmsystem.h>
 #include <objbase.h>
 #include <mfapi.h>
 
@@ -27,6 +33,9 @@ int64_t NowNs()
 constexpr int64_t kMaxSendBitsPerSecond = 200000000;
 
 constexpr int64_t kStatsIntervalNs = 5000000000LL;
+
+// Converting a phone-sized frame to NV12 takes several milliseconds on one core.
+constexpr int kConvertThreads = 4;
 
 }  // namespace
 
@@ -61,8 +70,9 @@ void VideoStreamer::Stop()
     }
 }
 
-void VideoStreamer::OnPhonePacket(uint32_t phone_ipv4)
+void VideoStreamer::OnPhonePacket(uint32_t phone_ipv4, uint32_t seq)
 {
+    phone_seq_ = seq;
     const bool was_active = PhoneActive();
     if (phone_ipv4_.exchange(phone_ipv4) != phone_ipv4 || !was_active) {
         keyframe_requested_ = true;  // a phone that (re)connects needs a keyframe to start decoding
@@ -86,6 +96,7 @@ void VideoStreamer::OnPresent(vr::SharedTextureHandle_t texture)
         ++presented_;
         if (capture_->Copy(texture)) {
             ++copied_;
+            presented_seq_ = phone_seq_;
         }
     }
 }
@@ -101,6 +112,7 @@ void VideoStreamer::OnWaitForPresent()
         }
         frame_width_ = width;
         frame_height_ = height;
+        frame_seq_ = presented_seq_;
         frame_bgra_ = bgra;
         has_frame_ = true;
         frame_ready_.notify_one();
@@ -111,6 +123,8 @@ void VideoStreamer::EncodeThread()
 {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
+    // 1 ms sleeps instead of Windows' default 15.6 ms, for the short waits on the encoder.
+    timeBeginPeriod(1);
 
     UdpSocket socket;
     socket.OpenForSending();
@@ -121,9 +135,12 @@ void VideoStreamer::EncodeThread()
     uint32_t frame_index = 0;
     int64_t frame_count = 0;
     int64_t next_send_ns = 0;
+    // The phone's packet seq for recent frames, by the time stamp the encoder hands back.
+    std::array<std::pair<int64_t, uint32_t>, 8> frame_seqs{};
 
     while (running_) {
         int width = 0, height = 0, source_pitch = 0;
+        uint32_t seq = 0;
         bool bgra = false;
         {
             std::unique_lock<std::mutex> lock(frame_mutex_);
@@ -135,6 +152,7 @@ void VideoStreamer::EncodeThread()
             width = frame_width_;
             height = frame_height_;
             source_pitch = width * 4;
+            seq = frame_seq_;
             bgra = frame_bgra_;
             has_frame_ = false;
         }
@@ -154,21 +172,28 @@ void VideoStreamer::EncodeThread()
         }
 
         nv12.resize(static_cast<size_t>(width) * height * 3 / 2);
-        RgbaToNv12(rgba.data(), source_pitch, width, height, bgra, nv12.data(),
-                   nv12.data() + static_cast<size_t>(width) * height);
+        RgbaToNv12Parallel(rgba.data(), source_pitch, width, height, bgra, nv12.data(),
+                           nv12.data() + static_cast<size_t>(width) * height, kConvertThreads);
         last_luma_ = MeanLuma(nv12.data(), width, height);
 
         const uint32_t phone = phone_ipv4_.load();
-        const int64_t time_100ns = frame_count++ * 10000000LL / fps_;
+        const int64_t time_100ns = frame_count * 10000000LL / fps_;
+        frame_seqs[frame_count % frame_seqs.size()] = {time_100ns, seq};
+        ++frame_count;
         ++encoded_;
         encoder.Encode(nv12.data(), time_100ns, keyframe_requested_.exchange(false),
-                       [&](const uint8_t* data, size_t size, bool keyframe) {
+                       [&](const uint8_t* data, size_t size, bool keyframe, int64_t output_time_100ns) {
                            ++encoded_out_;
                            if (keyframe) {
                                ++keyframes_out_;
                            }
                            video::FrameInfo info;
                            info.frame_index = frame_index++;
+                           for (const auto& entry : frame_seqs) {
+                               if (entry.first == output_time_100ns) {
+                                   info.sensor_seq = entry.second;
+                               }
+                           }
                            info.keyframe = keyframe;
                            info.width = static_cast<uint16_t>(width);
                            info.height = static_cast<uint16_t>(height);
@@ -191,6 +216,7 @@ void VideoStreamer::EncodeThread()
     }
 
     encoder.Shutdown();
+    timeEndPeriod(1);
     MFShutdown();
     CoUninitialize();
 }
