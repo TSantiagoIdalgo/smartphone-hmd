@@ -45,7 +45,8 @@ class FrameAssembler(
             if ((currentFrame >= 0 && !complete) || missedWholeFrames) onLoss()
             startFrame(frameIndex, count, header)
         }
-        if (complete || received[chunkIndex]) return
+        // A corrupt packet can claim more chunks than the frame's first packet did.
+        if (complete || chunkIndex >= chunkCount || received[chunkIndex]) return
 
         val payload = length - HEADER_SIZE
         val offset = chunkIndex * MAX_PAYLOAD

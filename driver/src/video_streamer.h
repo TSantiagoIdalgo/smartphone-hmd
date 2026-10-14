@@ -35,6 +35,7 @@ public:
 private:
     bool PhoneActive() const;
     void EncodeThread();
+    void LogStats();
 
     std::unique_ptr<FrameCapture> capture_;
     int fps_ = 60;
@@ -55,4 +56,18 @@ private:
 
     std::atomic<bool> running_{false};
     std::thread encode_thread_;
+
+    // Counters for the "Video:" log line, written from the tracking thread every few seconds so it
+    // also shows up when the compositor or the encoder stop.
+    std::atomic<int64_t> next_stats_ns_{0};
+    std::atomic<int> presented_{0};
+    std::atomic<int> copied_{0};
+    std::atomic<int> encoded_{0};
+    std::atomic<int> encoded_out_{0};
+    std::atomic<int> keyframes_out_{0};
+    std::atomic<int> packets_sent_{0};
+    std::atomic<int> send_errors_{0};
+    std::atomic<int64_t> bytes_sent_{0};
+    std::atomic<int> last_luma_{-1};
+    int logged_acquire_timeouts_ = 0;
 };

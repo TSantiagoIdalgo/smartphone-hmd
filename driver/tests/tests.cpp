@@ -265,6 +265,20 @@ void TestRgbaToNv12()
 
 }  // namespace
 
+void TestMeanLuma()
+{
+    // Left half black (16), right half white (235): the sparse grid sees both halves equally.
+    const int width = 64, height = 32;
+    std::vector<uint8_t> y(width * height);
+    for (int row = 0; row < height; ++row) {
+        for (int col = 0; col < width; ++col) {
+            y[row * width + col] = col < width / 2 ? 16 : 235;
+        }
+    }
+    CHECK(MeanLuma(y.data(), width, height) == (16 + 235) / 2);
+    CHECK(MeanLuma(y.data(), 8, 8) == 0);  // smaller than one grid step: nothing sampled
+}
+
 int main()
 {
     TestParse();
@@ -277,6 +291,7 @@ int main()
     TestPacketize();
     TestStartsWithSps();
     TestRgbaToNv12();
+    TestMeanLuma();
     if (g_failures == 0) {
         std::printf("All tests passed\n");
         return 0;

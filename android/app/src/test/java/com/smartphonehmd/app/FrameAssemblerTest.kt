@@ -71,6 +71,19 @@ class FrameAssemblerTest {
     }
 
     @Test
+    fun ignoresAChunkBeyondTheFramesChunkCount() {
+        val small = packets(0, frameData(3000, 1)) // 3 chunks
+        val large = packets(0, frameData(14000, 2)) // 10 chunks, same frame index
+        send(small[0])
+        send(large[9])
+        send(small[1])
+        send(small[2])
+
+        assertEquals(1, frames.size)
+        assertEquals(0, losses)
+    }
+
+    @Test
     fun ignoresLatePackets() {
         packets(10, frameData(100, 1)).forEach(::send)
         packets(9, frameData(100, 2)).forEach(::send)

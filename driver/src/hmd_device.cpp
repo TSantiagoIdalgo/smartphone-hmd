@@ -167,6 +167,9 @@ vr::EVRInitError HmdDevice::Activate(uint32_t object_id)
     vr::VRProperties()->SetFloatProperty(container, vr::Prop_UserHeadToEyeDepthMeters_Float, 0.0f);
     vr::VRProperties()->SetFloatProperty(container, vr::Prop_SecondsFromVsyncToPhotons_Float, 0.011f);
     vr::VRProperties()->SetBoolProperty(container, vr::Prop_IsOnDesktop_Bool, false);
+    // Reports the headset as worn while the phone sends data. Otherwise SteamVR puts it in standby
+    // after 5 s without head motion and the compositor stops drawing.
+    vr::VRDriverInput()->CreateBooleanComponent(container, "/proximity", &proximity_);
     if (adapter_luid_ != 0) {
         // Frames go to the phone: SteamVR must render on the same GPU we capture from.
         vr::VRProperties()->SetUint64Property(container, vr::Prop_GraphicsAdapterLuid_Uint64, adapter_luid_);
@@ -261,6 +264,7 @@ void HmdDevice::TrackingThread()
     using Clock = std::chrono::steady_clock;
     Clock::time_point last_sample = Clock::now() - std::chrono::hours(1);
     bool hotkey_was_down = false;
+    bool was_receiving = false;
     uint8_t buffer[1500];
 
     while (active_) {
@@ -297,6 +301,10 @@ void HmdDevice::TrackingThread()
         hotkey_was_down = hotkey_down;
 
         const bool receiving = Clock::now() - last_sample < std::chrono::seconds(1);
+        if (receiving != was_receiving) {
+            vr::VRDriverInput()->UpdateBooleanComponent(proximity_, receiving, 0.0);
+            was_receiving = receiving;
+        }
         const vr::DriverPose_t pose = MakePose(receiving);
         {
             std::lock_guard<std::mutex> lock(pose_mutex_);

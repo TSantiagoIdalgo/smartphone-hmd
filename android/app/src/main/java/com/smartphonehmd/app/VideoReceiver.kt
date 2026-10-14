@@ -27,7 +27,16 @@ class VideoReceiver(
     private var waitingForKeyframe = true
     private var lastKeyframeRequestMs = 0L
 
+    // Counters shown on screen while no video is playing, to tell where the video stops.
+    val packetsReceived = AtomicInteger(0)
+    val framesComplete = AtomicInteger(0)
+    val framesLost = AtomicInteger(0)
+    val keyframes = AtomicInteger(0)
     val framesShown = AtomicInteger(0)
+    @Volatile var lastFrameShownMs = 0L
+        private set
+    @Volatile var decoderName: String? = null
+        private set
     @Volatile var lastError: String? = null
         private set
 
@@ -44,7 +53,10 @@ class VideoReceiver(
     }
 
     private fun receiveLoop() {
-        val assembler = FrameAssembler(::onFrame, onLoss = { waitingForKeyframe = true })
+        val assembler = FrameAssembler(::onFrame, onLoss = {
+            framesLost.incrementAndGet()
+            waitingForKeyframe = true
+        })
         try {
             DatagramSocket(VIDEO_PORT).use { s ->
                 socket = s
@@ -54,6 +66,7 @@ class VideoReceiver(
                 while (running) {
                     try {
                         s.receive(packet)
+                        packetsReceived.incrementAndGet()
                         assembler.addPacket(packet.data, packet.length)
                     } catch (_: SocketTimeoutException) {
                     }
@@ -77,25 +90,37 @@ class VideoReceiver(
     }
 
     private fun onFrame(data: ByteArray, size: Int, keyframe: Boolean, width: Int, height: Int) {
+        framesComplete.incrementAndGet()
+        if (keyframe) keyframes.incrementAndGet()
         if (waitingForKeyframe && !keyframe) return
         waitingForKeyframe = false
 
         if (codec == null || width != codecWidth || height != codecHeight) {
-            if (!keyframe) return
-            if (!configureCodec(width, height)) return
+            if (!keyframe || !configureCodec(width, height)) {
+                waitingForKeyframe = true
+                return
+            }
         }
         val decoder = codec ?: return
         try {
-            val index = decoder.dequeueInputBuffer(INPUT_TIMEOUT_US)
+            // Give a busy decoder some time: skipping a frame breaks the chain until the next keyframe.
+            var index = decoder.dequeueInputBuffer(INPUT_TIMEOUT_US)
+            var tries = 1
+            while (index < 0 && tries < INPUT_TRIES) {
+                drainOutput()
+                index = decoder.dequeueInputBuffer(INPUT_TIMEOUT_US)
+                tries++
+            }
             if (index < 0) {
-                waitingForKeyframe = true // decoder is backed up; skipping a frame breaks the chain
+                waitingForKeyframe = true
                 return
             }
             decoder.getInputBuffer(index)?.apply {
                 clear()
                 put(data, 0, size)
             }
-            decoder.queueInputBuffer(index, 0, size, SystemClock.elapsedRealtimeNanos() / 1000, 0)
+            // Render timestamps must use System.nanoTime's clock.
+            decoder.queueInputBuffer(index, 0, size, System.nanoTime() / 1000, 0)
         } catch (e: Exception) {
             lastError = e.message ?: e.toString()
             releaseCodec()
@@ -109,10 +134,13 @@ class VideoReceiver(
         return try {
             val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+            format.setInteger(MediaFormat.KEY_PRIORITY, 0) // real time
+            format.setInteger("vdec-lowlatency", 1) // MediaTek's own low-latency switch
             val decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
             decoder.configure(format, surface, null, 0)
             decoder.start()
             codec = decoder
+            decoderName = decoder.name
             codecWidth = width
             codecHeight = height
             true
@@ -131,12 +159,17 @@ class VideoReceiver(
                 if (index >= 0) {
                     decoder.releaseOutputBuffer(index, true)
                     framesShown.incrementAndGet()
+                    lastFrameShownMs = SystemClock.elapsedRealtime()
+                    lastError = null
                 } else if (index == MediaCodec.INFO_TRY_AGAIN_LATER) {
                     break
                 }
             }
         } catch (e: Exception) {
+            // A decoder in an error state keeps throwing: start again from the next keyframe.
             lastError = e.message ?: e.toString()
+            releaseCodec()
+            waitingForKeyframe = true
         }
     }
 
@@ -154,6 +187,7 @@ class VideoReceiver(
     companion object {
         const val VIDEO_PORT = 9945
         private const val INPUT_TIMEOUT_US = 5_000L
+        private const val INPUT_TRIES = 10
         private const val KEYFRAME_REQUEST_INTERVAL_MS = 300L
     }
 }

@@ -105,8 +105,25 @@ bool FrameCapture::Copy(uint64_t shared_texture_handle)
         DriverLog("Capturing %ux%u frames, format %d", desc.Width, desc.Height, static_cast<int>(desc.Format));
     }
 
+    // The compositor's backbuffer is shared with a keyed mutex. Without acquiring it, the copy can
+    // run before the compositor finishes drawing, or be dropped and leave the staging texture black.
+    // Same pattern as Valve's virtual_display sample.
+    ComPtr<IDXGIKeyedMutex> mutex;
+    const bool has_mutex = SUCCEEDED(texture.As(&mutex));
+    if (!logged_texture_) {
+        DriverLog("Compositor texture: misc flags 0x%x, %u samples, keyed mutex %s", desc.MiscFlags,
+                  desc.SampleDesc.Count, has_mutex ? "yes" : "no");
+        logged_texture_ = true;
+    }
+    if (has_mutex && mutex->AcquireSync(0, 10) != S_OK) {
+        ++acquire_timeouts_;
+        return false;
+    }
     context_->CopySubresourceRegion(staging_.Get(), 0, 0, 0, 0, texture.Get(), 0, nullptr);
     context_->Flush();
+    if (has_mutex) {
+        mutex->ReleaseSync(0);
+    }
     pending_ = true;
     return true;
 }

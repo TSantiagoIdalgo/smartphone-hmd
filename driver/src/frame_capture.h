@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -20,6 +21,9 @@ public:
     // Waits for the copy and gives `read` the pixels. Returns false if there is nothing to read.
     bool Read(const ReadFunction& read);
 
+    // Frames skipped because the compositor still held the texture.
+    int AcquireTimeouts() const { return acquire_timeouts_; }
+
 private:
     Microsoft::WRL::ComPtr<ID3D11Device> device_;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
@@ -29,4 +33,6 @@ private:
     bool pending_ = false;
     bool bgra_ = false;
     bool warned_format_ = false;
+    bool logged_texture_ = false;
+    std::atomic<int> acquire_timeouts_{0};
 };

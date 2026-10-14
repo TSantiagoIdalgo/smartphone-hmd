@@ -7,6 +7,7 @@ import android.hardware.SensorManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.text.InputType
 import android.view.Gravity
 import android.view.KeyEvent
@@ -171,15 +172,19 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             statusText.setIfChanged(if (error != null) "Error: $error" else "Escribe la IP de la PC y pulsa Iniciar")
             return
         }
-        val frames = receiver?.framesShown?.get() ?: 0
-        val overlayVisibility = if (frames == 0 || error != null) View.VISIBLE else View.GONE
+        // The overlay comes back whenever the video stops, with counters that show where it stops.
+        val r = receiver
+        val playing = r != null && SystemClock.elapsedRealtime() - r.lastFrameShownMs < 1000
+        val overlayVisibility = if (!playing || error != null) View.VISIBLE else View.GONE
         if (videoStatus.visibility != overlayVisibility) videoStatus.visibility = overlayVisibility
+        if (overlayVisibility == View.GONE) return
+        val video = if (r == null) "" else "\nVideo: ${r.packetsReceived.get()} paquetes, " +
+            "${r.framesComplete.get()} fotogramas (${r.keyframes.get()} clave, ${r.framesLost.get()} perdidos), " +
+            "${r.framesShown.get()} mostrados" + (r.decoderName?.let { " con $it" } ?: "")
         videoStatus.setIfChanged(
-            when {
-                error != null -> "Error: $error"
-                else -> "Enviando sensores a ${pcIp()} (${streamer.packetsSent.get()} paquetes)\n" +
-                    "Esperando el video de SteamVR…\nAtrás: detener · Volumen: recentrar"
-            },
+            (if (error != null) "Error: $error\n" else "") +
+                "Enviando sensores a ${pcIp()} (${streamer.packetsSent.get()} paquetes)" + video +
+                "\nEsperando el video de SteamVR…\nAtrás: detener · Volumen: recentrar",
         )
     }
 

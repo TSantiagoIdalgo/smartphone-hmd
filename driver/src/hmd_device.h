@@ -72,6 +72,7 @@ private:
     std::unique_ptr<VirtualDisplay> virtual_display_;
 #endif
     uint64_t adapter_luid_ = 0;
+    vr::VRInputComponentHandle_t proximity_ = vr::k_ulInvalidInputComponentHandle;
 
     HeadTracker tracker_;  // only touched by the tracking thread
     std::mutex pose_mutex_;

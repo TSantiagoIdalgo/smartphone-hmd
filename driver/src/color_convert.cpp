@@ -40,3 +40,17 @@ void RgbaToNv12(const uint8_t* src, int src_pitch, int width, int height, bool b
         }
     }
 }
+
+int MeanLuma(const uint8_t* y, int width, int height)
+{
+    const int step = 16;
+    int64_t sum = 0;
+    int64_t count = 0;
+    for (int row = step / 2; row < height; row += step) {
+        for (int col = step / 2; col < width; col += step) {
+            sum += y[static_cast<int64_t>(row) * width + col];
+            ++count;
+        }
+    }
+    return count > 0 ? static_cast<int>(sum / count) : 0;
+}

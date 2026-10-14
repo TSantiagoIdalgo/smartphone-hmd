@@ -1,7 +1,9 @@
 #include "video_streamer.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <thread>
 
 #include <objbase.h>
 #include <mfapi.h>
@@ -20,6 +22,12 @@ int64_t NowNs()
     return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
         .count();
 }
+
+// Packets of a frame are spread out to this rate. A keyframe sent in one burst from a wired PC can
+// overflow the Wi-Fi access point's queue, and losing one packet loses the whole frame.
+constexpr int64_t kMaxSendBitsPerSecond = 200000000;
+
+constexpr int64_t kStatsIntervalNs = 5000000000LL;
 
 }  // namespace
 
@@ -60,7 +68,12 @@ void VideoStreamer::OnPhonePacket(uint32_t phone_ipv4)
     if (phone_ipv4_.exchange(phone_ipv4) != phone_ipv4 || !was_active) {
         keyframe_requested_ = true;  // a phone that (re)connects needs a keyframe to start decoding
     }
-    phone_seen_ns_ = NowNs();
+    const int64_t now = NowNs();
+    phone_seen_ns_ = now;
+    if (now >= next_stats_ns_) {
+        next_stats_ns_ = now + kStatsIntervalNs;
+        LogStats();
+    }
 }
 
 bool VideoStreamer::PhoneActive() const
@@ -71,7 +84,10 @@ bool VideoStreamer::PhoneActive() const
 void VideoStreamer::OnPresent(vr::SharedTextureHandle_t texture)
 {
     if (PhoneActive()) {
-        capture_->Copy(texture);
+        ++presented_;
+        if (capture_->Copy(texture)) {
+            ++copied_;
+        }
     }
 }
 
@@ -105,6 +121,7 @@ void VideoStreamer::EncodeThread()
     std::vector<uint8_t> nv12;
     uint32_t frame_index = 0;
     int64_t frame_count = 0;
+    int64_t next_send_ns = 0;
 
     while (running_) {
         int width = 0, height = 0, source_pitch = 0;
@@ -140,18 +157,34 @@ void VideoStreamer::EncodeThread()
         nv12.resize(static_cast<size_t>(width) * height * 3 / 2);
         RgbaToNv12(rgba.data(), source_pitch, width, height, bgra, nv12.data(),
                    nv12.data() + static_cast<size_t>(width) * height);
+        last_luma_ = MeanLuma(nv12.data(), width, height);
 
         const uint32_t phone = phone_ipv4_.load();
         const int64_t time_100ns = frame_count++ * 10000000LL / fps_;
+        ++encoded_;
         encoder.Encode(nv12.data(), time_100ns, keyframe_requested_.exchange(false),
                        [&](const uint8_t* data, size_t size, bool keyframe) {
+                           ++encoded_out_;
+                           if (keyframe) {
+                               ++keyframes_out_;
+                           }
                            video::FrameInfo info;
                            info.frame_index = frame_index++;
                            info.keyframe = keyframe;
                            info.width = static_cast<uint16_t>(width);
                            info.height = static_cast<uint16_t>(height);
                            video::Packetize(info, data, size, [&](const uint8_t* packet, size_t packet_size) {
-                               socket.SendTo(phone, video::kVideoPort, packet, packet_size);
+                               while (NowNs() < next_send_ns) {
+                                   std::this_thread::yield();
+                               }
+                               next_send_ns = std::max(next_send_ns, NowNs()) +
+                                              static_cast<int64_t>(packet_size) * 8 * 1000000000LL / kMaxSendBitsPerSecond;
+                               if (socket.SendTo(phone, video::kVideoPort, packet, packet_size)) {
+                                   ++packets_sent_;
+                                   bytes_sent_ += static_cast<int64_t>(packet_size);
+                               } else {
+                                   ++send_errors_;
+                               }
                            });
                        });
     }
@@ -159,4 +192,20 @@ void VideoStreamer::EncodeThread()
     encoder.Shutdown();
     MFShutdown();
     CoUninitialize();
+}
+
+// One line every few seconds while the phone is connected, so vrserver.txt shows which stage of
+// the video path stops: capture (presented/copied), encoder (in/out) or network (sent/errors).
+// A brightness near 16 means the captured frames are black.
+void VideoStreamer::LogStats()
+{
+    const int acquire_timeouts = capture_->AcquireTimeouts() - logged_acquire_timeouts_;
+    logged_acquire_timeouts_ += acquire_timeouts;
+    const uint32_t phone = phone_ipv4_.load();
+    const uint8_t* ip = reinterpret_cast<const uint8_t*>(&phone);
+    DriverLog("Video: phone %u.%u.%u.%u, %d presented, %d copied, %d texture busy, %d encoded, %d out (%d key), "
+              "%d packets, %lld KB sent, %d send errors, brightness %d",
+              ip[0], ip[1], ip[2], ip[3], presented_.exchange(0), copied_.exchange(0), acquire_timeouts,
+              encoded_.exchange(0), encoded_out_.exchange(0), keyframes_out_.exchange(0), packets_sent_.exchange(0),
+              static_cast<long long>(bytes_sent_.exchange(0) / 1024), send_errors_.exchange(0), last_luma_.load());
 }

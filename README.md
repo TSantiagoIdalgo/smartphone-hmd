@@ -59,6 +59,8 @@ Si SteamVR no muestra el visor, abre `Steam\config\steamvr.vrsettings` y añade 
 5. En el móvil escribe la IP de la PC y pulsa **Iniciar**. El móvil pasa a pantalla completa y, en
    unos segundos, muestra la imagen estéreo de SteamVR. Al girar el móvil, la vista gira igual.
    **Atrás** detiene el envío.
+6. Abre SteamVR Home o un juego. Sin ninguna aplicación abierta, lo que dibuja SteamVR puede verse
+   casi negro.
 
 Para recentrar la vista, pulsa cualquier botón de volumen del móvil o **Ctrl+Alt+R** en la PC.
 
@@ -69,7 +71,15 @@ La calidad del video se ajusta con `video_bitrate_mbps` (por defecto 20) en el m
 configuración. Si la imagen se corta o llega con retraso, prueba un router de 5 GHz, bajar ese valor
 o conectar el móvil por cable USB con el anclaje USB activado.
 
-Si no llega la imagen, busca las líneas que contienen `smartphone_hmd` en
-`Steam\logs\vrserver.txt`: dicen qué GPU y qué codificador se usan y si algo falló.
+Si no llega la imagen:
+
+- Mientras no hay video, el móvil muestra cuántos paquetes de video recibe, cuántos fotogramas
+  completa (y cuántos pierde) y cuántos muestra.
+- Busca las líneas que contienen `smartphone_hmd` en `Steam\logs\vrserver.txt`. Dicen qué GPU y qué
+  codificador se usan, y cada 5 segundos una línea `Video:` cuenta los fotogramas capturados,
+  codificados y enviados. `brightness` cerca de 16 significa que la imagen capturada es negra.
+- Si el video se corta o se congela, prueba una resolución menor con la misma proporción que la
+  pantalla del móvil, por ejemplo 1920x864 en vez de 2400x1080. El móvil la escala a pantalla
+  completa.
 
 Sin el móvil, `python tools/sim/send_imu.py` envía datos que giran la cabeza a izquierda y derecha.
