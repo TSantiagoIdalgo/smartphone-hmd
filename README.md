@@ -61,15 +61,39 @@ Si SteamVR no muestra el visor, abre `Steam\config\steamvr.vrsettings` y añade 
    **Atrás** detiene el envío.
 6. Abre SteamVR Home o un juego. Sin ninguna aplicación abierta, lo que dibuja SteamVR puede verse
    casi negro.
+7. Toca la pantalla del móvil para ajustar cada ojo a tu visor (ver más abajo).
 
 Para recentrar la vista, pulsa cualquier botón de volumen del móvil o **Ctrl+Alt+R** en la PC.
 
 El móvil va en horizontal dentro del visor, con la pantalla hacia los ojos y la parte de arriba del
 teléfono a la izquierda.
 
-La calidad del video se ajusta con `video_bitrate_mbps` (por defecto 20) en el mismo archivo de
-configuración. Si la imagen se corta o llega con retraso, prueba un router de 5 GHz, bajar ese valor
-o conectar el móvil por cable USB con el anclaje USB activado.
+## Ajustar cada ojo a tu visor
+
+Con el video en marcha, toca la pantalla del móvil para abrir el ajuste. Los cambios se ven al
+instante sobre el video y se guardan en el teléfono. Ajusta con el móvil fuera del visor, pulsa
+**Listo** y compruébalo dentro.
+
+- **Ancho** y **alto de cada ojo**: tamaño de la imagen de cada ojo, en milímetros de pantalla.
+- **Separación entre centros**: distancia entre los centros de las dos imágenes. Empieza por la
+  distancia entre los centros de las lentes de tu visor, medida con una regla.
+- **Altura de los centros**: sube o baja las dos imágenes para alinearlas con las lentes.
+- **Corrección de lente k1 y k2**: curvan la imagen para compensar la deformación de las lentes.
+  Marca **Cuadrícula**, mira a través del visor y sube k1 hasta que las líneas verdes se vean
+  rectas; k2 corrige sobre todo los bordes. La cuadrícula sigue visible al cerrar el ajuste hasta
+  que la desmarques.
+
+**Restablecer** vuelve a la imagen a pantalla completa. **Listo**, **Atrás** o tocar fuera del
+panel lo cierran.
+
+La imagen de cada ojo abarca 90° de ancho y de alto (`fov_degrees` en el driver), así que se ve sin
+estirar cuando el ancho y el alto son iguales.
+
+## Calidad del video
+
+La calidad del video se ajusta con `video_bitrate_mbps` (por defecto 20) en `default.vrsettings`, el
+mismo archivo de la resolución. Si la imagen se corta o llega con retraso, prueba un router de
+5 GHz, bajar ese valor o conectar el móvil por cable USB con el anclaje USB activado.
 
 Si no llega la imagen:
 

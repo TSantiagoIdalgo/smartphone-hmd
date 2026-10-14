@@ -18,18 +18,32 @@ fail() {
     exit 1
 }
 
-# Taps the centre of the first view whose uiautomator node matches the regex $1, ignoring case
-# (newer Android reports button text in capitals).
-tap_node() {
+UI_XML=$(mktemp)
+
+# Saves the screen's views, one uiautomator node per line, to $UI_XML.
+dump_ui() {
     local attempt
     for attempt in 1 2 3; do
         adb shell rm -f /sdcard/ui.xml
         adb shell uiautomator dump /sdcard/ui.xml > /dev/null 2>&1
-        adb shell ls /sdcard/ui.xml > /dev/null 2>&1 && break
+        adb shell cat /sdcard/ui.xml 2> /dev/null | tr '>' '\n' > "$UI_XML"
+        grep -q "<hierarchy" "$UI_XML" && return 0
         sleep 2
     done
+    return 1
+}
+
+# True if a view on screen matches the regex $1, ignoring case (newer Android reports button
+# text in capitals).
+has_node() {
+    dump_ui && grep -qiE "$1" "$UI_XML"
+}
+
+# Taps the centre of the first view matching the regex $1, ignoring case.
+tap_node() {
+    dump_ui || return 1
     local bounds
-    bounds=$(adb shell cat /sdcard/ui.xml | tr '>' '\n' | grep -iE "$1" | head -1 |
+    bounds=$(grep -iE "$1" "$UI_XML" | head -1 |
         grep -oE 'bounds="\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]"' | grep -oE '[0-9]+')
     [ -n "$bounds" ] || return 1
     set -- $bounds
@@ -53,6 +67,29 @@ tap_node 'text="Iniciar"' || fail "Could not find the Iniciar button"
 sleep 5
 alive || fail "The app closed after pressing Iniciar"
 echo "Still running while streaming"
+has_node 'Enviando sensores' || fail "The streaming screen did not appear"
+if grep -qi 'OpenGL' "$UI_XML"; then
+    grep -i 'OpenGL' "$UI_XML"
+    fail "The video view could not start OpenGL"
+fi
+
+echo "== Tapping the screen opens the eye adjustment, Back closes it"
+tap_node 'Enviando sensores' || fail "Could not find the streaming screen"
+sleep 2
+alive || fail "The app closed after tapping the screen"
+has_node 'Ancho de cada ojo' || fail "The eye adjustment did not open"
+adb shell input keyevent 4
+sleep 2
+alive || fail "The app closed after closing the eye adjustment"
+has_node 'Ancho de cada ojo' && fail "Back did not close the eye adjustment"
+
+echo "== Going to the background and back while streaming"
+adb shell input keyevent 3 # Home
+sleep 2
+adb shell am start -W -n "$PKG/.MainActivity"
+sleep 3
+alive || fail "The app closed after coming back to the video"
+has_node 'Enviando sensores' || fail "The video screen did not come back"
 
 echo "== Recentering with volume up, then Back"
 adb shell input keyevent 24
