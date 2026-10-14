@@ -4,8 +4,10 @@
 #include <cstring>
 #include <vector>
 
+#include "color_convert.h"
 #include "head_tracker.h"
 #include "protocol.h"
+#include "video_protocol.h"
 
 namespace {
 
@@ -186,7 +188,96 @@ void TestRejectsBadSamples()
     CHECK(t.AddSample(p));
 }
 
+void TestPacketize()
+{
+    std::vector<uint8_t> frame(3000);
+    for (size_t i = 0; i < frame.size(); ++i) frame[i] = static_cast<uint8_t>(i * 7);
+
+    video::FrameInfo info;
+    info.frame_index = 0x01020304;
+    info.keyframe = true;
+    info.width = 1920;
+    info.height = 1080;
+
+    std::vector<std::vector<uint8_t>> packets;
+    video::Packetize(info, frame.data(), frame.size(),
+                     [&](const uint8_t* data, size_t size) { packets.emplace_back(data, data + size); });
+
+    CHECK(packets.size() == 3);  // 1400 + 1400 + 200
+    std::vector<uint8_t> rebuilt;
+    for (size_t i = 0; i < packets.size(); ++i) {
+        const std::vector<uint8_t>& p = packets[i];
+        CHECK(std::memcmp(p.data(), "HMV1", 4) == 0);
+        CHECK(p[4] == 0x04 && p[5] == 0x03 && p[6] == 0x02 && p[7] == 0x01);
+        CHECK(p[8] == i && p[9] == 0);
+        CHECK(p[10] == 3 && p[11] == 0);
+        CHECK(p[12] == video::kFlagKeyframe);
+        CHECK((p[16] | p[17] << 8) == 1920);
+        CHECK((p[18] | p[19] << 8) == 1080);
+        rebuilt.insert(rebuilt.end(), p.begin() + video::kHeaderSize, p.end());
+    }
+    CHECK(packets[0].size() == video::kHeaderSize + video::kMaxPayload);
+    CHECK(packets[2].size() == video::kHeaderSize + 200);
+    CHECK(rebuilt == frame);
+}
+
+void TestStartsWithSps()
+{
+    const uint8_t sps[] = {0, 0, 0, 1, 0x67, 0x42};
+    const uint8_t sps_short_code[] = {0, 0, 1, 0x67};
+    const uint8_t idr[] = {0, 0, 0, 1, 0x65, 0x88};
+    CHECK(video::StartsWithSps(sps, sizeof(sps)));
+    CHECK(video::StartsWithSps(sps_short_code, sizeof(sps_short_code)));
+    CHECK(!video::StartsWithSps(idr, sizeof(idr)));
+    CHECK(!video::StartsWithSps(sps, 3));
+}
+
+void TestRgbaToNv12()
+{
+    // 2x2 blocks: white, black, red, blue side by side (8x2 pixels), as RGBA and as BGRA.
+    const uint8_t colors[4][3] = {{255, 255, 255}, {0, 0, 0}, {255, 0, 0}, {0, 0, 255}};
+    const int width = 8, height = 2, pitch = width * 4 + 8;  // padded rows, like a mapped texture
+    for (int bgra = 0; bgra < 2; ++bgra) {
+        std::vector<uint8_t> src(pitch * height, 0xAB);
+        for (int row = 0; row < height; ++row) {
+            for (int col = 0; col < width; ++col) {
+                const uint8_t* c = colors[col / 2];
+                uint8_t* px = &src[row * pitch + col * 4];
+                px[0] = bgra ? c[2] : c[0];
+                px[1] = c[1];
+                px[2] = bgra ? c[0] : c[2];
+                px[3] = 255;
+            }
+        }
+        std::vector<uint8_t> y(width * height), uv(width * height / 2);
+        RgbaToNv12(src.data(), pitch, width, height, bgra != 0, y.data(), uv.data());
+
+        CHECK(y[0] == 235 && y[width] == 235);  // white
+        CHECK(uv[0] == 128 && uv[1] == 128);
+        CHECK(y[2] == 16);                      // black
+        CHECK(uv[2] == 128 && uv[3] == 128);
+        CHECK(y[4] == 82);                      // red
+        CHECK(uv[4] == 90 && uv[5] == 240);
+        CHECK(y[6] == 41);                      // blue
+        CHECK(uv[6] == 240 && uv[7] == 110);
+    }
+}
+
 }  // namespace
+
+void TestMeanLuma()
+{
+    // Left half black (16), right half white (235): the sparse grid sees both halves equally.
+    const int width = 64, height = 32;
+    std::vector<uint8_t> y(width * height);
+    for (int row = 0; row < height; ++row) {
+        for (int col = 0; col < width; ++col) {
+            y[row * width + col] = col < width / 2 ? 16 : 235;
+        }
+    }
+    CHECK(MeanLuma(y.data(), width, height) == (16 + 235) / 2);
+    CHECK(MeanLuma(y.data(), 8, 8) == 0);  // smaller than one grid step: nothing sampled
+}
 
 int main()
 {
@@ -197,6 +288,10 @@ int main()
     TestTiltFollowsGravity();
     TestGyroBiasIsLearned();
     TestRejectsBadSamples();
+    TestPacketize();
+    TestStartsWithSps();
+    TestRgbaToNv12();
+    TestMeanLuma();
     if (g_failures == 0) {
         std::printf("All tests passed\n");
         return 0;

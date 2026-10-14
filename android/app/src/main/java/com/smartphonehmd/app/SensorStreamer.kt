@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 class SensorStreamer(private val sensorManager: SensorManager) : SensorEventListener {
     private var thread: HandlerThread? = null
-    private var handler: Handler? = null
+    @Volatile private var handler: Handler? = null
     private var socket: DatagramSocket? = null
     private var target: InetAddress? = null
 
@@ -41,21 +41,21 @@ class SensorStreamer(private val sensorManager: SensorManager) : SensorEventList
         thread = newThread
         handler = newHandler
 
+        // An exception escaping this thread would close the app, so failures become lastError.
         newHandler.post {
             try {
                 target = InetAddress.getByName(host)
                 socket = DatagramSocket()
+                for (type in intArrayOf(Sensor.TYPE_GYROSCOPE, Sensor.TYPE_ACCELEROMETER, Sensor.TYPE_MAGNETIC_FIELD)) {
+                    val sensor = sensorManager.getDefaultSensor(type)
+                    if (sensor == null) {
+                        if (type == Sensor.TYPE_GYROSCOPE) lastError = "Este móvil no tiene giroscopio"
+                        continue
+                    }
+                    sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_FASTEST, newHandler)
+                }
             } catch (e: Exception) {
                 lastError = e.message ?: e.toString()
-                return@post
-            }
-            for (type in intArrayOf(Sensor.TYPE_GYROSCOPE, Sensor.TYPE_ACCELEROMETER, Sensor.TYPE_MAGNETIC_FIELD)) {
-                val sensor = sensorManager.getDefaultSensor(type)
-                if (sensor == null) {
-                    if (type == Sensor.TYPE_GYROSCOPE) lastError = "Este móvil no tiene giroscopio"
-                    continue
-                }
-                sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_FASTEST, newHandler)
             }
         }
     }
@@ -72,9 +72,14 @@ class SensorStreamer(private val sensorManager: SensorManager) : SensorEventList
         handler = null
     }
 
-    fun recenter() {
+    fun recenter() = sendCommand(Protocol.TYPE_RECENTER)
+
+    /** Asks the PC for a video keyframe. Safe to call from any thread. */
+    fun requestKeyframe() = sendCommand(Protocol.TYPE_KEYFRAME_REQUEST)
+
+    private fun sendCommand(type: Byte) {
         handler?.post {
-            Protocol.writeCommand(buffer, Protocol.TYPE_RECENTER, ++seq, SystemClock.elapsedRealtimeNanos())
+            Protocol.writeCommand(buffer, type, ++seq, SystemClock.elapsedRealtimeNanos())
             send(Protocol.HEADER_SIZE)
         }
     }

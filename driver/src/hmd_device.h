@@ -9,6 +9,9 @@
 #include "head_tracker.h"
 #include "openvr_driver.h"
 
+class VideoStreamer;
+class VirtualDisplay;
+
 struct DisplayConfig {
     int32_t window_x = 0;
     int32_t window_y = 0;
@@ -17,6 +20,8 @@ struct DisplayConfig {
     int32_t render_width = 1280;
     int32_t render_height = 1440;
     float fov_degrees = 90.0f;
+    // False when frames go to the phone through VirtualDisplay instead of a desktop window.
+    bool on_desktop = true;
 };
 
 // Side-by-side stereo display: left eye on the left half, right eye on the right half.
@@ -40,6 +45,7 @@ private:
 class HmdDevice : public vr::ITrackedDeviceServerDriver {
 public:
     HmdDevice();
+    ~HmdDevice();
 
     vr::EVRInitError Activate(uint32_t object_id) override;
     void Deactivate() override;
@@ -61,6 +67,12 @@ private:
     float head_height_ = 1.7f;
     int32_t udp_port_ = 9944;
     std::unique_ptr<DisplayComponent> display_;
+#if defined(_WIN32)
+    std::unique_ptr<VideoStreamer> video_;
+    std::unique_ptr<VirtualDisplay> virtual_display_;
+#endif
+    uint64_t adapter_luid_ = 0;
+    vr::VRInputComponentHandle_t proximity_ = vr::k_ulInvalidInputComponentHandle;
 
     HeadTracker tracker_;  // only touched by the tracking thread
     std::mutex pose_mutex_;

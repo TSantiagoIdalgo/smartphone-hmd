@@ -11,6 +11,7 @@ object Protocol {
 
     const val TYPE_SENSORS: Byte = 1
     const val TYPE_RECENTER: Byte = 2
+    const val TYPE_KEYFRAME_REQUEST: Byte = 3
 
     private val MAGIC = byteArrayOf('H'.code.toByte(), 'M'.code.toByte(), 'D'.code.toByte(), '1'.code.toByte())
 
@@ -29,7 +30,7 @@ object Protocol {
         }
     }
 
-    /** Writes a header-only command packet, such as a recenter request. */
+    /** Writes a header-only command packet: recenter or keyframe request. */
     fun writeCommand(out: ByteArray, type: Byte, seq: Int, timestampNs: Long) {
         header(out, type, seq, timestampNs)
     }

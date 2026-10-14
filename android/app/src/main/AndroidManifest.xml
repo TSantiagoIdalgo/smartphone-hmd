@@ -2,6 +2,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Sensors above 200 Hz. Without it, Android 12+ throws when a debug build asks for
+         SENSOR_DELAY_FASTEST, and silently caps release builds at 200 Hz. -->
+    <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />
 
     <application
         android:label="Smartphone HMD"
