@@ -24,8 +24,8 @@ public:
     bool Start(int fps, int bitrate, uint64_t* adapter_luid);
     void Stop();
 
-    // From the tracking thread.
-    void OnPhonePacket(uint32_t phone_ipv4);
+    // From the tracking thread, for each sensor packet.
+    void OnPhonePacket(uint32_t phone_ipv4, uint32_t seq);
     void RequestKeyframe() { keyframe_requested_ = true; }
 
     // From the compositor (IVRVirtualDisplay).
@@ -43,6 +43,8 @@ private:
 
     std::atomic<uint32_t> phone_ipv4_{0};
     std::atomic<int64_t> phone_seen_ns_{0};
+    std::atomic<uint32_t> phone_seq_{0};
+    uint32_t presented_seq_ = 0;  // compositor thread
     std::atomic<bool> keyframe_requested_{true};
 
     // Latest captured frame, handed from the compositor thread to the encoder thread.
@@ -51,6 +53,7 @@ private:
     std::vector<uint8_t> frame_;
     int frame_width_ = 0;
     int frame_height_ = 0;
+    uint32_t frame_seq_ = 0;
     bool frame_bgra_ = false;
     bool has_frame_ = false;
 

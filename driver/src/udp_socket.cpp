@@ -79,7 +79,7 @@ void UdpSocket::Close()
     }
 }
 
-int UdpSocket::Receive(uint8_t* buffer, size_t size, uint32_t* sender_ipv4)
+int UdpSocket::Receive(uint8_t* buffer, size_t size, uint32_t* sender_ipv4, uint16_t* sender_port)
 {
     if (socket_ == kInvalid) {
         return -1;
@@ -93,6 +93,9 @@ int UdpSocket::Receive(uint8_t* buffer, size_t size, uint32_t* sender_ipv4)
     }
     if (sender_ipv4) {
         *sender_ipv4 = sender.sin_addr.s_addr;
+    }
+    if (sender_port) {
+        *sender_port = ntohs(sender.sin_port);
     }
     return static_cast<int>(received);
 }

@@ -15,14 +15,17 @@ import kotlin.math.roundToInt
  * Sliders that size and move both eyes and set the lens correction. Every change goes to
  * [onChange] at once, so the video behind the panel shows it live. [defaults] is the unadjusted
  * full-screen layout; the size sliders go up to twice its values. [onGrid] turns on a grid that
- * stays after the panel closes, to check the lens correction from inside the headset.
+ * stays after the panel closes, to check the lens correction from inside the headset. [onPredict]
+ * turns the PC's head-movement prediction on or off, next to the measured latency it is based on.
  */
 class AdjustPanel(
     context: Context,
     private val defaults: EyeLayout,
     initial: EyeLayout,
+    predict: Boolean,
     private val onChange: (EyeLayout) -> Unit,
     onGrid: (Boolean) -> Unit,
+    onPredict: (Boolean) -> Unit,
     onDone: () -> Unit,
 ) : ScrollView(context) {
     var eyeLayout = initial
@@ -49,6 +52,7 @@ class AdjustPanel(
     )
     private val seekBars = mutableListOf<SeekBar>()
     private val labels = mutableListOf<TextView>()
+    private val latencyText = text("")
 
     init {
         setBackgroundColor(0xB0000000.toInt())
@@ -61,6 +65,13 @@ class AdjustPanel(
             text = "Cuadrícula: sus líneas deben verse rectas a través de la lente"
             setTextColor(Color.WHITE)
             setOnCheckedChangeListener { _, checked -> onGrid(checked) }
+        })
+        column.addView(latencyText)
+        column.addView(CheckBox(context).apply {
+            text = "Anticipar el movimiento de la cabeza (compensa la latencia)"
+            setTextColor(Color.WHITE)
+            isChecked = predict
+            setOnCheckedChangeListener { _, checked -> onPredict(checked) }
         })
         for (slider in sliders) {
             val label = text("")
@@ -100,6 +111,14 @@ class AdjustPanel(
         })
         addView(column)
         showAll()
+        showLatency(null)
+    }
+
+    /** [ms]: from sending the sensors to showing the frame drawn with them; null if not measured yet. */
+    fun showLatency(ms: Float?) {
+        val value = if (ms == null) "midiendo…" else "${ms.roundToInt()} ms"
+        val text = "Latencia medida (movimiento a imagen): $value"
+        if (latencyText.text.toString() != text) latencyText.text = text
     }
 
     private fun showAll() {

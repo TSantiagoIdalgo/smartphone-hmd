@@ -1,5 +1,6 @@
 #include "hmd_device.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -25,6 +26,12 @@
 namespace {
 
 const char* const kSettingsSection = "driver_smartphone_hmd";
+
+// SteamVR already predicts the head this far past each vsync.
+constexpr float kVsyncToPhotonsSeconds = 0.011f;
+// Our own prediction covers the rest of the latency the phone measures, up to this much. Beyond
+// it, stopping a fast turn overshoots too visibly.
+constexpr double kMaxPredictionSeconds = 0.08;
 
 std::string GetStringSetting(const char* key)
 {
@@ -165,7 +172,7 @@ vr::EVRInitError HmdDevice::Activate(uint32_t object_id)
     vr::VRProperties()->SetFloatProperty(container, vr::Prop_UserIpdMeters_Float, ipd);
     vr::VRProperties()->SetFloatProperty(container, vr::Prop_DisplayFrequency_Float, display_frequency_);
     vr::VRProperties()->SetFloatProperty(container, vr::Prop_UserHeadToEyeDepthMeters_Float, 0.0f);
-    vr::VRProperties()->SetFloatProperty(container, vr::Prop_SecondsFromVsyncToPhotons_Float, 0.011f);
+    vr::VRProperties()->SetFloatProperty(container, vr::Prop_SecondsFromVsyncToPhotons_Float, kVsyncToPhotonsSeconds);
     vr::VRProperties()->SetBoolProperty(container, vr::Prop_IsOnDesktop_Bool, false);
     // Reports the headset as worn while the phone sends data. Otherwise SteamVR puts it in standby
     // after 5 s without head motion and the compositor stops drawing.
@@ -232,13 +239,14 @@ vr::DriverPose_t HmdDevice::MakePose(bool receiving) const
     pose.qWorldFromDriverRotation.w = 1.0;
     pose.qDriverFromHeadRotation.w = 1.0;
 
-    const Quat orientation = tracker_.Orientation();
+    const Vec3 angular_velocity = tracker_.AngularVelocity();
+    // The phone shows each frame a while after its sensors moved: render it where the head will be.
+    const Quat orientation = Predict(tracker_.Orientation(), angular_velocity, receiving ? prediction_seconds_ : 0.0);
     pose.qRotation.w = orientation.w;
     pose.qRotation.x = orientation.x;
     pose.qRotation.y = orientation.y;
     pose.qRotation.z = orientation.z;
 
-    const Vec3 angular_velocity = tracker_.AngularVelocity();
     pose.vecAngularVelocity[0] = angular_velocity.x;
     pose.vecAngularVelocity[1] = angular_velocity.y;
     pose.vecAngularVelocity[2] = angular_velocity.z;
@@ -265,11 +273,14 @@ void HmdDevice::TrackingThread()
     Clock::time_point last_sample = Clock::now() - std::chrono::hours(1);
     bool hotkey_was_down = false;
     bool was_receiving = false;
+    uint32_t last_discoverer = 0;
+    double logged_prediction = -1.0;
     uint8_t buffer[1500];
 
     while (active_) {
         uint32_t sender = 0;
-        const int size = socket.Receive(buffer, sizeof(buffer), &sender);
+        uint16_t sender_port = 0;
+        const int size = socket.Receive(buffer, sizeof(buffer), &sender, &sender_port);
         protocol::Packet packet;
         if (size > 0 && protocol::Parse(buffer, static_cast<size_t>(size), packet)) {
             if (packet.type == protocol::PacketType::Sensors) {
@@ -277,9 +288,27 @@ void HmdDevice::TrackingThread()
                     last_sample = Clock::now();
 #if defined(_WIN32)
                     if (video_) {
-                        video_->OnPhonePacket(sender);
+                        video_->OnPhonePacket(sender, packet.seq);
                     }
 #endif
+                }
+            } else if (packet.type == protocol::PacketType::Discover) {
+                uint8_t reply[protocol::kHeaderSize];
+                socket.SendTo(sender, sender_port, reply, protocol::WritePcHere(reply));
+                if (sender != last_discoverer) {
+                    const uint8_t* ip = reinterpret_cast<const uint8_t*>(&sender);
+                    DriverLog("A phone at %u.%u.%u.%u is looking for the PC; answered", ip[0], ip[1], ip[2], ip[3]);
+                    last_discoverer = sender;
+                }
+            } else if (packet.type == protocol::PacketType::Latency) {
+                prediction_seconds_ =
+                    packet.latency_ms > 0
+                        ? std::clamp(packet.latency_ms / 1000.0 - kVsyncToPhotonsSeconds, 0.0, kMaxPredictionSeconds)
+                        : 0.0;
+                if (std::fabs(prediction_seconds_ - logged_prediction) > 0.005) {
+                    DriverLog("Phone latency %.0f ms: predicting the head %.0f ms ahead", packet.latency_ms,
+                              prediction_seconds_ * 1000.0);
+                    logged_prediction = prediction_seconds_;
                 }
             } else if (packet.type == protocol::PacketType::Recenter) {
                 tracker_.Recenter();

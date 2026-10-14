@@ -41,7 +41,7 @@ bool Parse(const uint8_t* data, size_t size, Packet& out)
         return false;
     }
     const uint8_t type = data[4];
-    if (type < 1 || type > 3) {
+    if (type < 1 || type > 6 || type == static_cast<uint8_t>(PacketType::PcHere)) {
         return false;
     }
     out.type = static_cast<PacketType>(type);
@@ -54,8 +54,21 @@ bool Parse(const uint8_t* data, size_t size, Packet& out)
         ReadVec(data + 20, out.gyro);
         ReadVec(data + 32, out.accel);
         ReadVec(data + 44, out.mag);
+    } else if (out.type == PacketType::Latency) {
+        if (size < kLatencyPacketSize) {
+            return false;
+        }
+        out.latency_ms = ReadF32(data + 20);
     }
     return true;
+}
+
+size_t WritePcHere(uint8_t* out)
+{
+    std::memset(out, 0, kHeaderSize);
+    std::memcpy(out, "HMD1", 4);
+    out[4] = static_cast<uint8_t>(PacketType::PcHere);
+    return kHeaderSize;
 }
 
 }  // namespace protocol

@@ -1,5 +1,8 @@
 #include "color_convert.h"
 
+#include <thread>
+#include <vector>
+
 namespace {
 
 inline uint8_t LumaOf(int r, int g, int b)
@@ -38,6 +41,26 @@ void RgbaToNv12(const uint8_t* src, int src_pitch, int width, int height, bool b
             uv_row[col] = static_cast<uint8_t>(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128);
             uv_row[col + 1] = static_cast<uint8_t>(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
         }
+    }
+}
+
+void RgbaToNv12Parallel(const uint8_t* src, int src_pitch, int width, int height, bool bgra, uint8_t* y, uint8_t* uv,
+                        int threads)
+{
+    if (threads < 1) {
+        threads = 1;
+    }
+    // Bands start on even rows, since each pass converts two rows.
+    const int band = ((height / 2 + threads - 1) / threads) * 2;
+    std::vector<std::thread> workers;
+    for (int first = band; first < height; first += band) {
+        const int rows = height - first < band ? height - first : band;
+        workers.emplace_back(RgbaToNv12, src + static_cast<int64_t>(first) * src_pitch, src_pitch, width, rows, bgra,
+                             y + static_cast<int64_t>(first) * width, uv + static_cast<int64_t>(first / 2) * width);
+    }
+    RgbaToNv12(src, src_pitch, width, band < height ? band : height, bgra, y, uv);
+    for (std::thread& worker : workers) {
+        worker.join();
     }
 }
 

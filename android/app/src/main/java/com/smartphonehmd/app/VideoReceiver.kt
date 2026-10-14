@@ -12,10 +12,12 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Receives the PC's H.264 video over UDP and shows it on [surface]. When a frame is lost it waits
- * for the next keyframe and asks the PC for one through [requestKeyframe].
+ * for the next keyframe and asks the PC for one through [requestKeyframe]. Each frame shown is
+ * timed with [meter].
  */
 class VideoReceiver(
     private val surface: Surface,
+    private val meter: LatencyMeter,
     private val requestKeyframe: () -> Unit,
 ) {
     @Volatile private var running = false
@@ -26,6 +28,10 @@ class VideoReceiver(
     private var codecHeight = 0
     private var waitingForKeyframe = true
     private var lastKeyframeRequestMs = 0L
+    // Sensor seq of the frames inside the decoder, by presentation time.
+    private val queuedTimesUs = LongArray(QUEUED_FRAMES)
+    private val queuedSeqs = IntArray(QUEUED_FRAMES)
+    private var queuedNext = 0
 
     // Counters shown on screen while no video is playing, to tell where the video stops.
     val packetsReceived = AtomicInteger(0)
@@ -89,7 +95,7 @@ class VideoReceiver(
         }
     }
 
-    private fun onFrame(data: ByteArray, size: Int, keyframe: Boolean, width: Int, height: Int) {
+    private fun onFrame(data: ByteArray, size: Int, keyframe: Boolean, width: Int, height: Int, sensorSeq: Int) {
         framesComplete.incrementAndGet()
         if (keyframe) keyframes.incrementAndGet()
         if (waitingForKeyframe && !keyframe) return
@@ -120,7 +126,11 @@ class VideoReceiver(
                 put(data, 0, size)
             }
             // Render timestamps must use System.nanoTime's clock.
-            decoder.queueInputBuffer(index, 0, size, System.nanoTime() / 1000, 0)
+            val timeUs = System.nanoTime() / 1000
+            queuedTimesUs[queuedNext] = timeUs
+            queuedSeqs[queuedNext] = sensorSeq
+            queuedNext = (queuedNext + 1) % QUEUED_FRAMES
+            decoder.queueInputBuffer(index, 0, size, timeUs, 0)
         } catch (e: Exception) {
             lastError = e.message ?: e.toString()
             releaseCodec()
@@ -158,6 +168,8 @@ class VideoReceiver(
                 val index = decoder.dequeueOutputBuffer(info, 0)
                 if (index >= 0) {
                     decoder.releaseOutputBuffer(index, true)
+                    val i = queuedTimesUs.indexOf(info.presentationTimeUs)
+                    if (i >= 0) meter.shown(queuedSeqs[i], SystemClock.elapsedRealtimeNanos())
                     framesShown.incrementAndGet()
                     lastFrameShownMs = SystemClock.elapsedRealtime()
                     lastError = null
@@ -189,5 +201,6 @@ class VideoReceiver(
         private const val INPUT_TIMEOUT_US = 5_000L
         private const val INPUT_TRIES = 10
         private const val KEYFRAME_REQUEST_INTERVAL_MS = 300L
+        private const val QUEUED_FRAMES = 16
     }
 }

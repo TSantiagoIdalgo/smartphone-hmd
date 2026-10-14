@@ -18,8 +18,8 @@ public:
     bool OpenForSending();
     void Close();
 
-    // Returns the number of bytes received, or -1 on timeout or error. `sender_ipv4` may be null.
-    int Receive(uint8_t* buffer, size_t size, uint32_t* sender_ipv4 = nullptr);
+    // Returns the number of bytes received, or -1 on timeout or error. The sender outputs may be null.
+    int Receive(uint8_t* buffer, size_t size, uint32_t* sender_ipv4 = nullptr, uint16_t* sender_port = nullptr);
 
     bool SendTo(uint32_t ipv4, uint16_t port, const uint8_t* data, size_t size);
 

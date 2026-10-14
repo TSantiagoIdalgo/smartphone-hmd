@@ -25,6 +25,8 @@ add_library(tracking STATIC
   src/color_convert.cpp
 )
 target_include_directories(tracking PUBLIC src)
+find_package(Threads REQUIRED)
+target_link_libraries(tracking PUBLIC Threads::Threads)
 set_target_properties(tracking PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_library(driver_smartphone_hmd SHARED
@@ -43,7 +45,7 @@ if(WIN32)
     src/video_streamer.cpp
     src/virtual_display.cpp
   )
-  target_link_libraries(driver_smartphone_hmd PRIVATE ws2_32 d3d11 dxgi mfplat mfuuid strmiids ole32 oleaut32)
+  target_link_libraries(driver_smartphone_hmd PRIVATE ws2_32 d3d11 dxgi mfplat mfuuid strmiids ole32 oleaut32 winmm)
 endif()
 # "$<0:>" stops multi-config generators (Visual Studio) from adding a Release/ subfolder.
 set_target_properties(driver_smartphone_hmd PROPERTIES

@@ -7,5 +7,9 @@
 // width*height/2 bytes of interleaved U and V at half resolution.
 void RgbaToNv12(const uint8_t* src, int src_pitch, int width, int height, bool bgra, uint8_t* y, uint8_t* uv);
 
+// Same result as RgbaToNv12, with horizontal bands converted on `threads` threads.
+void RgbaToNv12Parallel(const uint8_t* src, int src_pitch, int width, int height, bool bgra, uint8_t* y, uint8_t* uv,
+                        int threads);
+
 // Average brightness (Y, 16 = black, 235 = white) of a sparse grid of `y`, for diagnostics.
 int MeanLuma(const uint8_t* y, int width, int height);

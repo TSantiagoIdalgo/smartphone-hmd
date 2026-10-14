@@ -1,6 +1,8 @@
 #include "h264_encoder.h"
 
+#include <chrono>
 #include <cstring>
+#include <thread>
 
 #include <mfapi.h>
 #include <mferror.h>
@@ -214,8 +216,15 @@ bool H264Encoder::Encode(const uint8_t* nv12, int64_t time_100ns, bool force_key
         return false;
     }
     --need_input_;
-    // Wait for this frame's output, or for the encoder to ask for more input first.
-    HandleEvent(true, output);
+    // Wait up to one frame for this frame's output. Hardware encoders often ask for the next input
+    // before handing it over; stopping at that request would hold every frame back until the next.
+    const int outputs_before = outputs_;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(1000000 / fps_);
+    while (outputs_ == outputs_before && std::chrono::steady_clock::now() < deadline) {
+        if (!HandleEvent(false, output)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
     return true;
 }
 
@@ -279,6 +288,9 @@ bool H264Encoder::ProcessOutput(const OutputFunction& output)
     UINT32 clean_point = 0;
     sample->GetUINT32(MFSampleExtension_CleanPoint, &clean_point);
     const bool keyframe = clean_point != 0;
+    LONGLONG time_100ns = -1;
+    sample->GetSampleTime(&time_100ns);
+    ++outputs_;
 
     ComPtr<IMFMediaBuffer> buffer;
     if (FAILED(sample->ConvertToContiguousBuffer(&buffer))) {
@@ -292,9 +304,9 @@ bool H264Encoder::ProcessOutput(const OutputFunction& output)
         if (keyframe && !sequence_header_.empty() && !video::StartsWithSps(bytes, length)) {
             keyframe_buffer_.assign(sequence_header_.begin(), sequence_header_.end());
             keyframe_buffer_.insert(keyframe_buffer_.end(), bytes, bytes + length);
-            output(keyframe_buffer_.data(), keyframe_buffer_.size(), true);
+            output(keyframe_buffer_.data(), keyframe_buffer_.size(), true, time_100ns);
         } else {
-            output(bytes, length, keyframe);
+            output(bytes, length, keyframe, time_100ns);
         }
         buffer->Unlock();
     }

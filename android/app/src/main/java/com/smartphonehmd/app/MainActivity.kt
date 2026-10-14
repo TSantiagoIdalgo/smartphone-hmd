@@ -4,13 +4,16 @@ import android.app.Activity
 import android.content.Context
 import android.graphics.Color
 import android.hardware.SensorManager
+import android.net.wifi.WifiManager
 import android.opengl.GLSurfaceView
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.text.Editable
 import android.text.InputType
+import android.text.TextWatcher
 import android.util.DisplayMetrics
 import android.view.Gravity
 import android.view.KeyEvent
@@ -23,13 +26,16 @@ import android.widget.LinearLayout
 import android.widget.TextView
 
 /**
- * Enter the PC's IP and press Start. The phone then sends its sensors and shows the PC's video full
- * screen, each eye where the headset's lenses need it. Either volume button recenters the view,
- * which works with the phone already inside the headset. A tap opens the eye adjustment; Back
- * closes it or stops streaming.
+ * Press Start: the phone finds the PC on its own (or uses the IP typed in), sends its sensors and
+ * shows the PC's video full screen, each eye where the headset's lenses need it. If the video
+ * stops, it looks for the PC again and follows it to a new address. Either volume button
+ * recenters the view, which works with the phone already inside the headset. A tap opens the eye
+ * adjustment; Back closes it or stops streaming.
  */
 class MainActivity : Activity() {
+    private val meter = LatencyMeter()
     private lateinit var streamer: SensorStreamer
+    private lateinit var finder: PcFinder
     private lateinit var ipField: EditText
     private lateinit var startButton: Button
     private lateinit var statusText: TextView
@@ -40,13 +46,21 @@ class MainActivity : Activity() {
     private lateinit var videoStatus: TextView
     private var receiver: VideoReceiver? = null
     private var decoderTarget: DecoderTarget? = null
+    private var wifiLock: WifiManager.WifiLock? = null
 
     private var streaming = false
     private var resumed = false
+    private var streamStartMs = 0L
+    // When each address last answered the PC finder. A PC on USB and Wi-Fi answers on both.
+    private val lastAnswerMs = HashMap<String, Long>()
+    // An IP typed in this session wins over the one the finder reports; a saved one does not.
+    private var ipTypedByUser = false
+    private var settingIp = false
     private val uiHandler = Handler(Looper.getMainLooper())
     private val statusUpdater = object : Runnable {
         override fun run() {
             updateStatus()
+            updateFinder()
             uiHandler.postDelayed(this, 500)
         }
     }
@@ -58,13 +72,23 @@ class MainActivity : Activity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             window.attributes.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         }
-        streamer = SensorStreamer(getSystemService(Context.SENSOR_SERVICE) as SensorManager)
+        streamer = SensorStreamer(getSystemService(Context.SENSOR_SERVICE) as SensorManager, meter)
+        streamer.predict = prefs().getBoolean(KEY_PREDICT, true)
+        finder = PcFinder(::onPcFound)
 
         ipField = EditText(this).apply {
-            hint = "IP de la PC, por ejemplo 192.168.1.10"
+            hint = "IP de la PC (se busca sola)"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
             setSingleLine()
             setText(prefs().getString(KEY_PC_IP, ""))
+            addTextChangedListener(object : TextWatcher {
+                override fun afterTextChanged(s: Editable?) {
+                    if (!settingIp) ipTypedByUser = true
+                }
+
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            })
         }
         startButton = Button(this).apply {
             text = "Iniciar"
@@ -98,9 +122,13 @@ class MainActivity : Activity() {
         videoView.setRenderer(renderer)
         videoView.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
         adjustPanel = AdjustPanel(
-            this, defaults, layout,
+            this, defaults, layout, streamer.predict,
             onChange = { renderer.layout = it },
             onGrid = { renderer.showGrid = it },
+            onPredict = {
+                streamer.predict = it
+                prefs().edit().putBoolean(KEY_PREDICT, it).apply()
+            },
             onDone = { setPanelOpen(false) },
         )
         adjustPanel.visibility = View.GONE
@@ -125,8 +153,9 @@ class MainActivity : Activity() {
         super.onResume()
         resumed = true
         videoView.onResume()
-        if (streaming) streamer.start(pcIp())
+        if (streaming) streamer.start(pcIp().ifEmpty { null })
         updateReceiver()
+        updateWifiLock()
         uiHandler.post(statusUpdater)
     }
 
@@ -134,6 +163,8 @@ class MainActivity : Activity() {
         super.onPause()
         resumed = false
         updateReceiver()
+        updateWifiLock()
+        finder.stop()
         videoView.onPause()
         streamer.stop()
         if (adjustPanel.visibility == View.VISIBLE) saveLayout(adjustPanel.eyeLayout)
@@ -177,7 +208,9 @@ class MainActivity : Activity() {
     private fun updateReceiver() {
         val target = decoderTarget
         if (streaming && resumed && target != null) {
-            if (receiver == null) receiver = VideoReceiver(target.surface, streamer::requestKeyframe).also { it.start() }
+            if (receiver == null) {
+                receiver = VideoReceiver(target.surface, meter, streamer::requestKeyframe).also { it.start() }
+            }
         } else {
             receiver?.stop()
             receiver = null
@@ -190,20 +223,20 @@ class MainActivity : Activity() {
         updateStatus()
     }
 
+    // With no IP yet, streaming starts anyway and the PC finder supplies one.
     private fun startStreaming() {
         val ip = pcIp()
-        if (ip.isEmpty()) {
-            statusText.text = "Escribe la IP de la PC"
-            return
-        }
-        prefs().edit().putString(KEY_PC_IP, ip).apply()
+        if (ip.isNotEmpty()) prefs().edit().putString(KEY_PC_IP, ip).apply()
         streaming = true
-        streamer.start(ip)
+        streamStartMs = SystemClock.elapsedRealtime()
+        meter.reset()
+        streamer.start(ip.ifEmpty { null })
         form.visibility = View.GONE
         videoView.visibility = View.VISIBLE
         videoStatus.visibility = View.VISIBLE
         enterFullScreen()
         updateReceiver()
+        updateWifiLock()
         updateStatus()
     }
 
@@ -211,6 +244,7 @@ class MainActivity : Activity() {
         streaming = false
         streamer.stop()
         updateReceiver()
+        updateWifiLock()
         if (adjustPanel.visibility == View.VISIBLE) setPanelOpen(false)
         videoView.visibility = View.GONE
         videoStatus.visibility = View.GONE
@@ -228,18 +262,86 @@ class MainActivity : Activity() {
             View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
     }
 
+    private fun videoPlaying(): Boolean {
+        val r = receiver ?: return false
+        return SystemClock.elapsedRealtime() - r.lastFrameShownMs < 1000
+    }
+
+    // Looks for the PC while there is none to talk to: on the start screen, and while streaming
+    // gets no video (the PC may have changed address).
+    private fun updateFinder() {
+        if (resumed && (!streaming || !videoPlaying())) finder.start() else finder.stop()
+    }
+
+    private fun answering(ip: String?): Boolean {
+        val at = lastAnswerMs[ip ?: return false] ?: return false
+        return SystemClock.elapsedRealtime() - at < RECONNECT_AFTER_MS
+    }
+
+    // Keeps the address in use while the PC still answers there, and moves to another one only
+    // when it stops: the cable was unplugged, or the router gave the PC a new IP.
+    private fun onPcFound(ip: String) {
+        lastAnswerMs[ip] = SystemClock.elapsedRealtime()
+        if (!streaming) {
+            if (!ipTypedByUser && pcIp() != ip && !answering(pcIp())) setIp(ip)
+            updateStatus()
+            return
+        }
+        val target = streamer.targetHost
+        val sinceVideoMs = SystemClock.elapsedRealtime() - maxOf(streamStartMs, receiver?.lastFrameShownMs ?: 0L)
+        if (target == null || (target != ip && !answering(target) && sinceVideoMs > RECONNECT_AFTER_MS)) {
+            setIp(ip)
+            prefs().edit().putString(KEY_PC_IP, ip).apply()
+            streamer.setTarget(ip)
+            streamStartMs = SystemClock.elapsedRealtime() // give the new address time to answer
+        }
+    }
+
+    private fun setIp(ip: String) {
+        settingIp = true
+        ipField.setText(ip)
+        settingIp = false
+    }
+
+    // Keeps Wi-Fi out of power saving, which delays and drops packets, while streaming.
+    private fun updateWifiLock() {
+        try {
+            val lock = wifiLock ?: run {
+                val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                @Suppress("DEPRECATION")
+                val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                } else {
+                    WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                }
+                wifi.createWifiLock(mode, "smartphone-hmd").apply { setReferenceCounted(false) }.also { wifiLock = it }
+            }
+            if (streaming && resumed) {
+                if (!lock.isHeld) lock.acquire()
+            } else if (lock.isHeld) {
+                lock.release()
+            }
+        } catch (_: Exception) {
+            // Only a performance hint.
+        }
+    }
+
     private fun updateStatus() {
         val error = streamer.lastError ?: receiver?.lastError ?: renderer.lastError
         if (!streaming) {
             statusText.setIfChanged(
-                if (error != null) "Error: $error" else "Escribe la IP de la PC y pulsa Iniciar.\n" +
-                    "Con el video en marcha, toca la pantalla para ajustar cada ojo a tu visor.",
+                when {
+                    error != null -> "Error: $error"
+                    answering(pcIp()) -> "PC encontrada en ${pcIp()}. Pulsa Iniciar."
+                    else -> "Buscando la PC… Abre SteamVR en ella, o escribe su IP."
+                } + "\nCon el video en marcha, toca la pantalla para ajustar cada ojo a tu visor.",
             )
             return
         }
+        if (adjustPanel.visibility == View.VISIBLE) adjustPanel.showLatency(meter.averageMs())
         // The overlay comes back whenever the video stops, with counters that show where it stops.
         val r = receiver
-        val playing = r != null && SystemClock.elapsedRealtime() - r.lastFrameShownMs < 1000
+        val playing = videoPlaying()
         val adjusting = adjustPanel.visibility == View.VISIBLE
         val overlayVisibility = if ((!playing || error != null) && !adjusting) View.VISIBLE else View.GONE
         if (videoStatus.visibility != overlayVisibility) videoStatus.visibility = overlayVisibility
@@ -247,9 +349,14 @@ class MainActivity : Activity() {
         val video = if (r == null) "" else "\nVideo: ${r.packetsReceived.get()} paquetes, " +
             "${r.framesComplete.get()} fotogramas (${r.keyframes.get()} clave, ${r.framesLost.get()} perdidos), " +
             "${r.framesShown.get()} mostrados" + (r.decoderName?.let { " con $it" } ?: "")
+        val target = streamer.targetHost
+        val sending = if (target == null) {
+            "Buscando la PC… Abre SteamVR en ella."
+        } else {
+            "Enviando sensores a $target (${streamer.packetsSent.get()} paquetes)"
+        }
         videoStatus.setIfChanged(
-            (if (error != null) "Error: $error\n" else "") +
-                "Enviando sensores a ${pcIp()} (${streamer.packetsSent.get()} paquetes)" + video +
+            (if (error != null) "Error: $error\n" else "") + sending + video +
                 "\nEsperando el video de SteamVR…\nAtrás: detener · Volumen: recentrar · Tocar: ajustar el visor",
         )
     }
@@ -311,5 +418,7 @@ class MainActivity : Activity() {
         const val KEY_EYE_OFFSET = "eye_offset_mm"
         const val KEY_LENS_K1 = "lens_k1"
         const val KEY_LENS_K2 = "lens_k2"
+        const val KEY_PREDICT = "predict"
+        const val RECONNECT_AFTER_MS = 3000L
     }
 }

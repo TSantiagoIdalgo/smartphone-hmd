@@ -18,7 +18,8 @@ public:
     bool Init(int width, int height, int fps, int bitrate);
     void Shutdown();
 
-    using OutputFunction = std::function<void(const uint8_t* data, size_t size, bool keyframe)>;
+    // `time_100ns` is the time stamp of the input frame this output belongs to.
+    using OutputFunction = std::function<void(const uint8_t* data, size_t size, bool keyframe, int64_t time_100ns)>;
     // Encodes one NV12 frame (width*height*3/2 bytes). Encoded frames go to `output`, usually
     // this frame's, but an encoder may hand it over on a later call.
     bool Encode(const uint8_t* nv12, int64_t time_100ns, bool force_keyframe, const OutputFunction& output);
@@ -40,6 +41,7 @@ private:
     bool provides_samples_ = false;
     DWORD output_size_ = 0;
     int need_input_ = 0;
+    int outputs_ = 0;
     int width_ = 0;
     int height_ = 0;
     int fps_ = 60;
