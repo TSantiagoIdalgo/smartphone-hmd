@@ -24,6 +24,7 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import java.util.concurrent.Executors
 
 /**
  * Press Start: the phone finds the PC on its own (or uses the IP typed in), sends its sensors and
@@ -46,6 +47,9 @@ class MainActivity : Activity() {
     private lateinit var videoStatus: TextView
     private var receiver: VideoReceiver? = null
     private var decoderTarget: DecoderTarget? = null
+    // Android 10 makes the caller wait up to seconds while it takes or drops a Wi-Fi lock, so
+    // that happens on its own thread. wifiLock is only touched there.
+    private val wifiExecutor = Executors.newSingleThreadExecutor()
     private var wifiLock: WifiManager.WifiLock? = null
 
     private var streaming = false
@@ -175,6 +179,7 @@ class MainActivity : Activity() {
         super.onDestroy()
         decoderTarget?.release()
         decoderTarget = null
+        wifiExecutor.shutdown()
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
@@ -305,24 +310,27 @@ class MainActivity : Activity() {
 
     // Keeps Wi-Fi out of power saving, which delays and drops packets, while streaming.
     private fun updateWifiLock() {
-        try {
-            val lock = wifiLock ?: run {
-                val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-                @Suppress("DEPRECATION")
-                val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-                } else {
-                    WifiManager.WIFI_MODE_FULL_HIGH_PERF
+        val hold = streaming && resumed
+        wifiExecutor.execute {
+            try {
+                val lock = wifiLock ?: run {
+                    val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                    @Suppress("DEPRECATION")
+                    val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                    } else {
+                        WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                    }
+                    wifi.createWifiLock(mode, "smartphone-hmd").apply { setReferenceCounted(false) }.also { wifiLock = it }
                 }
-                wifi.createWifiLock(mode, "smartphone-hmd").apply { setReferenceCounted(false) }.also { wifiLock = it }
+                if (hold) {
+                    if (!lock.isHeld) lock.acquire()
+                } else if (lock.isHeld) {
+                    lock.release()
+                }
+            } catch (_: Exception) {
+                // Only a performance hint.
             }
-            if (streaming && resumed) {
-                if (!lock.isHeld) lock.acquire()
-            } else if (lock.isHeld) {
-                lock.release()
-            }
-        } catch (_: Exception) {
-            // Only a performance hint.
         }
     }
 
