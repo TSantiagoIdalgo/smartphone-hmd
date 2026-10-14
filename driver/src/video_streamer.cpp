@@ -1,6 +1,5 @@
 #include "video_streamer.h"
 
-#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <thread>
@@ -174,11 +173,13 @@ void VideoStreamer::EncodeThread()
                            info.width = static_cast<uint16_t>(width);
                            info.height = static_cast<uint16_t>(height);
                            video::Packetize(info, data, size, [&](const uint8_t* packet, size_t packet_size) {
-                               while (NowNs() < next_send_ns) {
+                               int64_t now = NowNs();
+                               while (now < next_send_ns) {
                                    std::this_thread::yield();
+                                   now = NowNs();
                                }
-                               next_send_ns = std::max(next_send_ns, NowNs()) +
-                                              static_cast<int64_t>(packet_size) * 8 * 1000000000LL / kMaxSendBitsPerSecond;
+                               next_send_ns = now + static_cast<int64_t>(packet_size) * 8 * 1000000000LL /
+                                                        kMaxSendBitsPerSecond;
                                if (socket.SendTo(phone, video::kVideoPort, packet, packet_size)) {
                                    ++packets_sent_;
                                    bytes_sent_ += static_cast<int64_t>(packet_size);
