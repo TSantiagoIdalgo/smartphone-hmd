@@ -6,6 +6,7 @@ import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.view.Surface
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -72,6 +73,7 @@ class EyeRenderer(
             buildProgram()
         } catch (e: RuntimeException) {
             lastError = "OpenGL: ${e.message}"
+            Log.e(TAG, lastError!!)
             0
         }
         aPosition = GLES20.glGetAttribLocation(program, "aPosition")
@@ -201,6 +203,8 @@ class EyeRenderer(
     }
 
     private companion object {
+        const val TAG = "SmartphoneHMD"
+
         val VERTEX_SHADER = """
             attribute vec2 aPosition;
             attribute vec2 aMm;

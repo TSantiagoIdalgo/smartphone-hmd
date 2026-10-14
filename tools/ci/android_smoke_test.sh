@@ -39,6 +39,21 @@ has_node() {
     dump_ui && grep -qiE "$1" "$UI_XML"
 }
 
+# True if the app's view of class $1 is visible. dumpsys prints the view tree even while the
+# screen keeps changing (the video screen's counters do), when uiautomator gives up waiting.
+view_visible() {
+    adb shell dumpsys activity top | grep -qE "$1\{[0-9a-f]+ V"
+}
+
+# Taps the middle of the screen, which is landscape while the app runs.
+tap_middle() {
+    local size
+    size=$(adb shell wm size | grep -oE '[0-9]+x[0-9]+' | tail -1 | tr 'x' ' ')
+    set -- $size
+    local long=$(( $1 > $2 ? $1 : $2 )) short=$(( $1 > $2 ? $2 : $1 ))
+    adb shell input tap $(( long / 2 )) $(( short / 2 ))
+}
+
 # Taps the centre of the first view matching the regex $1, ignoring case.
 tap_node() {
     dump_ui || return 1
@@ -51,6 +66,8 @@ tap_node() {
 }
 
 adb install -r "$APK" || fail "Install failed"
+# Older Android covers the first full-screen app with a "swipe to exit" hint that eats taps.
+adb shell settings put secure immersive_mode_confirmations confirmed
 adb logcat -c
 
 echo "== Opening the app"
@@ -67,21 +84,22 @@ tap_node 'text="Iniciar"' || fail "Could not find the Iniciar button"
 sleep 5
 alive || fail "The app closed after pressing Iniciar"
 echo "Still running while streaming"
-has_node 'Enviando sensores' || fail "The streaming screen did not appear"
-if grep -qi 'OpenGL' "$UI_XML"; then
-    grep -i 'OpenGL' "$UI_XML"
+view_visible 'GLSurfaceView' || fail "The video screen did not appear"
+if adb logcat -d -s SmartphoneHMD:E | grep -q 'OpenGL'; then
+    adb logcat -d -s SmartphoneHMD:E
     fail "The video view could not start OpenGL"
 fi
 
 echo "== Tapping the screen opens the eye adjustment, Back closes it"
-tap_node 'Enviando sensores' || fail "Could not find the streaming screen"
+tap_middle
 sleep 2
 alive || fail "The app closed after tapping the screen"
-has_node 'Ancho de cada ojo' || fail "The eye adjustment did not open"
+view_visible 'AdjustPanel' || fail "The eye adjustment did not open"
+has_node 'Ancho de cada ojo' || fail "The eye adjustment has no sliders"
 adb shell input keyevent 4
 sleep 2
 alive || fail "The app closed after closing the eye adjustment"
-has_node 'Ancho de cada ojo' && fail "Back did not close the eye adjustment"
+view_visible 'AdjustPanel' && fail "Back did not close the eye adjustment"
 
 echo "== Going to the background and back while streaming"
 adb shell input keyevent 3 # Home
@@ -89,7 +107,7 @@ sleep 2
 adb shell am start -W -n "$PKG/.MainActivity"
 sleep 3
 alive || fail "The app closed after coming back to the video"
-has_node 'Enviando sensores' || fail "The video screen did not come back"
+view_visible 'GLSurfaceView' || fail "The video screen did not come back"
 
 echo "== Recentering with volume up, then Back"
 adb shell input keyevent 24
