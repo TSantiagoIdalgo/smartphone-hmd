@@ -15,6 +15,7 @@
 #include <windows.h>
 #endif
 
+#include "chaperone.h"
 #include "driver_log.h"
 #include "protocol.h"
 #include "udp_socket.h"
@@ -153,7 +154,8 @@ HmdDevice::HmdDevice()
 #endif
     display_ = std::make_unique<DisplayComponent>(config);
 
-    DriverLog("Smartphone HMD created: %s (%s)", model_number_.c_str(), serial_number_.c_str());
+    DriverLog("Smartphone HMD created: %s (%s), driver build %s", model_number_.c_str(), serial_number_.c_str(),
+              SMARTPHONE_HMD_BUILD);
 }
 
 HmdDevice::~HmdDevice() = default;
@@ -174,6 +176,12 @@ vr::EVRInitError HmdDevice::Activate(uint32_t object_id)
     vr::VRProperties()->SetFloatProperty(container, vr::Prop_UserHeadToEyeDepthMeters_Float, 0.0f);
     vr::VRProperties()->SetFloatProperty(container, vr::Prop_SecondsFromVsyncToPhotons_Float, kVsyncToPhotonsSeconds);
     vr::VRProperties()->SetBoolProperty(container, vr::Prop_IsOnDesktop_Bool, false);
+    // Our own universe and chaperone, so the standing and seated spaces games ask for exist
+    // without a room setup. The bounds stay hidden: with rotation-only tracking they mean nothing.
+    vr::VRProperties()->SetUint64Property(container, vr::Prop_CurrentUniverseId_Uint64, kUniverseId);
+    vr::VRProperties()->SetStringProperty(container, vr::Prop_DriverProvidedChaperoneJson_String,
+                                          ChaperoneJson(kUniverseId, head_height_).c_str());
+    vr::VRProperties()->SetBoolProperty(container, vr::Prop_DriverProvidedChaperoneVisibility_Bool, false);
     // Reports the headset as worn while the phone sends data. Otherwise SteamVR puts it in standby
     // after 5 s without head motion and the compositor stops drawing.
     vr::VRDriverInput()->CreateBooleanComponent(container, "/proximity", &proximity_);

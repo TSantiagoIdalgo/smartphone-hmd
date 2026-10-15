@@ -1,10 +1,13 @@
 // Small self-contained tests for the parser and the head tracker. Run with ctest.
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
+#include "chaperone.h"
 #include "color_convert.h"
 #include "head_tracker.h"
 #include "protocol.h"
@@ -386,6 +389,21 @@ void TestVsyncClock()
     }
 }
 
+void TestChaperoneJson()
+{
+    std::string json = ChaperoneJson(kUniverseId, 1.7f);
+    CHECK(json.find("\"universeID\": \"1397247300\"") != std::string::npos);
+    CHECK(json.find("\"seated\": {\"translation\": [0, -1.700, 0]") != std::string::npos);
+    CHECK(json.find("\"standing\": {\"translation\": [0, 0, 0]") != std::string::npos);
+    // SteamVR rejects trailing commas.
+    json.erase(std::remove_if(json.begin(), json.end(), [](char c) { return std::isspace(static_cast<unsigned char>(c)); }),
+               json.end());
+    CHECK(json.find(",]") == std::string::npos);
+    CHECK(json.find(",}") == std::string::npos);
+    CHECK(std::count(json.begin(), json.end(), '{') == std::count(json.begin(), json.end(), '}'));
+    CHECK(std::count(json.begin(), json.end(), '[') == std::count(json.begin(), json.end(), ']'));
+}
+
 int main()
 {
     TestParse();
@@ -403,6 +421,7 @@ int main()
     TestRgbaToNv12Parallel();
     TestMeanLuma();
     TestVsyncClock();
+    TestChaperoneJson();
     if (g_failures == 0) {
         std::printf("All tests passed\n");
         return 0;

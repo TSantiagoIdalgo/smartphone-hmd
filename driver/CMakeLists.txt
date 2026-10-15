@@ -24,11 +24,20 @@ add_library(tracking STATIC
   src/video_protocol.cpp
   src/color_convert.cpp
   src/vsync_clock.cpp
+  src/chaperone.cpp
 )
 target_include_directories(tracking PUBLIC src)
 find_package(Threads REQUIRED)
 target_link_libraries(tracking PUBLIC Threads::Threads)
 set_target_properties(tracking PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# Logged at startup, so vrserver.txt shows which build SteamVR loaded.
+execute_process(COMMAND git rev-parse --short HEAD
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  OUTPUT_VARIABLE DRIVER_BUILD OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(NOT DRIVER_BUILD)
+  set(DRIVER_BUILD "dev")
+endif()
 
 add_library(driver_smartphone_hmd SHARED
   src/driver_main.cpp
@@ -38,6 +47,7 @@ add_library(driver_smartphone_hmd SHARED
 )
 target_include_directories(driver_smartphone_hmd SYSTEM PRIVATE third_party/openvr)
 target_link_libraries(driver_smartphone_hmd PRIVATE tracking)
+target_compile_definitions(driver_smartphone_hmd PRIVATE SMARTPHONE_HMD_BUILD="${DRIVER_BUILD}")
 if(WIN32)
   # Video streaming: D3D11 frame capture and Media Foundation H.264 encoding.
   target_sources(driver_smartphone_hmd PRIVATE
