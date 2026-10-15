@@ -9,6 +9,7 @@
 #include "head_tracker.h"
 #include "protocol.h"
 #include "video_protocol.h"
+#include "vsync_clock.h"
 
 namespace {
 
@@ -345,6 +346,46 @@ void TestMeanLuma()
     CHECK(MeanLuma(y.data(), 8, 8) == 0);  // smaller than one grid step: nothing sampled
 }
 
+void TestVsyncClock()
+{
+    const double t = 1.0 / 60.0;
+    VsyncClock clock(t);
+    double seconds = 0.0;
+    uint64_t counter = 0;
+
+    // With nothing presented it is a plain 60 Hz clock.
+    clock.SinceLastVsync(2.25 * t, &seconds, &counter);
+    CHECK(counter == 2);
+    CHECK_NEAR(seconds, 0.25 * t, 1e-9);
+
+    // A frame presented mid-interval reports its vsync at once, still in the future.
+    clock.FramePresented(2.5 * t);
+    clock.SinceLastVsync(2.5 * t, &seconds, &counter);
+    CHECK(counter == 3);
+    CHECK_NEAR(seconds, -0.5 * t, 1e-9);
+
+    // A second frame before that vsync waits for the next one; a third does not push further.
+    clock.FramePresented(2.6 * t);
+    clock.SinceLastVsync(2.6 * t, &seconds, &counter);
+    CHECK(counter == 4);
+    clock.FramePresented(2.7 * t);
+    clock.SinceLastVsync(2.7 * t, &seconds, &counter);
+    CHECK(counter == 4);
+    CHECK_NEAR(seconds, -1.3 * t, 1e-9);
+
+    // Without presents the count keeps up with time.
+    clock.SinceLastVsync(7.1 * t, &seconds, &counter);
+    CHECK(counter == 7);
+    CHECK_NEAR(seconds, 0.1 * t, 1e-9);
+
+    // At one present per interval the reported vsync moves by exactly one each time.
+    for (int i = 10; i < 20; ++i) {
+        clock.FramePresented((i + 0.8) * t);
+        clock.SinceLastVsync((i + 0.8) * t, &seconds, &counter);
+        CHECK(counter == static_cast<uint64_t>(i + 1));
+    }
+}
+
 int main()
 {
     TestParse();
@@ -361,6 +402,7 @@ int main()
     TestRgbaToNv12();
     TestRgbaToNv12Parallel();
     TestMeanLuma();
+    TestVsyncClock();
     if (g_failures == 0) {
         std::printf("All tests passed\n");
         return 0;

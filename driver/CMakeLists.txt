@@ -23,6 +23,7 @@ add_library(tracking STATIC
   src/head_tracker.cpp
   src/video_protocol.cpp
   src/color_convert.cpp
+  src/vsync_clock.cpp
 )
 target_include_directories(tracking PUBLIC src)
 find_package(Threads REQUIRED)

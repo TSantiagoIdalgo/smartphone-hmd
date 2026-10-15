@@ -1,12 +1,15 @@
 #include "virtual_display.h"
 
-#include <cmath>
-
 #include "video_streamer.h"
 
 VirtualDisplay::VirtualDisplay(VideoStreamer* streamer, float frequency)
-    : streamer_(streamer), frame_seconds_(1.0 / frequency), start_(std::chrono::steady_clock::now())
+    : streamer_(streamer), start_(std::chrono::steady_clock::now()), vsync_(1.0 / frequency)
 {
+}
+
+double VirtualDisplay::Now() const
+{
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - start_).count();
 }
 
 void VirtualDisplay::Present(const vr::PresentInfo_t* present_info, uint32_t)
@@ -17,13 +20,15 @@ void VirtualDisplay::Present(const vr::PresentInfo_t* present_info, uint32_t)
 void VirtualDisplay::WaitForPresent()
 {
     streamer_->OnWaitForPresent();
+    std::lock_guard<std::mutex> lock(vsync_mutex_);
+    vsync_.FramePresented(Now());
 }
 
 bool VirtualDisplay::GetTimeSinceLastVsync(float* seconds_since_last_vsync, uint64_t* frame_counter)
 {
-    const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start_).count();
-    const double frames = std::floor(elapsed / frame_seconds_);
-    *seconds_since_last_vsync = static_cast<float>(elapsed - frames * frame_seconds_);
-    *frame_counter = static_cast<uint64_t>(frames);
+    double seconds = 0.0;
+    std::lock_guard<std::mutex> lock(vsync_mutex_);
+    vsync_.SinceLastVsync(Now(), &seconds, frame_counter);
+    *seconds_since_last_vsync = static_cast<float>(seconds);
     return true;
 }
