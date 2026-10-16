@@ -1,8 +1,10 @@
 #pragma once
 
 #include <chrono>
+#include <mutex>
 
 #include "openvr_driver.h"
+#include "vsync_clock.h"
 
 class VideoStreamer;
 
@@ -17,7 +19,10 @@ public:
     bool GetTimeSinceLastVsync(float* seconds_since_last_vsync, uint64_t* frame_counter) override;
 
 private:
+    double Now() const;
+
     VideoStreamer* streamer_;
-    double frame_seconds_;
     std::chrono::steady_clock::time_point start_;
+    std::mutex vsync_mutex_;
+    VsyncClock vsync_;
 };
