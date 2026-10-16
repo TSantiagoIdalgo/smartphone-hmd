@@ -14,13 +14,26 @@ using Microsoft::WRL::ComPtr;
 
 namespace {
 
-void SetCodecValue(ICodecAPI* codec, const GUID& property, UINT32 value)
+bool SetCodecValue(ICodecAPI* codec, const GUID& property, UINT32 value)
 {
     VARIANT v;
     VariantInit(&v);
     v.vt = VT_UI4;
     v.ulVal = value;
-    codec->SetValue(&property, &v);
+    return SUCCEEDED(codec->SetValue(&property, &v));
+}
+
+// 0 if the encoder does not say.
+UINT32 GetCodecValue(ICodecAPI* codec, const GUID& property)
+{
+    VARIANT v;
+    VariantInit(&v);
+    if (FAILED(codec->GetValue(&property, &v))) {
+        return 0;
+    }
+    const UINT32 value = v.vt == VT_UI4 ? v.ulVal : 0;
+    VariantClear(&v);
+    return value;
 }
 
 void SetCodecFlag(ICodecAPI* codec, const GUID& property, bool value)
@@ -97,7 +110,14 @@ bool H264Encoder::Init(int width, int height, int fps, int bitrate)
         SetCodecFlag(codec_.Get(), CODECAPI_AVLowLatencyMode, true);
         SetCodecValue(codec_.Get(), CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_CBR);
         SetCodecValue(codec_.Get(), CODECAPI_AVEncCommonMeanBitRate, static_cast<UINT32>(bitrate));
-        SetCodecValue(codec_.Get(), CODECAPI_AVEncMPVGOPSize, static_cast<UINT32>(fps * 2));
+        // Keyframes only when the phone asks for one: when it connects and after a lost packet. A
+        // keyframe is several times bigger than other frames, so periodic ones made the picture
+        // blur and catch up every couple of seconds. Encoders cap this differently, so try smaller.
+        for (const UINT32 frames : {static_cast<UINT32>(fps * 600), 1000u, static_cast<UINT32>(fps * 10)}) {
+            if (SetCodecValue(codec_.Get(), CODECAPI_AVEncMPVGOPSize, frames)) {
+                break;
+            }
+        }
         SetCodecValue(codec_.Get(), CODECAPI_AVEncMPVDefaultBPictureCount, 0);
     }
 
@@ -139,8 +159,9 @@ bool H264Encoder::Init(int width, int height, int fps, int bitrate)
 
     transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
     transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
-    DriverLog("H.264 encoder ready: %dx%d at %d fps, %d kbit/s, %s, %s", width, height, fps, bitrate / 1000,
-              hardware ? "hardware" : "software", async_ ? "async" : "sync");
+    DriverLog("H.264 encoder ready: %dx%d at %d fps, %d kbit/s, %s, %s, keyframe every %u frames", width, height,
+              fps, bitrate / 1000, hardware ? "hardware" : "software", async_ ? "async" : "sync",
+              codec_ ? GetCodecValue(codec_.Get(), CODECAPI_AVEncMPVGOPSize) : 0u);
     return true;
 }
 
