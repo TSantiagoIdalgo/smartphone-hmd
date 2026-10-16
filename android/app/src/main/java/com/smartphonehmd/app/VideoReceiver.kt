@@ -24,6 +24,9 @@ class VideoReceiver(
     private var thread: Thread? = null
     @Volatile private var socket: DatagramSocket? = null
     private var codec: MediaCodec? = null
+    private var outputThread: Thread? = null
+    @Volatile private var outputRunning = false
+    @Volatile private var decoderFailed = false
     private var codecWidth = 0
     private var codecHeight = 0
     private var waitingForKeyframe = true
@@ -76,8 +79,11 @@ class VideoReceiver(
                         assembler.addPacket(packet.data, packet.length)
                     } catch (_: SocketTimeoutException) {
                     }
+                    if (decoderFailed) {
+                        releaseCodec()
+                        waitingForKeyframe = true
+                    }
                     if (waitingForKeyframe) askForKeyframe()
-                    drainOutput()
                 }
             }
         } catch (e: Exception) {
@@ -110,13 +116,7 @@ class VideoReceiver(
         val decoder = codec ?: return
         try {
             // Give a busy decoder some time: skipping a frame breaks the chain until the next keyframe.
-            var index = decoder.dequeueInputBuffer(INPUT_TIMEOUT_US)
-            var tries = 1
-            while (index < 0 && tries < INPUT_TRIES) {
-                drainOutput()
-                index = decoder.dequeueInputBuffer(INPUT_TIMEOUT_US)
-                tries++
-            }
+            val index = decoder.dequeueInputBuffer(INPUT_TIMEOUT_US)
             if (index < 0) {
                 waitingForKeyframe = true
                 return
@@ -127,16 +127,17 @@ class VideoReceiver(
             }
             // Render timestamps must use System.nanoTime's clock.
             val timeUs = System.nanoTime() / 1000
-            queuedTimesUs[queuedNext] = timeUs
-            queuedSeqs[queuedNext] = sensorSeq
-            queuedNext = (queuedNext + 1) % QUEUED_FRAMES
+            synchronized(queuedTimesUs) {
+                queuedTimesUs[queuedNext] = timeUs
+                queuedSeqs[queuedNext] = sensorSeq
+                queuedNext = (queuedNext + 1) % QUEUED_FRAMES
+            }
             decoder.queueInputBuffer(index, 0, size, timeUs, 0)
         } catch (e: Exception) {
             lastError = e.message ?: e.toString()
             releaseCodec()
             waitingForKeyframe = true
         }
-        drainOutput()
     }
 
     private fun configureCodec(width: Int, height: Int): Boolean {
@@ -150,6 +151,8 @@ class VideoReceiver(
             decoder.configure(format, surface, null, 0)
             decoder.start()
             codec = decoder
+            outputRunning = true
+            outputThread = Thread({ outputLoop(decoder) }, "video-output").apply { start() }
             decoderName = decoder.name
             codecWidth = width
             codecHeight = height
@@ -160,32 +163,39 @@ class VideoReceiver(
         }
     }
 
-    private fun drainOutput() {
-        val decoder = codec ?: return
+    // Shows each frame as soon as the decoder finishes it, on its own thread. Waiting for it on the
+    // receiving thread held every frame back until the next frame's first packet arrived.
+    private fun outputLoop(decoder: MediaCodec) {
         val info = MediaCodec.BufferInfo()
         try {
-            while (true) {
-                val index = decoder.dequeueOutputBuffer(info, 0)
-                if (index >= 0) {
-                    decoder.releaseOutputBuffer(index, true)
+            while (outputRunning) {
+                val index = decoder.dequeueOutputBuffer(info, OUTPUT_TIMEOUT_US)
+                if (index < 0) continue
+                decoder.releaseOutputBuffer(index, true)
+                val seq = synchronized(queuedTimesUs) {
                     val i = queuedTimesUs.indexOf(info.presentationTimeUs)
-                    if (i >= 0) meter.shown(queuedSeqs[i], SystemClock.elapsedRealtimeNanos())
-                    framesShown.incrementAndGet()
-                    lastFrameShownMs = SystemClock.elapsedRealtime()
-                    lastError = null
-                } else if (index == MediaCodec.INFO_TRY_AGAIN_LATER) {
-                    break
+                    if (i >= 0) queuedSeqs[i] else null
                 }
+                if (seq != null) meter.shown(seq, SystemClock.elapsedRealtimeNanos())
+                framesShown.incrementAndGet()
+                lastFrameShownMs = SystemClock.elapsedRealtime()
+                lastError = null
             }
         } catch (e: Exception) {
-            // A decoder in an error state keeps throwing: start again from the next keyframe.
-            lastError = e.message ?: e.toString()
-            releaseCodec()
-            waitingForKeyframe = true
+            // A decoder in an error state keeps throwing: the receiving thread starts again from the
+            // next keyframe.
+            if (outputRunning) {
+                lastError = e.message ?: e.toString()
+                decoderFailed = true
+            }
         }
     }
 
     private fun releaseCodec() {
+        outputRunning = false
+        outputThread?.join(1000)
+        outputThread = null
+        decoderFailed = false
         codec?.let {
             try {
                 it.stop()
@@ -198,8 +208,8 @@ class VideoReceiver(
 
     companion object {
         const val VIDEO_PORT = 9945
-        private const val INPUT_TIMEOUT_US = 5_000L
-        private const val INPUT_TRIES = 10
+        private const val INPUT_TIMEOUT_US = 50_000L
+        private const val OUTPUT_TIMEOUT_US = 10_000L
         private const val KEYFRAME_REQUEST_INTERVAL_MS = 300L
         private const val QUEUED_FRAMES = 16
     }
