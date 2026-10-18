@@ -29,6 +29,7 @@ namespace {
 constexpr size_t kMaxQueuedSamples = 256;
 constexpr int kRetryMilliseconds = 2000;
 constexpr double kDeviceRetrySeconds = 5.0;
+constexpr double kCameraRetrySeconds = 1.0;
 constexpr int kRequestTimeoutMs = 500;
 
 }  // namespace
@@ -338,6 +339,7 @@ void PsmsClient::Run()
                 (client_version ? client_version : "?") + ")");
         Stream(api);
         SetStreaming(false);
+        SetCameras(false, Vec3{}, 0);
         if (api.GetIsInitialized()) {
             api.Shutdown();
         }
@@ -355,6 +357,7 @@ void PsmsClient::Stream(const Api& api)
     int device = -1;
     double next_device_check = 0.0;
     bool read_cameras = true;
+    double next_camera_check = 0.0;
     bool last_tracking = false;
     PSMVector3f last_position{};
 
@@ -362,15 +365,21 @@ void PsmsClient::Stream(const Api& api)
         if (device < 0) {
             return;
         }
+        SetStreaming(false);
+        // On a dead connection the stop request would only wait out its timeout.
+        const bool connected = api.GetIsConnected();
         if (use_controller) {
-            api.StopControllerDataStream(device, kRequestTimeoutMs);
+            if (connected) {
+                api.StopControllerDataStream(device, kRequestTimeoutMs);
+            }
             api.FreeControllerListener(device);
         } else {
-            api.StopHmdDataStream(device, kRequestTimeoutMs);
+            if (connected) {
+                api.StopHmdDataStream(device, kRequestTimeoutMs);
+            }
             api.FreeHmdListener(device);
         }
         device = -1;
-        SetStreaming(false);
     };
 
     while (running_) {
@@ -386,11 +395,16 @@ void PsmsClient::Stream(const Api& api)
             next_device_check = 0.0;
         }
 
-        if (read_cameras || trackers_changed || offsets_changed) {
+        if (trackers_changed || offsets_changed) {
+            read_cameras = true;
+            next_camera_check = 0.0;
+        }
+        if (read_cameras && MonoSeconds() >= next_camera_check) {
             read_cameras = false;
             PSMTrackerList trackers{};
             if (api.GetTrackerList(&trackers, kRequestTimeoutMs) == PSMResult_Success) {
-                // The camera poses already include the playspace offsets, like the light.
+                // The camera poses include the playspace position and yaw offsets, like the light.
+                // Only the playspace scale (kept at 1) and per-HMD offsets would set them apart.
                 const PSMVector3f p = trackers.count > 0 ? trackers.trackers[0].tracker_pose.Position : PSMVector3f{};
                 SetCameras(trackers.count > 0, Vec3{p.x * 0.01, p.y * 0.01, p.z * 0.01}, trackers.count);
                 LogOnce("Head position: " + std::to_string(trackers.count) + " camera(s), the first at (" +
@@ -398,6 +412,7 @@ void PsmsClient::Stream(const Api& api)
                         std::to_string(static_cast<int>(p.z)) + ") cm");
             } else {
                 read_cameras = true;
+                next_camera_check = MonoSeconds() + kCameraRetrySeconds;
             }
         }
 
