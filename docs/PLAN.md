@@ -29,7 +29,7 @@ Dos piezas, nada más:
 | Tema | Elección | Por qué |
 |---|---|---|
 | App de escritorio | Todo dentro del driver de SteamVR, sin `.exe` aparte | SteamVR exige un driver en C++ igualmente; un segundo programa solo añade IPC. |
-| Seguimiento | Solo rotación (3DoF), altura de la cabeza fija | Un móvil no puede medir posición de forma fiable sin cámaras. |
+| Seguimiento | Rotación (3DoF) con altura fija. Opcional: posición de la cabeza con una luz en el visor que sigue PSMoveServiceEx (6DoF) | Un móvil no puede medir posición de forma fiable sin cámaras. Con la PS Eye de los PS Move, la posición viene de la cámara y la rotación sigue viniendo del móvil. |
 | Fusión de sensores | En la PC, filtro complementario (Mahony) sobre los datos crudos | Cumple el requisito de enviar los datos "puros" y limpiarlos en la PC, con menos código que otras opciones. |
 | Imagen hacia el móvil | Video H.264 por UDP, codificado con Media Foundation (incluido en Windows, usa la GPU) y decodificado con MediaCodec | Sin dependencias externas y funciona con GPU NVIDIA, AMD o Intel. |
 | Conexión | Wi-Fi. También funciona por cable USB con "Anclaje USB" activado, con el mismo código | El cable da menos latencia cuando el Wi-Fi no alcanza. |

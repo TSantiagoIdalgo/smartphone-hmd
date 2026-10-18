@@ -81,9 +81,17 @@ bool HeadTracker::AddSample(const protocol::Packet& packet)
 
 void HeadTracker::Recenter()
 {
+    RecenterTowards(Vec3{0, 0, -1});
+}
+
+Quat HeadTracker::RecenterTowards(Vec3 world_forward)
+{
     const Vec3 forward = Rotate(orientation_, Vec3{0, 0, -1});
     const double yaw = std::atan2(-forward.x, -forward.z);
-    recenter_ = AxisAngle(Vec3{0, 1, 0}, -yaw);
+    const double target_yaw = std::atan2(-world_forward.x, -world_forward.z);
+    const Quat old_recenter = recenter_;
+    recenter_ = AxisAngle(Vec3{0, 1, 0}, target_yaw - yaw);
+    return Normalize(recenter_ * Conjugate(old_recenter));
 }
 
 Quat HeadTracker::Orientation() const

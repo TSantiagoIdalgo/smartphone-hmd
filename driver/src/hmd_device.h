@@ -5,9 +5,12 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
+#include "head_position.h"
 #include "head_tracker.h"
 #include "openvr_driver.h"
+#include "psms_client.h"
 
 class VideoStreamer;
 class VirtualDisplay;
@@ -59,7 +62,10 @@ public:
 private:
     // Receives the phone's packets, updates the tracker and sends each new pose to SteamVR.
     void TrackingThread();
-    vr::DriverPose_t MakePose(bool receiving) const;
+    // Feeds the head light's samples from PSMoveServiceEx to the position estimator.
+    void UpdateHeadPosition(std::vector<LightSample>* samples);
+    void RecenterHead(const char* source);
+    vr::DriverPose_t MakePose(bool receiving, double now) const;
 
     std::string serial_number_;
     std::string model_number_;
@@ -76,6 +82,20 @@ private:
 
     HeadTracker tracker_;  // only touched by the tracking thread
     double prediction_seconds_ = 0.0;  // same
+
+    // 6DoF: a light on the visor, tracked by PSMoveServiceEx, gives the head a position.
+    bool position_enabled_ = false;
+    bool apply_head_model_ = false;
+    PsmsConfig psms_config_;
+    std::unique_ptr<PsmsClient> psms_;
+    HeadPositionEstimator head_position_;  // only touched by the tracking thread, like the rest
+    bool head_camera_valid_ = false;
+    Vec3 head_camera_;
+    int head_cameras_ = 0;
+    bool head_frozen_ = false;
+    bool freeze_hotkey_was_down_ = false;
+    HeadPositionEstimator::State logged_head_state_ = HeadPositionEstimator::State::NeverSeen;
+    double next_head_stats_ = 0.0;
     std::mutex pose_mutex_;
     vr::DriverPose_t last_pose_{};
 

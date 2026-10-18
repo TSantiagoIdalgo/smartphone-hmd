@@ -13,6 +13,24 @@
 		"display_frequency": 60.0,
 		"head_height_meters": 1.7,
 		"udp_port": 9944,
-		"video_bitrate_mbps": 20
+		"video_bitrate_mbps": 20,
+		"head_position_enabled": false,
+		"head_light_above_eyes_cm": 0.0,
+		"head_light_in_front_of_eyes_cm": 0.0,
+		"head_light_right_of_eyes_cm": 0.0,
+		"head_neck_to_eyes_up_cm": 7.5,
+		"head_neck_to_eyes_forward_cm": 8.0,
+		"head_light_latency_ms": 40.0,
+		"head_light_camera_fps": 60.0,
+		"head_position_lateral_noise_mm": 2.0,
+		"head_position_depth_noise_cm": 3.0,
+		"head_position_agility": 1.0,
+		"head_position_prediction": 0.8,
+		"head_position_apply_head_model": false,
+		"psms_client_dll": "",
+		"psms_host": "127.0.0.1",
+		"psms_port": "9512",
+		"psms_hmd_id": -1,
+		"psms_controller_id": -1
 	}
 }
