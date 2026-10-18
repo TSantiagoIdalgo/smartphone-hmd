@@ -76,6 +76,7 @@ class MainActivity : Activity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             window.attributes.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         }
+        preferFastestRefreshRate()
         streamer = SensorStreamer(getSystemService(Context.SENSOR_SERVICE) as SensorManager, meter)
         streamer.predict = prefs().getBoolean(KEY_PREDICT, true)
         finder = PcFinder(::onPcFound)
@@ -380,6 +381,17 @@ class MainActivity : Activity() {
 
     // The whole screen in landscape, including the parts under the system bars and the camera hole.
     @Suppress("DEPRECATION")
+    // Each decoded frame waits for the screen's next refresh, so a 90 or 120 Hz screen shows it
+    // sooner. Phones often run apps at 60 Hz unless they ask.
+    private fun preferFastestRefreshRate() {
+        val display = windowManager.defaultDisplay
+        val current = display.mode
+        val fastest = display.supportedModes
+            .filter { it.physicalWidth == current.physicalWidth && it.physicalHeight == current.physicalHeight }
+            .maxByOrNull { it.refreshRate } ?: return
+        window.attributes = window.attributes.apply { preferredDisplayModeId = fastest.modeId }
+    }
+
     private fun screenMetrics(): DisplayMetrics {
         val metrics = DisplayMetrics()
         windowManager.defaultDisplay.getRealMetrics(metrics)

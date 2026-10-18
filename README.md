@@ -107,8 +107,14 @@ anticipa.
 ## Calidad del video
 
 La calidad del video se ajusta con `video_bitrate_mbps` (por defecto 20) en `default.vrsettings`, el
-mismo archivo de la resolución. Si la imagen se corta o llega con retraso, conecta el móvil por
-cable USB con el anclaje USB activado, prueba un router de 5 GHz o baja ese valor.
+mismo archivo de la resolución. Por cable USB puedes subirlo a 40 o 50 para que la imagen se vea
+mejor en movimiento; por Wi-Fi de 2.4 GHz mejor deja 20. Si la imagen se corta o llega con retraso,
+conecta el móvil por cable USB con el anclaje USB activado, usa Wi-Fi de 5 GHz o baja ese valor.
+
+Para Wi-Fi de 5 GHz sin router de 5 GHz: activa el punto de acceso del móvil en la banda de 5 GHz y
+conecta a él un adaptador Wi-Fi de 5 GHz de la PC. La app encuentra la PC también así. El punto de
+acceso de Windows no sirve si la misma tarjeta ya está conectada a una red de 2.4 GHz, porque
+entonces solo puede emitir en esa banda.
 
 Si no llega la imagen:
 
