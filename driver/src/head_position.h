@@ -124,6 +124,8 @@ private:
     // Smooths jumps (first sighting, reacquiring, resets) out over a short time.
     Vec3 blend_;
     double blend_time_ = 0.0;
+    // Accepted samples right after a first sighting, reacquisition or reset are blended too.
+    double blend_event_time_ = -1e9;
 
     Stats stats_;
     double depth_innovation_sum_ = 0.0;

@@ -131,6 +131,9 @@ void HeadPositionEstimator::Reset(double time, double measured_at, Vec3 pivot, c
 
 void HeadPositionEstimator::AddLight(double time, Vec3 light, bool tracking, Vec3 world_angular_velocity)
 {
+    if (!std::isfinite(light.x) || !std::isfinite(light.y) || !std::isfinite(light.z)) {
+        return;
+    }
     tracking_ = tracking;
     if (!tracking || state_ == State::Frozen) {
         return;
@@ -161,6 +164,7 @@ void HeadPositionEstimator::AddLight(double time, Vec3 light, bool tracking, Vec
         const Vec3 before = Pivot(time, nullptr);
         Reset(time, measured_at, pivot, noise);
         StartBlend(time, before);
+        blend_event_time_ = time;
         ++stats_.accepted;
         return;
     }
@@ -193,6 +197,7 @@ void HeadPositionEstimator::AddLight(double time, Vec3 light, bool tracking, Vec
         const Vec3 before = Pivot(time, nullptr);
         Reset(time, measured_at, mean, noise);
         StartBlend(time, before);
+        blend_event_time_ = time;
         ++stats_.resets;
         return;
     }
@@ -216,8 +221,12 @@ void HeadPositionEstimator::AddLight(double time, Vec3 light, bool tracking, Vec
     state_ = State::Live;
     last_accept_time_ = time;
     rejected_.clear();
-    if (reacquired) {
+    // The first updates after a jump still move the state a lot (zero velocity, wide covariance).
+    if (reacquired || time - blend_event_time_ < kBlendSeconds) {
         StartBlend(time, before);
+    }
+    if (reacquired) {
+        blend_event_time_ = time;
     }
 
     ++stats_.accepted;
@@ -238,17 +247,21 @@ void HeadPositionEstimator::Tick(double now, bool source_ok)
     }
 }
 
-// Keeps the neck pivot exactly where the output had it, so nothing jumps; turning the head still
-// moves the eyes around it.
+// Holds the neck pivot where the filter last had it; turning the head still moves the eyes around
+// it. The extrapolation the output had glides away instead of being baked into the held state,
+// where the next sample would read it as the head moving backwards.
 void HeadPositionEstimator::EnterHolding(double now)
 {
-    pivot_ = Pivot(now, nullptr);
+    const Vec3 before = Pivot(now, nullptr);
+    const double held_at = now - config_.latency_seconds;
+    Predict(std::min(held_at, state_time_ + kMaxExtrapolationSeconds));
     velocity_ = Vec3{};
     p_pv_ = Mat3{};
     p_vv_ = Mat3::Identity(kInitialVelocityVariance);
-    state_time_ = now - config_.latency_seconds;
+    state_time_ = held_at;
     state_ = State::Holding;
     rejected_.clear();
+    StartBlend(now, before);
     ++stats_.losses;
 }
 
@@ -275,7 +288,7 @@ void HeadPositionEstimator::OnYawChange(Quat delta, Quat before)
     for (TimedOrientation& entry : history_) {
         entry.orientation = Normalize(delta * entry.orientation);
     }
-    if (state_ != State::NeverSeen) {
+    if (ever_seen_) {
         pivot_ = pivot_ + Rotate(before, light_from_neck_) - Rotate(delta * before, light_from_neck_);
     }
     rejected_.clear();

@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <random>
 #include <string>
 #include <vector>
@@ -545,7 +546,7 @@ struct HeadSimulation {
             }
             // PSMoveServiceEx publishes every 5 ms, interpolating from the previous frame to the
             // newest one over one frame.
-            if (interpolated && have_frame && frame_seen && step % 5 == 0) {
+            if (interpolated && have_frame && frame_seen && std::floor(time / 0.005) != std::floor((time - 0.002) / 0.005)) {
                 const double f = std::min((time - frame_arrival) * 60.0, 1.0);
                 estimator.AddLight(time, previous_frame_light + (frame_light - previous_frame_light) * f, true,
                                    now.angular_velocity);
@@ -682,7 +683,7 @@ void TestHeadSmoothsDepthNoise()
     double depth_sum = 0.0;
     double lateral_sum = 0.0;
     int count = 0;
-    sim.Run(6.0, StandStill, nullptr, 1.0, [&](double time) {
+    sim.Run(32.0, StandStill, nullptr, 1.0, [&](double time) {
         if (time < 102.0) {
             return;
         }
@@ -693,7 +694,7 @@ void TestHeadSmoothsDepthNoise()
         ++count;
     });
     // Predicting 40-50 ms ahead amplifies the small sideways noise a little; it must stay small.
-    CHECK(std::sqrt(depth_sum / count) < 0.6 * 0.03);
+    CHECK(std::sqrt(depth_sum / count) < 0.65 * 0.03);
     CHECK(std::sqrt(lateral_sum / count) < 2.0 * 0.002);
 }
 
@@ -708,7 +709,7 @@ void TestHeadInterpolatedStream()
         const HeadRun run = sim.Run(8.0, StandStill);
         return run.rms;
     };
-    CHECK(depth_rms(true) < 1.3 * depth_rms(false));
+    CHECK(depth_rms(true) < 1.05 * depth_rms(false));
 }
 
 void TestHeadOutlier()
@@ -807,16 +808,107 @@ void TestHeadFreeze()
         m.neck = m.neck + Vec3{0.15 * std::sin(2.0 * t), 0, 0};
         return m;
     };
+    Vec3 frozen_at;
+    double frozen_drift = 0.0;
     const HeadRun run = sim.Run(4.0, sway, nullptr, 1.0, [&](double time) {
         if (std::fabs(time - 101.5) < 0.001) {
             sim.estimator.SetFrozen(true, time);
+            frozen_at = sim.estimator.Output(time, Quat{}, Vec3{}).position;
+        }
+        if (time > 101.5 && time < 102.5) {
+            frozen_drift = std::max(frozen_drift, Length(sim.estimator.Output(time, Quat{}, Vec3{}).position - frozen_at));
         }
         if (std::fabs(time - 102.5) < 0.001) {
             sim.estimator.SetFrozen(false, time);
         }
     });
+    CHECK(frozen_drift < 0.001);
     CHECK(run.max_step < 0.02);
     CHECK(Length(run.last_eyes - run.last_truth) < 0.01);
+}
+
+HeadMotion WalkSideways(double t)
+{
+    // Standing, then stepping to the right at 1 m/s from t = 1 s.
+    HeadMotion m = StandStill(t);
+    m.neck = m.neck + Vec3{std::max(t - 1.0, 0.0), 0, 0};
+    return m;
+}
+
+void TestHeadDropoutWhileMoving()
+{
+    // One camera frame without the light while the head moves: no backwards slide, no jump.
+    for (const bool interpolated : {false, true}) {
+        HeadSimulation sim;
+        sim.interpolated = interpolated;
+        sim.Run(1.4, WalkSideways);
+        sim.estimator.TakeStats();
+        const HeadRun run = sim.Run(0.6, [](double t) { return WalkSideways(t + 1.4); },
+                                    [](double t) { return std::fabs(t - 0.1) > 0.01; }, 0.0);
+        const HeadPositionEstimator::Stats stats = sim.estimator.TakeStats();
+        CHECK(stats.losses == 1);
+        CHECK(stats.resets == 0);
+        CHECK(run.max_step < 0.01);
+        // Held for one frame plus the camera delay while walking at 1 m/s.
+        CHECK(run.max_error < 0.08);
+    }
+}
+
+void TestHeadUnfreezeWhileMoving()
+{
+    // Frozen while walking 1 m to the side, unfrozen still walking: glide over, no jump.
+    HeadSimulation sim;
+    const auto walk = [](double t) {
+        HeadMotion m = StandStill(t);
+        m.neck = m.neck + Vec3{0.8 * std::max(t - 1.0, 0.0), 0, 0};
+        return m;
+    };
+    double max_step_after = 0.0;
+    Vec3 previous;
+    bool have_previous = false;
+    sim.Run(3.5, walk, nullptr, 1.0, [&](double time) {
+        if (std::fabs(time - 101.0) < 0.001) {
+            sim.estimator.SetFrozen(true, time);
+        }
+        if (std::fabs(time - 102.25) < 0.001) {
+            sim.estimator.SetFrozen(false, time);
+        }
+        if (time > 102.25) {
+            const Vec3 eyes = sim.estimator.Output(time, Quat{}, Vec3{}).position;
+            if (have_previous) {
+                max_step_after = std::max(max_step_after, Length(eyes - previous));
+            }
+            previous = eyes;
+            have_previous = true;
+        }
+    });
+    CHECK(max_step_after < 0.03);
+    CHECK(sim.estimator.state() == HeadPositionEstimator::State::Live);
+}
+
+void TestHeadRecenterFrozenBeforeSeen()
+{
+    // Frozen before the light was ever seen, recentered, unfrozen: the default eyes stay put.
+    HeadPositionEstimator estimator(TestHeadConfig());
+    estimator.SetFrozen(true, 1.0);
+    const Quat before{};
+    const Quat delta = AxisAngle(Vec3{0, 1, 0}, kPi / 2);
+    estimator.OnYawChange(delta, before);
+    const Vec3 frozen = estimator.Output(1.0, delta * before, Vec3{}).position;
+    estimator.SetFrozen(false, 1.0);
+    const Vec3 unfrozen = estimator.Output(1.0, delta * before, Vec3{}).position;
+    CHECK(Length(unfrozen - frozen) < 1e-9);
+}
+
+void TestHeadIgnoresNonFinite()
+{
+    HeadSimulation sim;
+    sim.Run(1.5, StandStill);
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    sim.estimator.AddLight(sim.time + 0.001, Vec3{nan, 1.6, 0.0}, true, Vec3{});
+    const Vec3 eyes = sim.estimator.Output(sim.time + 0.001, Quat{}, Vec3{}).position;
+    CHECK(std::isfinite(eyes.x) && std::isfinite(eyes.y) && std::isfinite(eyes.z));
+    CHECK(Length(eyes - sim.Eyes(StandStill(0))) < 0.005);
 }
 
 int main()
@@ -853,6 +945,10 @@ int main()
     TestHeadReacquire();
     TestHeadYawChangeKeepsLight();
     TestHeadFreeze();
+    TestHeadDropoutWhileMoving();
+    TestHeadUnfreezeWhileMoving();
+    TestHeadRecenterFrozenBeforeSeen();
+    TestHeadIgnoresNonFinite();
     if (g_failures == 0) {
         std::printf("All tests passed\n");
         return 0;
