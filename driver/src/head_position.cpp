@@ -344,6 +344,12 @@ HeadPoseOut HeadPositionEstimator::Output(double now, Quat orientation, Vec3 wor
     return {pivot + neck_to_eyes + BlendOffset(now), linear + Cross(world_angular_velocity, neck_to_eyes)};
 }
 
+HeadPoseOut NeckModel(Vec3 eyes, Vec3 eyes_from_neck, Quat orientation, Vec3 world_angular_velocity)
+{
+    const Vec3 neck_to_eyes = Rotate(orientation, eyes_from_neck);
+    return {eyes - eyes_from_neck + neck_to_eyes, Cross(world_angular_velocity, neck_to_eyes)};
+}
+
 HeadPositionEstimator::Stats HeadPositionEstimator::TakeStats()
 {
     Stats stats = stats_;

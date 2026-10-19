@@ -87,6 +87,12 @@ bool FreezeHotkeyDown()
     return HotkeyDown('P');
 }
 
+// Ctrl+Alt+H holds the eyes still, and lets them turn around the neck again.
+bool HoldHotkeyDown()
+{
+    return HotkeyDown('H');
+}
+
 const char* HeadStateText(HeadPositionEstimator::State state)
 {
     switch (state) {
@@ -181,6 +187,8 @@ HmdDevice::HmdDevice()
     head_height_ = vr::VRSettings()->GetFloat(kSettingsSection, "head_height_meters");
     udp_port_ = vr::VRSettings()->GetInt32(kSettingsSection, "udp_port");
 
+    eyes_from_neck_ = Vec3{0.0, GetDoubleSetting("head_neck_to_eyes_up_cm", 7.5),
+                           -GetDoubleSetting("head_neck_to_eyes_forward_cm", 8.0)} * 0.01;
     position_enabled_ = vr::VRSettings()->GetBool(kSettingsSection, "head_position_enabled");
     if (position_enabled_) {
         const double above = GetDoubleSetting("head_light_above_eyes_cm", 0.0);
@@ -188,8 +196,7 @@ HmdDevice::HmdDevice()
         const double right = GetDoubleSetting("head_light_right_of_eyes_cm", 0.0);
         HeadPositionConfig head;
         head.eyes_from_light = Vec3{-right, -above, in_front} * 0.01;
-        head.eyes_from_neck = Vec3{0.0, GetDoubleSetting("head_neck_to_eyes_up_cm", 7.5),
-                                   -GetDoubleSetting("head_neck_to_eyes_forward_cm", 8.0)} * 0.01;
+        head.eyes_from_neck = eyes_from_neck_;
         head.default_eyes = Vec3{0.0, head_height_, 0.0};
         head.latency_seconds = std::clamp(GetDoubleSetting("head_light_latency_ms", 40.0), 0.0, 200.0) / 1000.0;
         head.camera_period_seconds = 1.0 / std::max(GetDoubleSetting("head_light_camera_fps", 60.0), 1.0);
@@ -355,21 +362,28 @@ vr::DriverPose_t HmdDevice::MakePose(bool receiving, double now) const
     pose.vecAngularVelocity[1] = angular_velocity.y;
     pose.vecAngularVelocity[2] = angular_velocity.z;
 
+    // Our own neck model, not SteamVR's head model: VDM reads this position to line the PS Move
+    // hands up with the head, and SteamVR's model would move it in ways we cannot hold still.
+    const Vec3 straight_ahead{0.0, head_height_, 0.0};
+    HeadPoseOut head;
     if (position_enabled_) {
-        // 6DoF: the eyes, from the head light plus our own neck model.
-        const HeadPoseOut head = head_position_.Output(now, orientation, angular_velocity);
-        pose.vecPosition[0] = head.position.x;
-        pose.vecPosition[1] = head.position.y;
-        pose.vecPosition[2] = head.position.z;
-        pose.vecVelocity[0] = head.velocity.x;
-        pose.vecVelocity[1] = head.velocity.y;
-        pose.vecVelocity[2] = head.velocity.z;
+        // 6DoF: the eyes, from the head light.
+        head = head_position_.Output(now, orientation, angular_velocity);
         pose.shouldApplyHeadModel = apply_head_model_;
+    } else if (head_held_) {
+        // 3DoF, held: VDM's playspace calibration only treats the visor as fixed in place if its
+        // position does not change at all, and the neck model moves it with every small turn.
+        head.position = straight_ahead;
     } else {
-        // 3DoF: the head stays at a fixed height; SteamVR's head model adds the neck movement.
-        pose.vecPosition[1] = head_height_;
-        pose.shouldApplyHeadModel = true;
+        // 3DoF: the neck stays put and the eyes turn around it.
+        head = NeckModel(straight_ahead, eyes_from_neck_, orientation, angular_velocity);
     }
+    pose.vecPosition[0] = head.position.x;
+    pose.vecPosition[1] = head.position.y;
+    pose.vecPosition[2] = head.position.z;
+    pose.vecVelocity[0] = head.velocity.x;
+    pose.vecVelocity[1] = head.velocity.y;
+    pose.vecVelocity[2] = head.velocity.z;
     pose.poseIsValid = true;
     pose.deviceIsConnected = true;
     // Never out of range because of the head light: that would grey out the view.
@@ -389,6 +403,7 @@ void HmdDevice::TrackingThread()
     using Clock = std::chrono::steady_clock;
     Clock::time_point last_sample = Clock::now() - std::chrono::hours(1);
     bool hotkey_was_down = false;
+    bool hold_hotkey_was_down = false;
     bool was_receiving = false;
     uint32_t last_discoverer = 0;
     double logged_prediction = -1.0;
@@ -447,6 +462,11 @@ void HmdDevice::TrackingThread()
             RecenterHead("the keyboard");
         }
         hotkey_was_down = hotkey_down;
+        const bool hold_down = HoldHotkeyDown();
+        if (hold_down && !hold_hotkey_was_down) {
+            ToggleHeadHold();
+        }
+        hold_hotkey_was_down = hold_down;
         if (position_enabled_) {
             UpdateHeadPosition(&light_samples);
         }
@@ -534,4 +554,15 @@ void HmdDevice::RecenterHead(const char* source)
         head_position_.OnYawChange(delta, before);
     }
     DriverLog("Recentered from %s", source);
+}
+
+void HmdDevice::ToggleHeadHold()
+{
+    if (position_enabled_) {
+        DriverLog("Ctrl+Alt+H only works without head_position_enabled; Ctrl+Alt+P freezes the head light");
+        return;
+    }
+    head_held_ = !head_held_;
+    DriverLog(head_held_ ? "Head held still for VDM's playspace calibration; Ctrl+Alt+H again when it is done"
+                         : "Head turns around the neck again");
 }

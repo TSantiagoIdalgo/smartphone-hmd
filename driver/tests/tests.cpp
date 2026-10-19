@@ -428,6 +428,24 @@ void TestRecenterTowards()
     CHECK_NEAR(f.Forward().x, 0.0, 1e-6);
 }
 
+void TestNeckModel()
+{
+    const Vec3 eyes{0.0, 1.7, 0.0};
+    const Vec3 eyes_from_neck{0.0, 0.075, -0.08};
+    // Looking straight ahead, the eyes are where they were asked to be.
+    HeadPoseOut head = NeckModel(eyes, eyes_from_neck, Quat{}, Vec3{});
+    CHECK_NEAR(Length(head.position - eyes), 0.0, 1e-12);
+    // Turned around, they are on the other side of the neck.
+    head = NeckModel(eyes, eyes_from_neck, AxisAngle(Vec3{0, 1, 0}, kPi), Vec3{});
+    CHECK_NEAR(Length(head.position - Vec3{0.0, 1.7, 0.16}), 0.0, 1e-9);
+    // Looking down, they drop below the neck and come back a little.
+    head = NeckModel(eyes, eyes_from_neck, AxisAngle(Vec3{1, 0, 0}, -kPi / 2), Vec3{});
+    CHECK_NEAR(Length(head.position - Vec3{0.0, 1.7 - 0.155, 0.005}), 0.0, 1e-9);
+    // Turning left moves the eyes, in front of the neck, to the left.
+    head = NeckModel(eyes, eyes_from_neck, Quat{}, Vec3{0, 1, 0});
+    CHECK_NEAR(Length(head.velocity - Vec3{-0.08, 0.0, 0.0}), 0.0, 1e-12);
+}
+
 void TestMat3()
 {
     Mat3 a;
@@ -930,6 +948,7 @@ int main()
     TestVsyncClock();
     TestChaperoneJson();
     TestRecenterTowards();
+    TestNeckModel();
     TestMat3();
     TestHeadNeverSeen();
     TestHeadStillLight();

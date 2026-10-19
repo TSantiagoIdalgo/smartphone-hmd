@@ -65,6 +65,7 @@ private:
     // Feeds the head light's samples from PSMoveServiceEx to the position estimator.
     void UpdateHeadPosition(std::vector<LightSample>* samples);
     void RecenterHead(const char* source);
+    void ToggleHeadHold();
     vr::DriverPose_t MakePose(bool receiving, double now) const;
 
     std::string serial_number_;
@@ -82,6 +83,10 @@ private:
 
     HeadTracker tracker_;  // only touched by the tracking thread
     double prediction_seconds_ = 0.0;  // same
+
+    Vec3 eyes_from_neck_{0.0, 0.075, -0.08};  // our neck model, head axes, m
+    // 3DoF only (Ctrl+Alt+H): the eyes stay exactly still, for VDM's playspace calibration.
+    bool head_held_ = false;
 
     // 6DoF: a light on the visor, tracked by PSMoveServiceEx, gives the head a position.
     bool position_enabled_ = false;

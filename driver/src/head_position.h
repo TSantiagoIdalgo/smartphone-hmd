@@ -34,6 +34,10 @@ struct HeadPoseOut {
     Vec3 velocity;
 };
 
+// Without the head light: the neck stays where it is when the eyes are at `eyes` looking straight
+// ahead (identity orientation), and the eyes turn around it.
+HeadPoseOut NeckModel(Vec3 eyes, Vec3 eyes_from_neck, Quat orientation, Vec3 world_angular_velocity);
+
 class HeadPositionEstimator {
 public:
     enum class State {
