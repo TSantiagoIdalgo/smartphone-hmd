@@ -502,6 +502,9 @@ void HmdDevice::UpdateHeadPosition(std::vector<LightSample>* samples)
     const Vec3 angular_velocity = tracker_.AngularVelocity();
     for (const LightSample& sample : *samples) {
         head_position_.AddLight(sample.time, sample.position, sample.tracking, angular_velocity);
+        if (sample.tracking) {
+            head_last_light_ = sample.position;
+        }
     }
     head_position_.Tick(now, streaming);
 
@@ -519,6 +522,9 @@ void HmdDevice::UpdateHeadPosition(std::vector<LightSample>* samples)
                       stats.accepted, stats.rejected, stats.implausible, stats.resets, stats.losses,
                       stats.depth_innovation_rms_m * 1000.0, stats.lateral_innovation_rms_m * 1000.0,
                       stats.eye_height_m, stats.camera_distance_m);
+            DriverLog("Head light: newest light at (%.2f, %.2f, %.2f) m, camera at (%.2f, %.2f, %.2f) m",
+                      head_last_light_.x, head_last_light_.y, head_last_light_.z, head_camera_.x, head_camera_.y,
+                      head_camera_.z);
         }
     }
 }

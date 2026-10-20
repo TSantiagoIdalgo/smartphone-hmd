@@ -96,6 +96,7 @@ private:
     HeadPositionEstimator head_position_;  // only touched by the tracking thread, like the rest
     bool head_camera_valid_ = false;
     Vec3 head_camera_;
+    Vec3 head_last_light_;  // newest light position as PSMoveServiceEx gave it, for the log
     int head_cameras_ = 0;
     bool head_frozen_ = false;
     bool freeze_hotkey_was_down_ = false;
