@@ -65,6 +65,7 @@ struct Feeder {
     HeadTracker tracker;
     uint32_t seq = 0;
     int64_t ts = 1000000000;
+    float mag[3] = {0, 0, 0};
 
     void Run(double seconds, float gx, float gy, float gz, float ax, float ay, float az)
     {
@@ -75,6 +76,7 @@ struct Feeder {
             p.timestamp_ns = (ts += kStepNs);
             p.gyro[0] = gx; p.gyro[1] = gy; p.gyro[2] = gz;
             p.accel[0] = ax; p.accel[1] = ay; p.accel[2] = az;
+            for (int k = 0; k < 3; ++k) p.mag[k] = mag[k];
             tracker.AddSample(p);
         }
     }
@@ -180,6 +182,42 @@ void TestTurnLeft()
     CHECK_NEAR(fwd.z, -std::cos(1.0), 0.02);
     // SteamVR gets the angular velocity in world axes.
     CHECK_NEAR(f.tracker.AngularVelocity().y, 1.0, 1e-3);
+}
+
+// The phone is a little shaken (so the gyro bias is not learned) and its gyro reads 0.02 rad/s
+// of yaw too much. Field: 40 uT down and 20 uT horizontal, in phone axes.
+double YawAfterDrift(double gain, double seconds)
+{
+    Feeder f;
+    f.tracker.SetMagnetometerGain(gain);
+    f.mag[0] = -40.0f;
+    f.mag[2] = -20.0f;
+    f.Run(seconds, 0.02f, 0, 0, kG * 1.06f, 0, 0);
+    const Vec3 fwd = f.Forward();
+    return std::atan2(-fwd.x, -fwd.z);
+}
+
+void TestMagnetometerHoldsYaw()
+{
+    CHECK(std::fabs(YawAfterDrift(0.0, 60.0)) > 1.0);
+    CHECK(std::fabs(YawAfterDrift(0.2, 60.0)) < 0.2);
+}
+
+void TestMagnetometerIgnoresBentField()
+{
+    // The field suddenly points elsewhere (a magnet or a speaker): the view must not follow it.
+    Feeder f;
+    f.tracker.SetMagnetometerGain(0.5);
+    f.mag[0] = -40.0f;
+    f.mag[2] = -20.0f;
+    f.Run(5.0, 0, 0, 0, kG, 0, 0);
+    f.mag[0] = -20.0f;
+    f.mag[1] = 60.0f;
+    f.mag[2] = 30.0f;
+    f.Run(20.0, 0, 0, 0, kG, 0, 0);
+    const Vec3 fwd = f.Forward();
+    CHECK_NEAR(fwd.x, 0.0, 0.02);
+    CHECK_NEAR(fwd.z, -1.0, 0.02);
 }
 
 void TestRecenter()
@@ -937,6 +975,8 @@ int main()
     TestStillUpright();
     TestTurnLeft();
     TestRecenter();
+    TestMagnetometerHoldsYaw();
+    TestMagnetometerIgnoresBentField();
     TestTiltFollowsGravity();
     TestGyroBiasIsLearned();
     TestRejectsBadSamples();

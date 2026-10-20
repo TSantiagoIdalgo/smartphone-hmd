@@ -70,6 +70,11 @@ Al girar, los ojos se mueven alrededor del cuello, como en la realidad. Para ali
 con la "Playspace Calibration" de VDM, pulsa **Ctrl+Alt+H** antes de empezarla y otra vez al
 terminar: mientras tanto el visor queda exactamente quieto, que es lo que VDM necesita.
 
+Si la vista se descentra con el tiempo (deriva del giroscopio), pon `"magnetometer_gain": 0.1` en
+`default.vrsettings`. La brújula del móvil corrige entonces el giro horizontal muy despacio, y solo
+mientras el campo magnético se ve limpio: si algo lo desvía (imanes, parlantes), el driver la ignora.
+Con `0` (el valor por defecto) no se usa. Si notas que la vista se mece sola, bájalo o ponlo en `0`.
+
 Si la app no encuentra la PC (algunos routers bloquean la búsqueda), escribe su IP, que da
 `ipconfig` en la PC. Puedes pulsar **Iniciar** aunque aún no la haya encontrado: empieza en cuanto
 aparezca. Si el video se corta, por ejemplo al desenchufar el cable o porque la PC cambió de IP, la

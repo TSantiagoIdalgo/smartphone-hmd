@@ -189,6 +189,7 @@ HmdDevice::HmdDevice()
 
     eyes_from_neck_ = Vec3{0.0, GetDoubleSetting("head_neck_to_eyes_up_cm", 7.5),
                            -GetDoubleSetting("head_neck_to_eyes_forward_cm", 8.0)} * 0.01;
+    tracker_.SetMagnetometerGain(std::clamp(GetDoubleSetting("magnetometer_gain", 0.0), 0.0, 0.5));
     position_enabled_ = vr::VRSettings()->GetBool(kSettingsSection, "head_position_enabled");
     if (position_enabled_) {
         const double above = GetDoubleSetting("head_light_above_eyes_cm", 0.0);

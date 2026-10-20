@@ -33,6 +33,10 @@ public:
 
     bool HasData() const { return has_data_; }
 
+    // Turns on the slow yaw correction from the magnetometer. `gain` is the fraction of the yaw
+    // error removed per second (0 = off, the default). It only acts while the field looks clean.
+    void SetMagnetometerGain(double gain) { mag_gain_ = gain; }
+
 private:
     bool has_data_ = false;
     uint32_t last_seq_ = 0;
@@ -42,4 +46,14 @@ private:
     Quat recenter_;        // yaw correction applied on top
     Vec3 gyro_bias_;       // rad/s, head axes
     Vec3 angular_velocity_;  // bias-corrected, head axes
+
+    // Magnetometer yaw correction. The reference is the horizontal field direction in the
+    // pre-recenter world frame, averaged over the first clean samples; recentering does not touch it.
+    void CorrectYaw(const float mag[3], double dt);
+    double mag_gain_ = 0.0;
+    int mag_seed_count_ = 0;
+    Vec3 mag_reference_;       // horizontal unit vector, once seeded
+    Vec3 mag_seed_sum_;
+    double mag_norm_avg_ = 0.0;  // uT, running average of accepted samples
+    double mag_dip_avg_ = 0.0;   // sin(inclination) in the world frame
 };

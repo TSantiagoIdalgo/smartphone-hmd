@@ -14,6 +14,7 @@
 		"head_height_meters": 1.7,
 		"udp_port": 9944,
 		"video_bitrate_mbps": 20,
+		"magnetometer_gain": 0.0,
 		"head_position_enabled": false,
 		"head_light_above_eyes_cm": 0.0,
 		"head_light_in_front_of_eyes_cm": 0.0,
