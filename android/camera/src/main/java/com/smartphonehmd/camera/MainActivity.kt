@@ -70,7 +70,7 @@ class MainActivity : ComponentActivity() {
     private val poseThread = Executors.newSingleThreadExecutor()
     private lateinit var link: PcLink
     private lateinit var previewView: PreviewView
-    private lateinit var overlay: PoseOverlay
+    private lateinit var poseOverlay: PoseOverlay
     private lateinit var panel: View
     private lateinit var statsText: TextView
     private lateinit var lockButton: Button
@@ -181,7 +181,7 @@ class MainActivity : ComponentActivity() {
 
     private fun buildViews() {
         previewView = PreviewView(this).apply { scaleType = PreviewView.ScaleType.FIT_CENTER }
-        overlay = PoseOverlay(this).apply {
+        poseOverlay = PoseOverlay(this).apply {
             setOnClickListener { panel.visibility = if (panel.visibility == View.VISIBLE) View.GONE else View.VISIBLE }
         }
         statsText = TextView(this).apply {
@@ -229,7 +229,7 @@ class MainActivity : ComponentActivity() {
         setContentView(FrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
             addView(previewView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
-            addView(overlay, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+            addView(poseOverlay, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
             addView(panel, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP))
         })
     }
@@ -319,7 +319,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         usingFront = selector == CameraSelector.DEFAULT_FRONT_CAMERA
-        overlay.mirrored = usingFront
+        poseOverlay.mirrored = usingFront
 
         val characteristics = Camera2CameraInfo.from(info)
         // Realtime means the frame times are already on elapsedRealtime, the clock the PC syncs to.
@@ -517,7 +517,7 @@ class MainActivity : ComponentActivity() {
             kneeVisibility = pairVisibility(25)
             ankleVisibility = pairVisibility(27)
         }
-        overlay.show(frame.landmarks, frame.landmarkCount, frame.width, frame.height)
+        poseOverlay.show(frame.landmarks, frame.landmarkCount, frame.width, frame.height)
     }
 
     /** The lower visibility of a left point and its right twin, which follows it. */
