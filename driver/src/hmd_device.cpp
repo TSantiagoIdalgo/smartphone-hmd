@@ -17,6 +17,7 @@
 
 #include "chaperone.h"
 #include "driver_log.h"
+#include "mono_clock.h"
 #include "protocol.h"
 #include "udp_socket.h"
 #if defined(_WIN32)
@@ -34,22 +35,77 @@ constexpr float kVsyncToPhotonsSeconds = 0.011f;
 // it, stopping a fast turn overshoots too visibly.
 constexpr double kMaxPredictionSeconds = 0.08;
 
-std::string GetStringSetting(const char* key)
+// Recentering towards the camera needs the head at least this far from it, horizontally.
+constexpr double kMinCameraDistance = 0.3;
+constexpr double kHeadStatsSeconds = 10.0;
+
+std::string GetStringSetting(const char* key, const char* fallback = "")
 {
-    char buffer[256] = {};
-    vr::VRSettings()->GetString(kSettingsSection, key, buffer, sizeof(buffer));
-    return buffer;
+    char buffer[1024] = {};
+    vr::EVRSettingsError error = vr::VRSettingsError_None;
+    vr::VRSettings()->GetString(kSettingsSection, key, buffer, sizeof(buffer), &error);
+    return error == vr::VRSettingsError_None ? buffer : fallback;
 }
 
-// Ctrl+Alt+R on the PC keyboard recenters the view.
-bool RecenterHotkeyDown()
+// The head position settings fall back to these defaults when a key is missing, so updating only
+// the DLL (and keeping an older default.vrsettings) still works.
+double GetDoubleSetting(const char* key, double fallback)
+{
+    vr::EVRSettingsError error = vr::VRSettingsError_None;
+    const double value = vr::VRSettings()->GetFloat(kSettingsSection, key, &error);
+    return error == vr::VRSettingsError_None ? value : fallback;
+}
+
+int GetIntSetting(const char* key, int fallback)
+{
+    vr::EVRSettingsError error = vr::VRSettingsError_None;
+    const int value = vr::VRSettings()->GetInt32(kSettingsSection, key, &error);
+    return error == vr::VRSettingsError_None ? value : fallback;
+}
+
+// Ctrl+Alt+<key> on the PC keyboard.
+bool HotkeyDown(int key)
 {
 #if defined(_WIN32)
     return (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_MENU) & 0x8000) &&
-           (GetAsyncKeyState('R') & 0x8000);
+           (GetAsyncKeyState(key) & 0x8000);
 #else
+    (void)key;
     return false;
 #endif
+}
+
+// Ctrl+Alt+R recenters the view.
+bool RecenterHotkeyDown()
+{
+    return HotkeyDown('R');
+}
+
+// Ctrl+Alt+P stops following the head light, and starts again.
+bool FreezeHotkeyDown()
+{
+    return HotkeyDown('P');
+}
+
+// Ctrl+Alt+H holds the eyes still, and lets them turn around the neck again.
+bool HoldHotkeyDown()
+{
+    return HotkeyDown('H');
+}
+
+const char* HeadStateText(HeadPositionEstimator::State state)
+{
+    switch (state) {
+    case HeadPositionEstimator::State::NeverSeen:
+        return "not seen yet";
+    case HeadPositionEstimator::State::Live:
+        return "tracked";
+    case HeadPositionEstimator::State::Holding:
+        return "lost, holding the head where it was";
+    case HeadPositionEstimator::State::Frozen:
+        return "frozen (Ctrl+Alt+P)";
+    }
+    return "?";
 }
 
 }  // namespace
@@ -131,6 +187,41 @@ HmdDevice::HmdDevice()
     head_height_ = vr::VRSettings()->GetFloat(kSettingsSection, "head_height_meters");
     udp_port_ = vr::VRSettings()->GetInt32(kSettingsSection, "udp_port");
 
+    eyes_from_neck_ = Vec3{0.0, GetDoubleSetting("head_neck_to_eyes_up_cm", 7.5),
+                           -GetDoubleSetting("head_neck_to_eyes_forward_cm", 8.0)} * 0.01;
+    tracker_.SetMagnetometerGain(std::clamp(GetDoubleSetting("magnetometer_gain", 0.0), 0.0, 0.5));
+    position_enabled_ = vr::VRSettings()->GetBool(kSettingsSection, "head_position_enabled");
+    if (position_enabled_) {
+        const double above = GetDoubleSetting("head_light_above_eyes_cm", 0.0);
+        const double in_front = GetDoubleSetting("head_light_in_front_of_eyes_cm", 0.0);
+        const double right = GetDoubleSetting("head_light_right_of_eyes_cm", 0.0);
+        HeadPositionConfig head;
+        head.eyes_from_light = Vec3{-right, -above, in_front} * 0.01;
+        head.eyes_from_neck = eyes_from_neck_;
+        head.default_eyes = Vec3{0.0, head_height_, 0.0};
+        head.latency_seconds = std::clamp(GetDoubleSetting("head_light_latency_ms", 40.0), 0.0, 200.0) / 1000.0;
+        head.camera_period_seconds = 1.0 / std::max(GetDoubleSetting("head_light_camera_fps", 60.0), 1.0);
+        head.lateral_noise_m = std::max(GetDoubleSetting("head_position_lateral_noise_mm", 2.0), 0.1) / 1000.0;
+        head.depth_noise_m = std::max(GetDoubleSetting("head_position_depth_noise_cm", 3.0), 0.01) / 100.0;
+        head.agility = std::max(GetDoubleSetting("head_position_agility", 1.0), 0.001);
+        head.prediction_gain = std::clamp(GetDoubleSetting("head_position_prediction", 0.8), 0.0, 1.0);
+        head_position_ = HeadPositionEstimator(head);
+        apply_head_model_ = vr::VRSettings()->GetBool(kSettingsSection, "head_position_apply_head_model");
+
+        psms_config_.dll_path = GetStringSetting("psms_client_dll");
+        psms_config_.host = GetStringSetting("psms_host", "127.0.0.1");
+        psms_config_.port = GetStringSetting("psms_port", "9512");
+        psms_config_.hmd_id = GetIntSetting("psms_hmd_id", -1);
+        psms_config_.controller_id = GetIntSetting("psms_controller_id", -1);
+        psms_ = std::make_unique<PsmsClient>();
+        DriverLog("Head position from PSMoveServiceEx: on. Light %.1f cm above, %.1f cm in front and %.1f cm to the "
+                  "right of the eyes; camera latency %.0f ms",
+                  above, in_front, right, head.latency_seconds * 1000.0);
+        if (above == 0.0 && in_front == 0.0 && right == 0.0) {
+            DriverLog("Head position: head_light_*_cm are all 0; measure where the light sits on the visor");
+        }
+    }
+
     DisplayConfig config;
     config.window_x = vr::VRSettings()->GetInt32(kSettingsSection, "window_x");
     config.window_y = vr::VRSettings()->GetInt32(kSettingsSection, "window_y");
@@ -158,7 +249,14 @@ HmdDevice::HmdDevice()
               SMARTPHONE_HMD_BUILD);
 }
 
-HmdDevice::~HmdDevice() = default;
+HmdDevice::~HmdDevice()
+{
+    // In case SteamVR cleans up without deactivating: a running std::thread would abort.
+    active_ = false;
+    if (tracking_thread_.joinable()) {
+        tracking_thread_.join();
+    }
+}
 
 vr::EVRInitError HmdDevice::Activate(uint32_t object_id)
 {
@@ -177,7 +275,7 @@ vr::EVRInitError HmdDevice::Activate(uint32_t object_id)
     vr::VRProperties()->SetFloatProperty(container, vr::Prop_SecondsFromVsyncToPhotons_Float, kVsyncToPhotonsSeconds);
     vr::VRProperties()->SetBoolProperty(container, vr::Prop_IsOnDesktop_Bool, false);
     // Our own universe and chaperone, so the standing and seated spaces games ask for exist
-    // without a room setup. The bounds stay hidden: with rotation-only tracking they mean nothing.
+    // without a room setup. The bounds stay hidden: nothing measures the room's walls.
     vr::VRProperties()->SetUint64Property(container, vr::Prop_CurrentUniverseId_Uint64, kUniverseId);
     vr::VRProperties()->SetStringProperty(container, vr::Prop_DriverProvidedChaperoneJson_String,
                                           ChaperoneJson(kUniverseId, head_height_).c_str());
@@ -194,7 +292,10 @@ vr::EVRInitError HmdDevice::Activate(uint32_t object_id)
 
     {
         std::lock_guard<std::mutex> lock(pose_mutex_);
-        last_pose_ = MakePose(false);
+        last_pose_ = MakePose(false, MonoSeconds());
+    }
+    if (psms_) {
+        psms_->Start(psms_config_);
     }
     tracking_thread_ = std::thread(&HmdDevice::TrackingThread, this);
     return vr::VRInitError_None;
@@ -204,6 +305,9 @@ void HmdDevice::Deactivate()
 {
     if (active_.exchange(false) && tracking_thread_.joinable()) {
         tracking_thread_.join();
+    }
+    if (psms_) {
+        psms_->Stop();
     }
 #if defined(_WIN32)
     if (video_) {
@@ -241,7 +345,7 @@ vr::DriverPose_t HmdDevice::GetPose()
     return last_pose_;
 }
 
-vr::DriverPose_t HmdDevice::MakePose(bool receiving) const
+vr::DriverPose_t HmdDevice::MakePose(bool receiving, double now) const
 {
     vr::DriverPose_t pose{};
     pose.qWorldFromDriverRotation.w = 1.0;
@@ -259,12 +363,32 @@ vr::DriverPose_t HmdDevice::MakePose(bool receiving) const
     pose.vecAngularVelocity[1] = angular_velocity.y;
     pose.vecAngularVelocity[2] = angular_velocity.z;
 
-    // 3DoF: the head stays at a fixed height; SteamVR's head model adds the neck movement.
-    pose.vecPosition[1] = head_height_;
+    // Our own neck model, not SteamVR's head model: VDM reads this position to line the PS Move
+    // hands up with the head, and SteamVR's model would move it in ways we cannot hold still.
+    const Vec3 straight_ahead{0.0, head_height_, 0.0};
+    HeadPoseOut head;
+    if (position_enabled_) {
+        // 6DoF: the eyes, from the head light.
+        head = head_position_.Output(now, orientation, angular_velocity);
+        pose.shouldApplyHeadModel = apply_head_model_;
+    } else if (head_held_) {
+        // 3DoF, held: VDM's playspace calibration only treats the visor as fixed in place if its
+        // position does not change at all, and the neck model moves it with every small turn.
+        head.position = straight_ahead;
+    } else {
+        // 3DoF: the neck stays put and the eyes turn around it.
+        head = NeckModel(straight_ahead, eyes_from_neck_, orientation, angular_velocity);
+    }
+    pose.vecPosition[0] = head.position.x;
+    pose.vecPosition[1] = head.position.y;
+    pose.vecPosition[2] = head.position.z;
+    pose.vecVelocity[0] = head.velocity.x;
+    pose.vecVelocity[1] = head.velocity.y;
+    pose.vecVelocity[2] = head.velocity.z;
     pose.poseIsValid = true;
     pose.deviceIsConnected = true;
+    // Never out of range because of the head light: that would grey out the view.
     pose.result = receiving ? vr::TrackingResult_Running_OK : vr::TrackingResult_Running_OutOfRange;
-    pose.shouldApplyHeadModel = true;
     return pose;
 }
 
@@ -280,10 +404,12 @@ void HmdDevice::TrackingThread()
     using Clock = std::chrono::steady_clock;
     Clock::time_point last_sample = Clock::now() - std::chrono::hours(1);
     bool hotkey_was_down = false;
+    bool hold_hotkey_was_down = false;
     bool was_receiving = false;
     uint32_t last_discoverer = 0;
     double logged_prediction = -1.0;
     uint8_t buffer[1500];
+    std::vector<LightSample> light_samples;
 
     while (active_) {
         uint32_t sender = 0;
@@ -294,6 +420,9 @@ void HmdDevice::TrackingThread()
             if (packet.type == protocol::PacketType::Sensors) {
                 if (tracker_.AddSample(packet)) {
                     last_sample = Clock::now();
+                    if (position_enabled_) {
+                        head_position_.AddOrientation(MonoSeconds(), tracker_.Orientation());
+                    }
 #if defined(_WIN32)
                     if (video_) {
                         video_->OnPhonePacket(sender, packet.seq);
@@ -319,8 +448,7 @@ void HmdDevice::TrackingThread()
                     logged_prediction = prediction_seconds_;
                 }
             } else if (packet.type == protocol::PacketType::Recenter) {
-                tracker_.Recenter();
-                DriverLog("Recentered from the phone");
+                RecenterHead("the phone");
             } else if (packet.type == protocol::PacketType::KeyframeRequest) {
 #if defined(_WIN32)
                 if (video_) {
@@ -332,21 +460,116 @@ void HmdDevice::TrackingThread()
 
         const bool hotkey_down = RecenterHotkeyDown();
         if (hotkey_down && !hotkey_was_down) {
-            tracker_.Recenter();
-            DriverLog("Recentered from the keyboard");
+            RecenterHead("the keyboard");
         }
         hotkey_was_down = hotkey_down;
+        const bool hold_down = HoldHotkeyDown();
+        if (hold_down && !hold_hotkey_was_down) {
+            ToggleHeadHold();
+        }
+        hold_hotkey_was_down = hold_down;
+        if (position_enabled_) {
+            UpdateHeadPosition(&light_samples);
+        }
 
         const bool receiving = Clock::now() - last_sample < std::chrono::seconds(1);
         if (receiving != was_receiving) {
             vr::VRDriverInput()->UpdateBooleanComponent(proximity_, receiving, 0.0);
             was_receiving = receiving;
         }
-        const vr::DriverPose_t pose = MakePose(receiving);
+        head_position_.SetHorizon(receiving ? prediction_seconds_ : 0.0);
+        const vr::DriverPose_t pose = MakePose(receiving, MonoSeconds());
         {
             std::lock_guard<std::mutex> lock(pose_mutex_);
             last_pose_ = pose;
         }
         vr::VRServerDriverHost()->TrackedDevicePoseUpdated(device_index_, pose, sizeof(vr::DriverPose_t));
     }
+}
+
+void HmdDevice::UpdateHeadPosition(std::vector<LightSample>* samples)
+{
+    const double now = MonoSeconds();
+    const bool freeze_down = FreezeHotkeyDown();
+    if (freeze_down && !freeze_hotkey_was_down_) {
+        head_frozen_ = !head_frozen_;
+        head_position_.SetFrozen(head_frozen_, now);
+    }
+    freeze_hotkey_was_down_ = freeze_down;
+
+    const bool streaming = psms_->Drain(samples, &head_camera_valid_, &head_camera_, &head_cameras_);
+    head_position_.SetCamera(head_camera_valid_, head_camera_, head_cameras_);
+    const Vec3 angular_velocity = tracker_.AngularVelocity();
+    for (const LightSample& sample : *samples) {
+        head_position_.AddLight(sample.time, sample.position, sample.tracking, angular_velocity);
+        if (sample.tracking) {
+            head_last_light_ = sample.position;
+        }
+    }
+    head_position_.Tick(now, streaming);
+
+    const HeadPositionEstimator::State state = head_position_.state();
+    if (state != logged_head_state_) {
+        DriverLog("Head light: %s", HeadStateText(state));
+        logged_head_state_ = state;
+    }
+    if (now >= next_head_stats_) {
+        next_head_stats_ = now + kHeadStatsSeconds;
+        const HeadPositionEstimator::Stats stats = head_position_.TakeStats();
+        if (stats.accepted + stats.rejected + stats.implausible > 0) {
+            DriverLog("Head light: %d samples, %d outliers, %d implausible, %d resets, %d losses; innovation %.0f mm "
+                      "along the camera ray and %.0f mm across; eyes %.2f m high, light %.2f m from the camera",
+                      stats.accepted, stats.rejected, stats.implausible, stats.resets, stats.losses,
+                      stats.depth_innovation_rms_m * 1000.0, stats.lateral_innovation_rms_m * 1000.0,
+                      stats.eye_height_m, stats.camera_distance_m);
+            DriverLog("Head light: newest light at (%.2f, %.2f, %.2f) m, camera at (%.2f, %.2f, %.2f) m",
+                      head_last_light_.x, head_last_light_.y, head_last_light_.z, head_camera_.x, head_camera_.y,
+                      head_camera_.z);
+        }
+    }
+}
+
+// Makes the current direction "forward". With the head light, forward means towards the PS Eye
+// from wherever the user stands, which lines the view up with the hands; the user faces the camera
+// when recentering. Without it, forward is -z, as in Part 1.
+void HmdDevice::RecenterHead(const char* source)
+{
+    if (position_enabled_ && head_camera_valid_ && head_cameras_ == 1) {
+        const double now = MonoSeconds();
+        bool turned = false;
+        // The eyes move a little with the yaw (the light is not between them), so repeat.
+        for (int i = 0; i < 3; ++i) {
+            const Vec3 eyes = head_position_.Output(now, tracker_.Orientation(), Vec3{}).position;
+            Vec3 to_camera = head_camera_ - eyes;
+            to_camera.y = 0.0;
+            const double distance = Length(to_camera);
+            if (distance < kMinCameraDistance) {
+                break;
+            }
+            const Quat before = tracker_.Orientation();
+            head_position_.OnYawChange(tracker_.RecenterTowards(to_camera * (1.0 / distance)), before);
+            turned = true;
+        }
+        if (turned) {
+            DriverLog("Recentered from %s, facing the camera", source);
+            return;
+        }
+    }
+    const Quat before = tracker_.Orientation();
+    const Quat delta = tracker_.RecenterTowards(Vec3{0.0, 0.0, -1.0});
+    if (position_enabled_) {
+        head_position_.OnYawChange(delta, before);
+    }
+    DriverLog("Recentered from %s", source);
+}
+
+void HmdDevice::ToggleHeadHold()
+{
+    if (position_enabled_) {
+        DriverLog("Ctrl+Alt+H only works without head_position_enabled; Ctrl+Alt+P freezes the head light");
+        return;
+    }
+    head_held_ = !head_held_;
+    DriverLog(head_held_ ? "Head held still for VDM's playspace calibration; Ctrl+Alt+H again when it is done"
+                         : "Head turns around the neck again");
 }

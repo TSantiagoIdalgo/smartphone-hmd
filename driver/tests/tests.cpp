@@ -4,11 +4,15 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
+#include <limits>
+#include <random>
 #include <string>
 #include <vector>
 
 #include "chaperone.h"
 #include "color_convert.h"
+#include "head_position.h"
 #include "head_tracker.h"
 #include "protocol.h"
 #include "video_protocol.h"
@@ -61,6 +65,7 @@ struct Feeder {
     HeadTracker tracker;
     uint32_t seq = 0;
     int64_t ts = 1000000000;
+    float mag[3] = {0, 0, 0};
 
     void Run(double seconds, float gx, float gy, float gz, float ax, float ay, float az)
     {
@@ -71,6 +76,7 @@ struct Feeder {
             p.timestamp_ns = (ts += kStepNs);
             p.gyro[0] = gx; p.gyro[1] = gy; p.gyro[2] = gz;
             p.accel[0] = ax; p.accel[1] = ay; p.accel[2] = az;
+            for (int k = 0; k < 3; ++k) p.mag[k] = mag[k];
             tracker.AddSample(p);
         }
     }
@@ -176,6 +182,42 @@ void TestTurnLeft()
     CHECK_NEAR(fwd.z, -std::cos(1.0), 0.02);
     // SteamVR gets the angular velocity in world axes.
     CHECK_NEAR(f.tracker.AngularVelocity().y, 1.0, 1e-3);
+}
+
+// The phone is a little shaken (so the gyro bias is not learned) and its gyro reads 0.02 rad/s
+// of yaw too much. Field: 40 uT down and 20 uT horizontal, in phone axes.
+double YawAfterDrift(double gain, double seconds)
+{
+    Feeder f;
+    f.tracker.SetMagnetometerGain(gain);
+    f.mag[0] = -40.0f;
+    f.mag[2] = -20.0f;
+    f.Run(seconds, 0.02f, 0, 0, kG * 1.06f, 0, 0);
+    const Vec3 fwd = f.Forward();
+    return std::atan2(-fwd.x, -fwd.z);
+}
+
+void TestMagnetometerHoldsYaw()
+{
+    CHECK(std::fabs(YawAfterDrift(0.0, 60.0)) > 1.0);
+    CHECK(std::fabs(YawAfterDrift(0.2, 60.0)) < 0.2);
+}
+
+void TestMagnetometerIgnoresBentField()
+{
+    // The field suddenly points elsewhere (a magnet or a speaker): the view must not follow it.
+    Feeder f;
+    f.tracker.SetMagnetometerGain(0.5);
+    f.mag[0] = -40.0f;
+    f.mag[2] = -20.0f;
+    f.Run(5.0, 0, 0, 0, kG, 0, 0);
+    f.mag[0] = -20.0f;
+    f.mag[1] = 60.0f;
+    f.mag[2] = 30.0f;
+    f.Run(20.0, 0, 0, 0, kG, 0, 0);
+    const Vec3 fwd = f.Forward();
+    CHECK_NEAR(fwd.x, 0.0, 0.02);
+    CHECK_NEAR(fwd.z, -1.0, 0.02);
 }
 
 void TestRecenter()
@@ -404,6 +446,527 @@ void TestChaperoneJson()
     CHECK(std::count(json.begin(), json.end(), '[') == std::count(json.begin(), json.end(), ']'));
 }
 
+void TestRecenterTowards()
+{
+    Feeder f;
+    f.Run(1.0, 1.0f, 0, 0, kG, 0, 0);  // turned 1 rad to the left
+    const Quat before = f.tracker.Orientation();
+    // Towards a target 30 degrees to the left of -z.
+    const double target = 30.0 * kPi / 180.0;
+    const Quat delta = f.tracker.RecenterTowards(Vec3{-std::sin(target), 0, -std::cos(target)});
+    const Vec3 fwd = f.Forward();
+    CHECK_NEAR(std::atan2(-fwd.x, -fwd.z), target, 1e-6);
+    // The returned rotation is what was added on top of the old orientation.
+    const Quat rebuilt = delta * before;
+    const Quat after = f.tracker.Orientation();
+    CHECK_NEAR(std::fabs(rebuilt.w * after.w + rebuilt.x * after.x + rebuilt.y * after.y + rebuilt.z * after.z), 1.0,
+               1e-9);
+    // Towards -z is the plain recenter.
+    f.tracker.RecenterTowards(Vec3{0, 0, -1});
+    CHECK_NEAR(f.Forward().x, 0.0, 1e-6);
+}
+
+void TestNeckModel()
+{
+    const Vec3 eyes{0.0, 1.7, 0.0};
+    const Vec3 eyes_from_neck{0.0, 0.075, -0.08};
+    // Looking straight ahead, the eyes are where they were asked to be.
+    HeadPoseOut head = NeckModel(eyes, eyes_from_neck, Quat{}, Vec3{});
+    CHECK_NEAR(Length(head.position - eyes), 0.0, 1e-12);
+    // Turned around, they are on the other side of the neck.
+    head = NeckModel(eyes, eyes_from_neck, AxisAngle(Vec3{0, 1, 0}, kPi), Vec3{});
+    CHECK_NEAR(Length(head.position - Vec3{0.0, 1.7, 0.16}), 0.0, 1e-9);
+    // Looking down, they drop below the neck and come back a little.
+    head = NeckModel(eyes, eyes_from_neck, AxisAngle(Vec3{1, 0, 0}, -kPi / 2), Vec3{});
+    CHECK_NEAR(Length(head.position - Vec3{0.0, 1.7 - 0.155, 0.005}), 0.0, 1e-9);
+    // Turning left moves the eyes, in front of the neck, to the left.
+    head = NeckModel(eyes, eyes_from_neck, Quat{}, Vec3{0, 1, 0});
+    CHECK_NEAR(Length(head.velocity - Vec3{-0.08, 0.0, 0.0}), 0.0, 1e-12);
+}
+
+void TestMat3()
+{
+    Mat3 a;
+    const double values[3][3] = {{4, 1, 0.5}, {1, 3, 0.2}, {0.5, 0.2, 2}};
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) a.m[i][j] = values[i][j];
+    Mat3 inverse;
+    CHECK(Inverse(a, &inverse));
+    const Mat3 identity = a * inverse;
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) CHECK_NEAR(identity.m[i][j], i == j ? 1.0 : 0.0, 1e-12);
+    CHECK(!Inverse(Outer(Vec3{1, 2, 3}, Vec3{1, 2, 3}), &inverse));  // rank one
+
+    const Quat a_rot = AxisAngle(Vec3{0, 1, 0}, 0.2);
+    const Quat b_rot = AxisAngle(Vec3{0, 1, 0}, 1.0);
+    const Quat mid = Slerp(a_rot, b_rot, 0.5);
+    CHECK_NEAR(mid.y, std::sin(0.3), 1e-9);
+    CHECK_NEAR(Slerp(a_rot, b_rot, 1.0).w, b_rot.w, 1e-9);
+}
+
+// A simulated head: the neck pivot and the rotation over time. The phone reports the rotation
+// as it happens; the camera sees the light at 60 frames/s and delivers each frame 40 ms later.
+struct HeadMotion {
+    Vec3 neck;
+    Quat rotation;
+    Vec3 angular_velocity;  // world
+};
+
+struct HeadRun {
+    double rms = 0.0;        // eye error after the first second
+    double max_error = 0.0;  // same
+    double max_step = 0.0;   // largest change of the output between two 2 ms steps
+    Vec3 last_eyes;
+    Vec3 last_truth;
+};
+
+HeadPositionConfig TestHeadConfig()
+{
+    HeadPositionConfig config;
+    config.eyes_from_light = Vec3{0.0, -0.10, 0.03};  // light 10 cm above, 3 cm behind the eyes
+    config.eyes_from_neck = Vec3{0.0, 0.075, -0.08};
+    return config;
+}
+
+struct HeadSimulation {
+    HeadPositionConfig config = TestHeadConfig();
+    HeadPositionEstimator estimator{TestHeadConfig()};
+    Vec3 camera{0.0, 1.9, -1.8};
+    double camera_delay = 0.040;
+    // Standard deviation per frame along the camera ray and across it, m. Never zero: the estimator
+    // treats a light that repeats exactly as lost.
+    double depth_noise = 0.0001;
+    double lateral_noise = 0.0001;
+    bool interpolated = false;   // PSMoveServiceEx's 200 Hz stream between frames
+    double time = 100.0;
+    double last_frame = 100.0;
+    std::mt19937 random{1234};
+    Vec3 previous_frame_light, frame_light;
+    double frame_arrival = 0.0;
+    bool have_frame = false;
+    bool frame_seen = false;
+
+    // Box-Muller on the raw generator, so every compiler draws the same numbers.
+    double Gaussian()
+    {
+        const double u = (static_cast<double>(random()) + 0.5) / 4294967296.0;
+        const double v = static_cast<double>(random()) / 4294967296.0;
+        return std::sqrt(-2.0 * std::log(u)) * std::cos(2.0 * kPi * v);
+    }
+
+    Vec3 Eyes(const HeadMotion& m) const { return m.neck + Rotate(m.rotation, config.eyes_from_neck); }
+
+    Vec3 Light(const HeadMotion& m)
+    {
+        const Vec3 light = m.neck + Rotate(m.rotation, config.eyes_from_neck - config.eyes_from_light);
+        Vec3 along = light - camera;
+        along = along * (1.0 / Length(along));
+        Vec3 side = Cross(along, Vec3{0, 1, 0});
+        side = side * (1.0 / Length(side));
+        const Vec3 up = Cross(side, along);
+        return light + along * (depth_noise * Gaussian()) + side * (lateral_noise * Gaussian()) +
+               up * (lateral_noise * Gaussian());
+    }
+
+    // Runs `seconds` of `motion(t)`, t from 0 at the start of this run; `visible(t)` false hides the
+    // light. Errors count after `settle`. Camera frames keep one schedule across runs.
+    HeadRun Run(double seconds, const std::function<HeadMotion(double)>& motion,
+                const std::function<bool(double)>& visible = nullptr, double settle = 1.0,
+                const std::function<void(double)>& each_step = nullptr)
+    {
+        estimator.SetCamera(true, camera, 1);
+        HeadRun run;
+        double sum = 0.0;
+        int count = 0;
+        bool have_output = false;
+        Vec3 previous_output;
+        const double start = time;
+        for (int step = 0; step * 0.002 < seconds; ++step) {
+            time += 0.002;
+            const double t = time - start;
+            const HeadMotion now = motion(t);
+            estimator.AddOrientation(time, now.rotation);
+            // Frames are exposed at multiples of 1/60 s and arrive camera_delay later.
+            const double frame = std::floor((time - camera_delay) * 60.0) / 60.0;
+            if (frame > last_frame) {
+                last_frame = frame;
+                const double frame_t = frame - start;
+                frame_seen = !visible || visible(frame_t);
+                previous_frame_light = have_frame ? frame_light : Light(motion(frame_t));
+                frame_light = Light(motion(frame_t));
+                frame_arrival = time;
+                have_frame = true;
+                if (!interpolated || !frame_seen) {
+                    estimator.AddLight(time, frame_light, frame_seen, now.angular_velocity);
+                }
+            }
+            // PSMoveServiceEx publishes every 5 ms, interpolating from the previous frame to the
+            // newest one over one frame.
+            if (interpolated && have_frame && frame_seen && std::floor(time / 0.005) != std::floor((time - 0.002) / 0.005)) {
+                const double f = std::min((time - frame_arrival) * 60.0, 1.0);
+                estimator.AddLight(time, previous_frame_light + (frame_light - previous_frame_light) * f, true,
+                                   now.angular_velocity);
+            }
+            estimator.Tick(time, true);
+            if (each_step) {
+                each_step(time);
+            }
+            const Vec3 eyes = estimator.Output(time, now.rotation, now.angular_velocity).position;
+            const Vec3 truth = Eyes(now);
+            if (have_output) {
+                run.max_step = std::max(run.max_step, Length(eyes - previous_output));
+            }
+            previous_output = eyes;
+            have_output = true;
+            if (t >= settle) {
+                const double error = Length(eyes - truth);
+                sum += error * error;
+                ++count;
+                run.max_error = std::max(run.max_error, error);
+            }
+            run.last_eyes = eyes;
+            run.last_truth = truth;
+        }
+        run.rms = count > 0 ? std::sqrt(sum / count) : 0.0;
+        return run;
+    }
+};
+
+HeadMotion StandStill(double)
+{
+    return {Vec3{0.1, 1.55, 0.2}, Quat{}, Vec3{}};
+}
+
+void TestHeadNeverSeen()
+{
+    HeadPositionConfig config = TestHeadConfig();
+    config.default_eyes = Vec3{0, 1.6, 0};
+    HeadPositionEstimator estimator(config);
+    CHECK(estimator.state() == HeadPositionEstimator::State::NeverSeen);
+    const HeadPoseOut ahead = estimator.Output(1.0, Quat{}, Vec3{});
+    CHECK_NEAR(ahead.position.y, 1.6, 1e-12);
+    CHECK_NEAR(ahead.position.z, 0.0, 1e-12);
+    // Looking down moves the eyes around our neck model.
+    const Quat down = AxisAngle(Vec3{1, 0, 0}, -0.5);
+    const Vec3 eyes = estimator.Output(1.0, down, Vec3{}).position;
+    const Vec3 expected = config.default_eyes - config.eyes_from_neck + Rotate(down, config.eyes_from_neck);
+    CHECK_NEAR(Length(eyes - expected), 0.0, 1e-12);
+
+    // An impossible sample (eyes 3 m up) is ignored.
+    estimator.AddLight(1.0, Vec3{0, 3.1, 0}, true, Vec3{});
+    CHECK(estimator.state() == HeadPositionEstimator::State::NeverSeen);
+}
+
+void TestHeadStillLight()
+{
+    // Without noise the eyes end up exactly where the light says, for any head rotation.
+    for (const Quat rotation : {Quat{}, AxisAngle(Vec3{0, 1, 0}, kPi / 2), AxisAngle(Vec3{1, 0, 0}, -0.5)}) {
+        HeadSimulation sim;
+        const HeadRun run = sim.Run(2.0, [&](double) { return HeadMotion{Vec3{0.1, 1.55, 0.2}, rotation, Vec3{}}; });
+        CHECK(run.max_error < 0.001);
+        CHECK(sim.estimator.state() == HeadPositionEstimator::State::Live);
+    }
+}
+
+HeadMotion ShakeHead(double t)
+{
+    // "No" with the whole head: +-70 degrees at 0.9 Hz around a still neck.
+    const double w = 2.0 * kPi * 0.9;
+    const double amplitude = 70.0 * kPi / 180.0;
+    return {Vec3{0.0, 1.55, 0.3}, AxisAngle(Vec3{0, 1, 0}, amplitude * std::sin(w * t)),
+            Vec3{0, amplitude * w * std::cos(w * t), 0}};
+}
+
+void TestHeadTurnUsesPhone()
+{
+    HeadSimulation sim;
+    const HeadRun run = sim.Run(4.0, ShakeHead);
+    CHECK(run.rms < 0.003);
+
+    // Putting the newest rotation on the light as the camera last saw it is far worse.
+    HeadSimulation naive;
+    double sum = 0.0;
+    int count = 0;
+    for (double t = 1.0; t < 4.0; t += 0.002) {
+        const double seen = std::floor((t - naive.camera_delay) * 60.0) / 60.0;
+        const HeadMotion now = ShakeHead(t);
+        const Vec3 eyes = naive.Light(ShakeHead(seen)) + Rotate(now.rotation, naive.config.eyes_from_light);
+        const double error = Length(eyes - naive.Eyes(now));
+        sum += error * error;
+        ++count;
+    }
+    CHECK(run.rms < 0.5 * std::sqrt(sum / count));
+}
+
+void TestHeadDelayMismatch()
+{
+    // The setting says 20 ms; the camera is really 40 ms late. The error grows with the head speed
+    // times the 20 ms mismatch times the 11 cm the light sits in front of the neck, and no more.
+    HeadPositionConfig config = TestHeadConfig();
+    config.latency_seconds = 0.020;
+    HeadSimulation sim;
+    sim.estimator = HeadPositionEstimator(config);
+    const HeadRun run = sim.Run(4.0, ShakeHead);
+    CHECK(run.rms < 0.020);
+}
+
+HeadMotion Crouch(double t)
+{
+    // Stand, then crouch 40 cm in 0.8 s, then stay down.
+    const double s = std::clamp((t - 1.5) / 0.8, 0.0, 1.0);
+    return {Vec3{0.0, 1.55 - 0.40 * s * s * (3.0 - 2.0 * s), 0.2}, Quat{}, Vec3{}};
+}
+
+void TestHeadCrouch()
+{
+    HeadSimulation sim;
+    CHECK(sim.Run(2.3, Crouch).max_error < 0.04);
+    // Settled 0.3 s after the crouch ends.
+    CHECK(sim.Run(0.5, [](double t) { return Crouch(t + 2.3); }, nullptr, 0.3).max_error < 0.01);
+}
+
+void TestHeadSmoothsDepthNoise()
+{
+    // One camera: 3 cm of noise along the ray, 2 mm across. The output must be much steadier along
+    // the ray without getting noisier across it.
+    HeadSimulation sim;
+    sim.interpolated = true;
+    sim.depth_noise = 0.03;
+    sim.lateral_noise = 0.002;
+    const Vec3 truth = sim.Eyes(StandStill(0));
+    Vec3 along = truth - sim.camera;
+    along = along * (1.0 / Length(along));
+    double depth_sum = 0.0;
+    double lateral_sum = 0.0;
+    int count = 0;
+    sim.Run(32.0, StandStill, nullptr, 1.0, [&](double time) {
+        if (time < 102.0) {
+            return;
+        }
+        const Vec3 error = sim.estimator.Output(time, Quat{}, Vec3{}).position - truth;
+        const double depth = Dot(error, along);
+        depth_sum += depth * depth;
+        lateral_sum += Dot(error, error) - depth * depth;
+        ++count;
+    });
+    // Predicting 40-50 ms ahead amplifies the small sideways noise a little; it must stay small.
+    CHECK(std::sqrt(depth_sum / count) < 0.65 * 0.03);
+    CHECK(std::sqrt(lateral_sum / count) < 2.0 * 0.002);
+}
+
+void TestHeadInterpolatedStream()
+{
+    // PSMoveServiceEx sends about 200 interpolated values per second from 60 frames. They must not
+    // count as independent measurements, or the noise gets through.
+    const auto depth_rms = [](bool interpolated) {
+        HeadSimulation sim;
+        sim.interpolated = interpolated;
+        sim.depth_noise = 0.03;
+        const HeadRun run = sim.Run(8.0, StandStill);
+        return run.rms;
+    };
+    CHECK(depth_rms(true) < 1.05 * depth_rms(false));
+}
+
+void TestHeadOutlier()
+{
+    HeadSimulation sim;
+    sim.Run(1.0, StandStill);
+    const Vec3 before = sim.estimator.Output(sim.time, Quat{}, Vec3{}).position;
+    sim.estimator.AddLight(sim.time + 0.001, sim.Light(StandStill(0)) + Vec3{0.4, 0, 0}, true, Vec3{});
+    const Vec3 after = sim.estimator.Output(sim.time + 0.001, Quat{}, Vec3{}).position;
+    CHECK(Length(after - before) < 0.005);
+}
+
+void TestHeadPersistentJump()
+{
+    // The head (or PSMoveServiceEx's frame) really moves 30 cm at once: start following within
+    // 0.3 s, gliding rather than jumping.
+    HeadSimulation sim;
+    const auto jump = [](double t) {
+        HeadMotion m = StandStill(t);
+        if (t > 1.5) {
+            m.neck = m.neck + Vec3{0.3, 0, 0};
+        }
+        return m;
+    };
+    sim.Run(1.5, jump);
+    sim.estimator.TakeStats();
+    const HeadRun early = sim.Run(0.04 + 0.3, [&](double t) { return jump(t + 1.5); }, nullptr, 0.0);
+    CHECK(sim.estimator.TakeStats().resets == 1);
+    const HeadRun late = sim.Run(0.5, [&](double t) { return jump(t + 1.84); }, nullptr, 0.4);
+    CHECK(late.max_error < 0.01);
+    CHECK(early.max_step < 0.02 && late.max_step < 0.02);
+}
+
+void TestHeadLossHoldsNeck()
+{
+    HeadSimulation sim;
+    sim.Run(1.0, StandStill);
+    const Vec3 neck = StandStill(0).neck;
+    // Lost; the head turns 90 degrees in place. The eyes swing around the held neck.
+    const auto turn = [&](double t) {
+        const double yaw = std::min(t, 1.0) * kPi / 2;
+        return HeadMotion{neck, AxisAngle(Vec3{0, 1, 0}, yaw), Vec3{0, t < 1.0 ? kPi / 2 : 0.0, 0}};
+    };
+    const HeadRun run = sim.Run(2.0, turn, [](double) { return false; }, 0.0);
+    CHECK(sim.estimator.state() == HeadPositionEstimator::State::Holding);
+    CHECK(run.max_error < 0.01);
+    CHECK(std::isfinite(run.last_eyes.x) && std::isfinite(run.last_eyes.y) && std::isfinite(run.last_eyes.z));
+}
+
+void TestHeadStaleIsLoss()
+{
+    HeadPositionEstimator estimator(TestHeadConfig());
+    estimator.AddLight(10.0, Vec3{0, 1.6, 0}, true, Vec3{});
+    estimator.Tick(10.1, true);
+    CHECK(estimator.state() == HeadPositionEstimator::State::Live);
+    estimator.Tick(10.3, true);  // still "tracking", but nothing new
+    CHECK(estimator.state() == HeadPositionEstimator::State::Holding);
+    estimator.AddLight(10.31, Vec3{0, 1.6, 0.001}, true, Vec3{});
+    CHECK(estimator.state() == HeadPositionEstimator::State::Live);
+    estimator.Tick(10.32, false);  // PSMoveServiceEx went away
+    CHECK(estimator.state() == HeadPositionEstimator::State::Holding);
+}
+
+void TestHeadReacquire()
+{
+    // Lost for a second while stepping 30 cm to the side; found again: glide over, no jump.
+    HeadSimulation sim;
+    const auto step_aside = [](double t) {
+        HeadMotion m = StandStill(t);
+        m.neck = m.neck + Vec3{0.3 * std::clamp(t - 1.2, 0.0, 0.6) / 0.6, 0, 0};
+        return m;
+    };
+    const HeadRun run = sim.Run(2.8, step_aside, [](double t) { return t < 1.0 || t > 2.0; }, 2.0 + 0.04 + 0.6);
+    CHECK(run.max_error < 0.01);
+    CHECK(run.max_step < 0.02);
+}
+
+void TestHeadYawChangeKeepsLight()
+{
+    HeadSimulation sim;
+    sim.Run(1.5, StandStill);
+    const Quat before{};
+    const Vec3 eyes_before = sim.estimator.Output(sim.time, before, Vec3{}).position;
+    const Vec3 light = eyes_before - Rotate(before, sim.config.eyes_from_light);
+    const Quat delta = AxisAngle(Vec3{0, 1, 0}, 0.6);
+    sim.estimator.OnYawChange(delta, before);
+    const Vec3 eyes_after = sim.estimator.Output(sim.time, delta * before, Vec3{}).position;
+    CHECK_NEAR(Length(eyes_after - Rotate(delta * before, sim.config.eyes_from_light) - light), 0.0, 1e-9);
+}
+
+void TestHeadFreeze()
+{
+    HeadSimulation sim;
+    const auto sway = [](double t) {
+        HeadMotion m = StandStill(t);
+        m.neck = m.neck + Vec3{0.15 * std::sin(2.0 * t), 0, 0};
+        return m;
+    };
+    Vec3 frozen_at;
+    double frozen_drift = 0.0;
+    const HeadRun run = sim.Run(4.0, sway, nullptr, 1.0, [&](double time) {
+        if (std::fabs(time - 101.5) < 0.001) {
+            sim.estimator.SetFrozen(true, time);
+            frozen_at = sim.estimator.Output(time, Quat{}, Vec3{}).position;
+        }
+        if (time > 101.5 && time < 102.5) {
+            frozen_drift = std::max(frozen_drift, Length(sim.estimator.Output(time, Quat{}, Vec3{}).position - frozen_at));
+        }
+        if (std::fabs(time - 102.5) < 0.001) {
+            sim.estimator.SetFrozen(false, time);
+        }
+    });
+    CHECK(frozen_drift < 0.001);
+    CHECK(run.max_step < 0.02);
+    CHECK(Length(run.last_eyes - run.last_truth) < 0.01);
+}
+
+HeadMotion WalkSideways(double t)
+{
+    // Standing, then stepping to the right at 1 m/s from t = 1 s.
+    HeadMotion m = StandStill(t);
+    m.neck = m.neck + Vec3{std::max(t - 1.0, 0.0), 0, 0};
+    return m;
+}
+
+void TestHeadDropoutWhileMoving()
+{
+    // One camera frame without the light while the head moves: no backwards slide, no jump.
+    for (const bool interpolated : {false, true}) {
+        HeadSimulation sim;
+        sim.interpolated = interpolated;
+        sim.Run(1.4, WalkSideways);
+        sim.estimator.TakeStats();
+        const HeadRun run = sim.Run(0.6, [](double t) { return WalkSideways(t + 1.4); },
+                                    [](double t) { return std::fabs(t - 0.1) > 0.01; }, 0.0);
+        const HeadPositionEstimator::Stats stats = sim.estimator.TakeStats();
+        CHECK(stats.losses == 1);
+        CHECK(stats.resets == 0);
+        CHECK(run.max_step < 0.01);
+        // Held for one frame plus the camera delay while walking at 1 m/s.
+        CHECK(run.max_error < 0.08);
+    }
+}
+
+void TestHeadUnfreezeWhileMoving()
+{
+    // Frozen while walking 1 m to the side, unfrozen still walking: glide over, no jump.
+    HeadSimulation sim;
+    const auto walk = [](double t) {
+        HeadMotion m = StandStill(t);
+        m.neck = m.neck + Vec3{0.8 * std::max(t - 1.0, 0.0), 0, 0};
+        return m;
+    };
+    double max_step_after = 0.0;
+    Vec3 previous;
+    bool have_previous = false;
+    sim.Run(3.5, walk, nullptr, 1.0, [&](double time) {
+        if (std::fabs(time - 101.0) < 0.001) {
+            sim.estimator.SetFrozen(true, time);
+        }
+        if (std::fabs(time - 102.25) < 0.001) {
+            sim.estimator.SetFrozen(false, time);
+        }
+        if (time > 102.25) {
+            const Vec3 eyes = sim.estimator.Output(time, Quat{}, Vec3{}).position;
+            if (have_previous) {
+                max_step_after = std::max(max_step_after, Length(eyes - previous));
+            }
+            previous = eyes;
+            have_previous = true;
+        }
+    });
+    CHECK(max_step_after < 0.03);
+    CHECK(sim.estimator.state() == HeadPositionEstimator::State::Live);
+}
+
+void TestHeadRecenterFrozenBeforeSeen()
+{
+    // Frozen before the light was ever seen, recentered, unfrozen: the default eyes stay put.
+    HeadPositionEstimator estimator(TestHeadConfig());
+    estimator.SetFrozen(true, 1.0);
+    const Quat before{};
+    const Quat delta = AxisAngle(Vec3{0, 1, 0}, kPi / 2);
+    estimator.OnYawChange(delta, before);
+    const Vec3 frozen = estimator.Output(1.0, delta * before, Vec3{}).position;
+    estimator.SetFrozen(false, 1.0);
+    const Vec3 unfrozen = estimator.Output(1.0, delta * before, Vec3{}).position;
+    CHECK(Length(unfrozen - frozen) < 1e-9);
+}
+
+void TestHeadIgnoresNonFinite()
+{
+    HeadSimulation sim;
+    sim.Run(1.5, StandStill);
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    sim.estimator.AddLight(sim.time + 0.001, Vec3{nan, 1.6, 0.0}, true, Vec3{});
+    const Vec3 eyes = sim.estimator.Output(sim.time + 0.001, Quat{}, Vec3{}).position;
+    CHECK(std::isfinite(eyes.x) && std::isfinite(eyes.y) && std::isfinite(eyes.z));
+    CHECK(Length(eyes - sim.Eyes(StandStill(0))) < 0.005);
+}
+
 int main()
 {
     TestParse();
@@ -412,6 +975,8 @@ int main()
     TestStillUpright();
     TestTurnLeft();
     TestRecenter();
+    TestMagnetometerHoldsYaw();
+    TestMagnetometerIgnoresBentField();
     TestTiltFollowsGravity();
     TestGyroBiasIsLearned();
     TestRejectsBadSamples();
@@ -422,6 +987,27 @@ int main()
     TestMeanLuma();
     TestVsyncClock();
     TestChaperoneJson();
+    TestRecenterTowards();
+    TestNeckModel();
+    TestMat3();
+    TestHeadNeverSeen();
+    TestHeadStillLight();
+    TestHeadTurnUsesPhone();
+    TestHeadDelayMismatch();
+    TestHeadCrouch();
+    TestHeadSmoothsDepthNoise();
+    TestHeadInterpolatedStream();
+    TestHeadOutlier();
+    TestHeadPersistentJump();
+    TestHeadLossHoldsNeck();
+    TestHeadStaleIsLoss();
+    TestHeadReacquire();
+    TestHeadYawChangeKeepsLight();
+    TestHeadFreeze();
+    TestHeadDropoutWhileMoving();
+    TestHeadUnfreezeWhileMoving();
+    TestHeadRecenterFrozenBeforeSeen();
+    TestHeadIgnoresNonFinite();
     if (g_failures == 0) {
         std::printf("All tests passed\n");
         return 0;

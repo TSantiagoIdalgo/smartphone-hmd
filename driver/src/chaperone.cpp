@@ -4,7 +4,7 @@
 
 std::string ChaperoneJson(uint32_t universe_id, float head_height_meters)
 {
-    // A 4 x 4 m play area: the head only moves a few centimetres (head model), so its walls never
+    // A 4 x 4 m play area: the head only moves a few centimetres (neck model), so its walls never
     // come close enough to show. "jsonid" is what SteamVR's own file uses; the docs say "json_id".
     char json[1024];
     std::snprintf(json, sizeof(json),

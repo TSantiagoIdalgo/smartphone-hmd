@@ -66,6 +66,15 @@ Si SteamVR no muestra el visor, abre `Steam\config\steamvr.vrsettings` y añade 
 
 Para recentrar la vista, pulsa cualquier botón de volumen del móvil o **Ctrl+Alt+R** en la PC.
 
+Al girar, los ojos se mueven alrededor del cuello, como en la realidad. Para alinear los PS Move
+con la "Playspace Calibration" de VDM, pulsa **Ctrl+Alt+H** antes de empezarla y otra vez al
+terminar: mientras tanto el visor queda exactamente quieto, que es lo que VDM necesita.
+
+Si la vista se descentra con el tiempo (deriva del giroscopio), pon `"magnetometer_gain": 0.1` en
+`default.vrsettings`. La brújula del móvil corrige entonces el giro horizontal muy despacio, y solo
+mientras el campo magnético se ve limpio: si algo lo desvía (imanes, parlantes), el driver la ignora.
+Con `0` (el valor por defecto) no se usa. Si notas que la vista se mece sola, bájalo o ponlo en `0`.
+
 Si la app no encuentra la PC (algunos routers bloquean la búsqueda), escribe su IP, que da
 `ipconfig` en la PC. Puedes pulsar **Iniciar** aunque aún no la haya encontrado: empieza en cuanto
 aparezca. Si el video se corta, por ejemplo al desenchufar el cable o porque la PC cambió de IP, la
@@ -128,3 +137,38 @@ Si no llega la imagen:
   completa.
 
 Sin el móvil, `python tools/sim/send_imu.py` envía datos que giran la cabeza a izquierda y derecha.
+
+## Posición de la cabeza con PS Move (opcional)
+
+Sin nada más, el visor solo gira (3DoF). Si usas PSMoveServiceEx con una PS Eye para los PS Move,
+el driver también puede leer la posición de una luz montada en el visor (una pelota de ping-pong
+con un LED, configurada en PSMoveServiceEx como visor virtual). Agacharte, inclinarte o dar un paso
+mueve entonces la vista, y la cabeza y las manos quedan en el mismo espacio. La rotación sigue
+llegando del móvil, así que girar la cabeza no tiene más latencia que antes.
+
+Viene desactivado. Para activarlo, con SteamVR cerrado, añade en `Steam\config\steamvr.vrsettings`,
+dentro de `"driver_smartphone_hmd"`:
+
+```
+"head_position_enabled" : true,
+"head_light_above_eyes_cm" : 7.0,
+"head_light_in_front_of_eyes_cm" : 6.0,
+"head_light_right_of_eyes_cm" : 0.0
+```
+
+Los tres números son dónde está el centro de la luz respecto del punto entre tus ojos, medidos con
+el visor puesto. El resto de las claves `head_*` y `psms_*` de `default.vrsettings` tienen valores
+por defecto que normalmente no hace falta tocar; si faltan en el archivo, el driver usa esos mismos
+valores.
+
+- El driver busca `PSMoveClient_CAPI.dll` junto a PSMoveServiceEx o al Virtual Device Manager
+  mientras están abiertos, y reintenta cada 2 segundos. Si no lo encuentra, pon su ruta en
+  `psms_client_dll`.
+- **Ctrl+Alt+P** congela la posición (la rotación sigue) y la vuelve a soltar.
+- Al recentrar con el volumen o **Ctrl+Alt+R**, mira hacia la cámara: la vista se orienta hacia
+  ella desde donde estés.
+- En `vrserver.txt`, las líneas `Head position:` y `Head light:` dicen qué DLL se cargó, si hay
+  conexión, dónde está la cámara y si la luz se ve, y cada 10 segundos una línea de estadísticas da
+  la altura de los ojos y cuánto tiembla la medida.
+- `psms_controller_id` (por defecto -1) hace que siga un PS Move en vez del visor virtual: sirve
+  para probar con un Move pegado al visor.

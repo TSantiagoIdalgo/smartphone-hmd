@@ -25,6 +25,7 @@ add_library(tracking STATIC
   src/color_convert.cpp
   src/vsync_clock.cpp
   src/chaperone.cpp
+  src/head_position.cpp
 )
 target_include_directories(tracking PUBLIC src)
 find_package(Threads REQUIRED)
@@ -43,9 +44,10 @@ add_library(driver_smartphone_hmd SHARED
   src/driver_main.cpp
   src/device_provider.cpp
   src/hmd_device.cpp
+  src/psms_client.cpp
   src/udp_socket.cpp
 )
-target_include_directories(driver_smartphone_hmd SYSTEM PRIVATE third_party/openvr)
+target_include_directories(driver_smartphone_hmd SYSTEM PRIVATE third_party/openvr third_party/psmoveclient)
 target_link_libraries(driver_smartphone_hmd PRIVATE tracking)
 target_compile_definitions(driver_smartphone_hmd PRIVATE SMARTPHONE_HMD_BUILD="${DRIVER_BUILD}")
 if(WIN32)
