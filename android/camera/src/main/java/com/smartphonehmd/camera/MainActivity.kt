@@ -291,6 +291,7 @@ class MainActivity : ComponentActivity() {
             cameraProvider = try {
                 future.get()
             } catch (e: Exception) {
+                Log.e(TAG, "Camera provider failed", e)
                 cameraStatus = "No se pudo abrir la cámara: ${e.message}"
                 return@addListener
             }

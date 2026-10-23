@@ -6,6 +6,8 @@ set -u
 APK="$1"
 PKG=com.smartphonehmd.camera
 TAG=HmdCamera
+# What the app logs once it has a camera, has none, or could not start CameraX.
+CAMERA_RESULT='Camera (front|back|provider failed)|No camera'
 
 alive() {
     adb shell pidof "$PKG" > /dev/null 2>&1
@@ -38,9 +40,10 @@ adb logcat -c
 
 echo "== Opening the app"
 adb shell am start -W -n "$PKG/.MainActivity"
+# The model and the camera start on their own; wait for both to say how it went.
 for _ in $(seq 1 30); do
     alive || fail "The app closed after opening"
-    logged 'Pose model (ready|failed)' && break
+    logged 'Pose model (ready|failed)' && logged "$CAMERA_RESULT" && break
     sleep 2
 done
 # MediaPipe ships no x86_64 library, so on the emulator the model cannot load: the app must say
@@ -52,8 +55,8 @@ elif adb logcat -d -s "$TAG:*" | grep -q 'libmediapipe_tasks_vision_jni.so'; the
 else
     fail "The pose model did not load"
 fi
-adb logcat -d -s "$TAG:*" | grep -E 'Pose model|Camera|No camera'
-logged 'Camera (front|back)|No camera' || fail "The app neither opened a camera nor said there is none"
+adb logcat -d -s "$TAG:*" | grep -E "Pose model (ready|failed)|$CAMERA_RESULT"
+logged "$CAMERA_RESULT" || fail "The app neither opened a camera nor said why not"
 
 echo "== Going to the background and back"
 adb shell input keyevent 3 # Home
