@@ -22,6 +22,13 @@ class RateMeterTest {
     }
 
     @Test
+    fun addsUpAmounts() {
+        val meter = RateMeter()
+        for (i in 0..90) meter.tick(start + i * 33_333_333L, 8_000)
+        assertEquals(240_000f, meter.perSecond(start + 3_000_000_000L), 100f)
+    }
+
+    @Test
     fun aPauseDoesNotDragTheNextRateDown() {
         val meter = RateMeter()
         for (i in 0..45) meter.tick(start + i * 33_333_333L)

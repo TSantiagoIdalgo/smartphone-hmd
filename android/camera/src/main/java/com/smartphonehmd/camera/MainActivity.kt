@@ -3,7 +3,6 @@ package com.smartphonehmd.camera
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
 import android.graphics.Color
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
@@ -48,26 +47,22 @@ import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
-import com.google.mediapipe.framework.image.BitmapImageBuilder
-import com.google.mediapipe.tasks.core.BaseOptions
-import com.google.mediapipe.tasks.core.Delegate
-import com.google.mediapipe.tasks.vision.core.RunningMode
-import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import kotlin.random.Random
 
 /**
- * A body camera: shows what the camera sees, finds the person's pose on the phone with MediaPipe
- * and sends the points of every frame to the PC, which it finds on its own (or uses the IP typed
- * in). Mount the phone, stand where you play, check the hip, knee and ankle points are green, then
- * fix the exposure so the picture stops changing. A tap on the picture hides the controls.
+ * A body camera: shows what the camera sees and sends it as H.264 video to the PC, which it finds
+ * on its own (or uses the IP typed in). The PC (tools/body_tracker.py) finds the person's pose in
+ * it and sends the points back, drawn here over the picture. Mount the phone, stand where you play,
+ * check the hip, knee and ankle points are green, then fix the exposure so the picture stops
+ * changing. A tap on the picture hides the controls.
  */
 class MainActivity : ComponentActivity() {
     private val uiHandler = Handler(Looper.getMainLooper())
     private val mainThread = Executor { uiHandler.post(it) }
-    // Frames and everything that touches the pose model run on this one thread, in order.
-    private val poseThread = Executors.newSingleThreadExecutor()
+    // Camera frames and everything that feeds the encoder run on this one thread, in order.
+    private val cameraThread = Executors.newSingleThreadExecutor()
     private lateinit var link: PcLink
     private lateinit var previewView: PreviewView
     private lateinit var poseOverlay: PoseOverlay
@@ -76,7 +71,6 @@ class MainActivity : ComponentActivity() {
     private lateinit var lockButton: Button
     private lateinit var fpsButton: Button
     private lateinit var cameraButton: Button
-    private lateinit var delegateButton: Button
     private var deviceId = 0
 
     private var cameraProvider: ProcessCameraProvider? = null
@@ -84,27 +78,28 @@ class MainActivity : ComponentActivity() {
     private var preview: Preview? = null
     private var analysis: ImageAnalysis? = null
     private var fpsChoices = emptyList<Int>()
-    private var currentFps = 0
+    @Volatile private var currentFps = 0
     private var usingFront = false
     private var cameraStatus = "Abriendo la cámara…"
     private var cameraError: String? = null
 
-    // Written on the UI thread or the camera's, read on the pose thread or for the screen.
+    // Written on the UI thread or the camera's, read on the camera thread or for the screen.
     @Volatile private var exposureLocked = false
     @Volatile private var timestampIsRealtime = false
-    @Volatile private var useGpu = false
     private val cameraRate = RateMeter()
+    private val videoRate = RateMeter()
+    private val bitRate = RateMeter()
     private val poseRate = RateMeter()
 
-    // Pose thread only, except the @Volatile results shown on screen.
-    private var landmarker: PoseLandmarker? = null
-    private var lastPoseMs = 0L
-    private var bitmap: Bitmap? = null
-    private val frame = BodyProtocol.Frame()
-    @Volatile private var modelStatus = "Cargando el modelo…"
+    // Camera thread only, except the @Volatile ones, shown on screen or used by the link.
+    @Volatile private var encoder: VideoEncoder? = null
+    private var encoderRetryNs = 0L
+    @Volatile private var videoStatus = "Esperando la cámara…"
     @Volatile private var imageSize = ""
-    @Volatile private var inferenceMs = 0f
-    @Volatile private var delayMs = 0f
+
+    // The poses that come back from the PC, written on the link's thread.
+    @Volatile private var pcInferenceMs = 0f
+    @Volatile private var roundTripMs = 0f
     @Volatile private var personFound = false
     @Volatile private var hipVisibility = 0f
     @Volatile private var kneeVisibility = 0f
@@ -142,12 +137,13 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         deviceId = loadDeviceId()
-        useGpu = prefs().getBoolean(KEY_GPU, false)
         usingFront = prefs().getBoolean(KEY_FRONT, false)
         link = PcLink(deviceId)
         link.manualIp = prefs().getString(KEY_PC_IP, "")
+        link.onPose = ::showPose
+        link.onKeyframeRequest = { encoder?.requestKeyframe() }
         buildViews()
-        poseThread.execute { openModel() }
+        if (intent.getBooleanExtra(EXTRA_SELF_TEST, false)) cameraThread.execute { EncoderSelfTest.run(this) }
         if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()
         } else {
@@ -172,11 +168,8 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         (getSystemService(Context.DISPLAY_SERVICE) as DisplayManager).unregisterDisplayListener(displayListener)
         analysis?.clearAnalyzer()
-        poseThread.execute {
-            landmarker?.close()
-            landmarker = null
-        }
-        poseThread.shutdown()
+        cameraThread.execute { closeEncoder() }
+        cameraThread.shutdown()
     }
 
     private fun buildViews() {
@@ -209,11 +202,10 @@ class MainActivity : ComponentActivity() {
         lockButton = button("Fijar exposición") { setExposureLocked(!exposureLocked) }
         fpsButton = button("fps") { nextFps() }
         cameraButton = button("") { switchCamera() }
-        delegateButton = button("") { switchDelegate() }
         updateButtons()
         val buttons = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            for (b in listOf(lockButton, fpsButton, cameraButton, delegateButton)) {
+            for (b in listOf(lockButton, fpsButton, cameraButton)) {
                 addView(b, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             }
         }
@@ -248,7 +240,6 @@ class MainActivity : ComponentActivity() {
         fpsButton.isEnabled = camera != null && fpsChoices.size > 1
         cameraButton.text = if (usingFront) "Frontal" else "Trasera"
         cameraButton.isEnabled = camera != null
-        delegateButton.text = if (useGpu) "GPU" else "CPU"
     }
 
     private fun updateStats() {
@@ -262,23 +253,31 @@ class MainActivity : ComponentActivity() {
                 else -> append("${if (usingFront) "frontal" else "trasera"} $imageSize · ${"%.1f".format(cameraRate.perSecond(now))} cuadros/s")
             }
             append('\n')
-            append(modelStatus)
+            append(videoStatus)
+            val frames = videoRate.perSecond(now)
+            if (frames > 0) {
+                append(" · ${"%.1f".format(frames)} cuadros/s · ${"%.1f".format(bitRate.perSecond(now) * 8 / 1e6f)} Mb/s")
+            }
+            append('\n')
             val poses = poseRate.perSecond(now)
             if (poses > 0) {
-                append(" · ${"%.1f".format(poses)} poses/s · ${"%.0f".format(inferenceMs)} ms cada una · retraso ${"%.0f".format(delayMs)} ms")
+                append("Pose de la PC: ${"%.1f".format(poses)}/s · modelo ${"%.0f".format(pcInferenceMs)} ms · ")
+                append("ida y vuelta ${"%.0f".format(roundTripMs)} ms")
                 append('\n')
                 if (personFound) {
                     append("Cadera ${percent(hipVisibility)} · rodillas ${percent(kneeVisibility)} · tobillos ${percent(ankleVisibility)}")
                 } else {
                     append("No se ve a nadie")
                 }
+            } else {
+                append("Sin poses de la PC: abre body_tracker.py en la PC")
             }
             append('\n')
             val target = link.target
             if (target != null) {
                 append("PC $target · ${link.sentPackets} paquetes enviados")
             } else {
-                append("Buscando la PC… (abre body_receiver.py o SteamVR)")
+                append("Buscando la PC… (abre body_tracker.py)")
             }
         }
     }
@@ -341,7 +340,8 @@ class MainActivity : ComponentActivity() {
         val previewBuilder = Preview.Builder()
             .setResolutionSelector(fourByThree.build())
             .setTargetRotation(rotation)
-        // 640x480 is plenty: the model looks at 256x256. The image comes turned upright.
+        // 640x480 is plenty: the pose model looks at 256x256. The frames come as the sensor sees
+        // them, in YUV, ready for the encoder; the PC turns them upright.
         val analysisBuilder = ImageAnalysis.Builder()
             .setResolutionSelector(
                 fourByThree
@@ -349,8 +349,6 @@ class MainActivity : ComponentActivity() {
                     .build(),
             )
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-            .setOutputImageRotationEnabled(true)
             .setTargetRotation(rotation)
         // Counts every frame the camera takes, analysed or not.
         Camera2Interop.Extender(analysisBuilder).setSessionCaptureCallback(object : CameraCaptureSession.CaptureCallback() {
@@ -366,7 +364,7 @@ class MainActivity : ComponentActivity() {
         }
 
         val newPreview = previewBuilder.build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
-        val newAnalysis = analysisBuilder.build().also { it.setAnalyzer(poseThread) { image -> analyze(image) } }
+        val newAnalysis = analysisBuilder.build().also { it.setAnalyzer(cameraThread) { image -> analyze(image) } }
         try {
             camera = provider.bindToLifecycle(this, selector, newPreview, newAnalysis)
         } catch (e: Exception) {
@@ -425,122 +423,84 @@ class MainActivity : ComponentActivity() {
         bindCamera()
     }
 
-    private fun switchDelegate() {
-        useGpu = !useGpu
-        prefs().edit().putBoolean(KEY_GPU, useGpu).apply()
-        updateButtons()
-        poseThread.execute { openModel() }
-    }
-
-    // Pose thread.
-    private fun openModel() {
-        landmarker?.close()
-        landmarker = null
-        val gpu = useGpu
-        val name = if (gpu) "GPU" else "CPU"
-        modelStatus = "Cargando el modelo ($name)…"
-        val options = PoseLandmarker.PoseLandmarkerOptions.builder()
-            .setBaseOptions(
-                BaseOptions.builder()
-                    .setModelAssetPath(MODEL_FILE)
-                    .setDelegate(if (gpu) Delegate.GPU else Delegate.CPU)
-                    .build(),
-            )
-            .setRunningMode(RunningMode.VIDEO)
-            .setNumPoses(1)
-            .build()
-        landmarker = try {
-            PoseLandmarker.createFromOptions(this, options)
-        } catch (e: Throwable) {
-            Log.e(TAG, "Pose model failed to load on $name", e)
-            modelStatus = "No se pudo cargar el modelo en $name${if (gpu) ", prueba CPU" else ""}: ${e.message}"
-            return
-        }
-        Log.i(TAG, "Pose model ready on $name")
-        modelStatus = "Modelo listo ($name)"
-    }
-
-    // Pose thread: one camera frame in, one packet out, with or without a person in it.
+    // Camera thread: one camera frame in, to the encoder, which sends it once encoded.
     private fun analyze(image: ImageProxy) {
-        val captureNs = captureTime(image.imageInfo.timestamp, SystemClock.elapsedRealtimeNanos())
-        val upright = try {
-            toBitmap(image)
+        try {
+            val now = SystemClock.elapsedRealtimeNanos()
+            val captureNs = captureTime(image.imageInfo.timestamp, now)
+            imageSize = "${image.width}×${image.height}"
+            val fps = if (currentFps > 0) currentFps else 30
+            val current = encoder?.takeIf { it.width == image.width && it.height == image.height && it.fps == fps }
+                ?: openEncoder(image.width, image.height, fps, now)
+                ?: return
+            val planes = Array(3) { YuvPlane(image.planes[it].buffer, image.planes[it].rowStride, image.planes[it].pixelStride) }
+            val flags = if (exposureLocked) BodyProtocol.FLAG_EXPOSURE_LOCKED else 0
+            current.encode(planes, VideoEncoder.Tag(captureNs, image.imageInfo.rotationDegrees / 90, flags))
+        } catch (e: Exception) {
+            Log.e(TAG, "Video encoding failed", e)
+            videoStatus = "El codificador de video falló: ${e.message}"
+            closeEncoder()
+            encoderRetryNs = SystemClock.elapsedRealtimeNanos() + RETRY_NS
         } finally {
             image.close()
         }
-        frame.seq++
-        frame.captureNs = captureNs
-        frame.deviceId = deviceId
-        frame.width = upright.width
-        frame.height = upright.height
-        frame.flags = if (exposureLocked) BodyProtocol.FLAG_EXPOSURE_LOCKED else 0
-        frame.landmarkCount = 0
-        frame.inferenceMs = 0f
-        imageSize = "${upright.width}×${upright.height}"
+    }
 
-        val model = landmarker
-        if (model != null) {
-            // The model wants strictly increasing times in ms.
-            val ms = maxOf(captureNs / 1_000_000, lastPoseMs + 1)
-            lastPoseMs = ms
-            val start = SystemClock.elapsedRealtimeNanos()
-            val result = try {
-                model.detectForVideo(BitmapImageBuilder(upright).build(), ms)
-            } catch (e: Exception) {
-                Log.e(TAG, "Pose detection failed", e)
-                null
-            }
-            frame.inferenceMs = (SystemClock.elapsedRealtimeNanos() - start) / 1e6f
-            val pose = result?.landmarks()?.firstOrNull()
-            if (pose != null) {
-                val count = minOf(pose.size, BodyProtocol.LANDMARK_COUNT)
-                for (i in 0 until count) {
-                    val point = pose[i]
-                    val at = i * 5
-                    frame.landmarks[at] = point.x()
-                    frame.landmarks[at + 1] = point.y()
-                    frame.landmarks[at + 2] = point.z()
-                    frame.landmarks[at + 3] = point.visibility().orElse(0f)
-                    frame.landmarks[at + 4] = point.presence().orElse(0f)
+    // Camera thread. After a failure, waits a few seconds before trying the encoder again.
+    private fun openEncoder(width: Int, height: Int, fps: Int, nowNs: Long): VideoEncoder? {
+        closeEncoder()
+        if (nowNs < encoderRetryNs) return null
+        return try {
+            VideoEncoder(width, height, fps, fps * BITS_PER_FRAME) { tag, keyframe, data, offset, length ->
+                if (link.sendVideo(tag, width, height, keyframe, data, offset, length)) {
+                    val sentNs = SystemClock.elapsedRealtimeNanos()
+                    videoRate.tick(sentNs)
+                    bitRate.tick(sentNs, length.toLong())
                 }
-                frame.landmarkCount = count
-                frame.flags = frame.flags or BodyProtocol.FLAG_POSE
+            }.also {
+                encoder = it
+                videoStatus = "Video H.264 (${it.name})"
+                Log.i(TAG, "Video encoder ${it.name} ${width}x$height at $fps fps")
             }
-            poseRate.tick(SystemClock.elapsedRealtimeNanos())
+        } catch (e: Exception) {
+            Log.e(TAG, "Video encoder failed", e)
+            videoStatus = "No se pudo abrir el codificador de video: ${e.message}"
+            encoderRetryNs = nowNs + RETRY_NS
+            null
         }
-        link.send(frame)
+    }
 
-        inferenceMs = frame.inferenceMs
-        delayMs = (SystemClock.elapsedRealtimeNanos() - captureNs) / 1e6f
-        personFound = frame.landmarkCount > 0
+    // Camera thread.
+    private fun closeEncoder() {
+        encoder?.close()
+        encoder = null
+    }
+
+    // Link thread: a pose from the PC, drawn over the picture.
+    private fun showPose(pose: BodyProtocol.Frame) {
+        val now = SystemClock.elapsedRealtimeNanos()
+        poseRate.tick(now)
+        pcInferenceMs = pose.inferenceMs
+        roundTripMs = (now - pose.captureNs) / 1e6f
+        val count = if (pose.flags and BodyProtocol.FLAG_POSE != 0) pose.landmarkCount else 0
+        personFound = count > 28
         if (personFound) {
-            hipVisibility = pairVisibility(23)
-            kneeVisibility = pairVisibility(25)
-            ankleVisibility = pairVisibility(27)
+            hipVisibility = pairVisibility(pose, 23)
+            kneeVisibility = pairVisibility(pose, 25)
+            ankleVisibility = pairVisibility(pose, 27)
         }
-        poseOverlay.show(frame.landmarks, frame.landmarkCount, frame.width, frame.height)
+        poseOverlay.show(pose.landmarks, count, pose.width, pose.height)
     }
 
     /** The lower visibility of a left point and its right twin, which follows it. */
-    private fun pairVisibility(left: Int): Float =
-        minOf(frame.landmarks[left * 5 + 3], frame.landmarks[(left + 1) * 5 + 3])
+    private fun pairVisibility(pose: BodyProtocol.Frame, left: Int): Float =
+        minOf(pose.landmarks[left * 5 + 3], pose.landmarks[(left + 1) * 5 + 3])
 
     // The camera's frame time on the elapsedRealtime clock. Cameras that do not use that clock use
     // uptime, which only differs by the time the phone spent asleep.
     private fun captureTime(sensorNs: Long, nowNs: Long): Long {
         val ns = if (timestampIsRealtime) sensorNs else sensorNs + (nowNs - System.nanoTime())
         return if (ns > nowNs || nowNs - ns > 1_000_000_000L) nowNs else ns
-    }
-
-    // Copies the RGBA frame into a bitmap reused from frame to frame, unless its rows are padded.
-    private fun toBitmap(image: ImageProxy): Bitmap {
-        val plane = image.planes[0]
-        if (plane.pixelStride != 4 || plane.rowStride != image.width * 4) return image.toBitmap()
-        val target = bitmap?.takeIf { it.width == image.width && it.height == image.height }
-            ?: Bitmap.createBitmap(image.width, image.height, Bitmap.Config.ARGB_8888).also { bitmap = it }
-        plane.buffer.rewind()
-        target.copyPixelsFromBuffer(plane.buffer)
-        return target
     }
 
     @Suppress("DEPRECATION")
@@ -556,11 +516,14 @@ class MainActivity : ComponentActivity() {
 
     private companion object {
         const val TAG = "HmdCamera"
-        const val MODEL_FILE = "pose_landmarker_lite.task"
+        /** For the CI test on the emulator, which has no camera: see [EncoderSelfTest]. */
+        const val EXTRA_SELF_TEST = "selftest"
+        // About 2 Mb/s at 30 fps: clean enough for the pose model, light on the Wi-Fi.
+        const val BITS_PER_FRAME = 70_000
+        const val RETRY_NS = 3_000_000_000L
         const val KEY_DEVICE_ID = "device_id"
         const val KEY_PC_IP = "pc_ip"
         const val KEY_FPS = "fps"
         const val KEY_FRONT = "front"
-        const val KEY_GPU = "gpu"
     }
 }

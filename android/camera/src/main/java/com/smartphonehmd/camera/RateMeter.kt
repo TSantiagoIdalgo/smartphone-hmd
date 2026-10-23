@@ -1,25 +1,30 @@
 package com.smartphonehmd.camera
 
-/** Events per second over the last second or so. Thread safe; times are in nanoseconds. */
+/**
+ * Events (or an amount, such as bytes) per second over the last second or so. Thread safe;
+ * times are in nanoseconds.
+ */
 class RateMeter {
-    private var count = 0
+    private var total = 0L
     private var windowStartNs = 0L
     private var lastTickNs = 0L
     private var rate = 0f
 
     @Synchronized
-    fun tick(nowNs: Long) {
-        if (nowNs - lastTickNs > STALE_NS) {
-            // First event, or the first after a pause: start counting afresh.
-            count = 0
-            windowStartNs = nowNs
-        }
+    fun tick(nowNs: Long, amount: Long = 1) {
+        val stale = nowNs - lastTickNs > STALE_NS
         lastTickNs = nowNs
-        count++
+        if (stale) {
+            // First event, or the first after a pause: it starts the count, the ones after it count.
+            total = 0
+            windowStartNs = nowNs
+            return
+        }
+        total += amount
         val elapsed = nowNs - windowStartNs
         if (elapsed >= WINDOW_NS) {
-            rate = (count - 1) * 1e9f / elapsed
-            count = 1
+            rate = total * 1e9f / elapsed
+            total = 0
             windowStartNs = nowNs
         }
     }

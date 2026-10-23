@@ -10,10 +10,17 @@ import java.util.Collections
 
 /**
  * The phone's side of the link to the PC: finds the PC on every network the phone is on (Wi-Fi or
- * USB tethering) by broadcasting a discover packet, sends each frame's pose to it, and answers the
- * PC's clock pings at once. An IP typed in wins over the one found.
+ * USB tethering) by broadcasting a discover packet, sends it the camera's video, and answers the
+ * PC's clock pings at once. The poses the PC finds and its requests for a keyframe come back on
+ * the link's thread. An IP typed in wins over the one found.
  */
 class PcLink(private val deviceId: Int) {
+    /** Called on the link's thread with each pose from the PC; the frame is reused afterwards. */
+    @Volatile var onPose: ((BodyProtocol.Frame) -> Unit)? = null
+
+    /** Called on the link's thread when the PC needs a frame it can decode on its own. */
+    @Volatile var onKeyframeRequest: (() -> Unit)? = null
+
     /** Typed in by the user; null or blank means search for the PC. */
     @Volatile var manualIp: String? = null
 
@@ -23,10 +30,12 @@ class PcLink(private val deviceId: Int) {
     @Volatile var sentPackets = 0
         private set
 
+    private var sentFrames = 0
+
     @Volatile private var foundAddress: InetAddress? = null
     @Volatile private var parsedIp: Pair<String, InetAddress?>? = null
     @Volatile private var socket: DatagramSocket? = null
-    private val sendBuffer = ByteArray(BodyProtocol.BODY_PACKET_SIZE)
+    private val sendBuffer = ByteArray(BodyProtocol.VIDEO_HEADER_SIZE + BodyProtocol.MAX_VIDEO_PAYLOAD)
 
     fun start() {
         if (socket != null) return
@@ -45,19 +54,34 @@ class PcLink(private val deviceId: Int) {
         socket = null
     }
 
-    /** Sends one frame's pose, if the PC is known. Called from the pose thread. */
-    fun send(frame: BodyProtocol.Frame) {
-        val s = socket ?: return
-        val address = targetAddress() ?: return
+    /**
+     * Sends one encoded frame in pieces, if the PC is known; false if it is not. Called from the
+     * encoder's thread.
+     */
+    fun sendVideo(
+        tag: VideoEncoder.Tag, width: Int, height: Int, keyframe: Boolean, data: ByteArray, offset: Int, length: Int,
+    ): Boolean {
+        val s = socket ?: return false
+        val address = targetAddress() ?: return false
+        val flags = tag.flags or if (keyframe) BodyProtocol.FLAG_KEYFRAME else 0
+        val pieces = maxOf(1, (length + BodyProtocol.MAX_VIDEO_PAYLOAD - 1) / BodyProtocol.MAX_VIDEO_PAYLOAD)
         synchronized(sendBuffer) {
-            val length = BodyProtocol.writeBody(sendBuffer, frame)
-            try {
-                s.send(DatagramPacket(sendBuffer, length, address, BodyProtocol.BODY_PORT))
-                sentPackets++
-            } catch (_: Exception) {
-                // The network is changing; the next frame tries again.
+            sentFrames++
+            for (piece in 0 until pieces) {
+                val at = piece * BodyProtocol.MAX_VIDEO_PAYLOAD
+                val size = BodyProtocol.writeVideo(
+                    sendBuffer, sentFrames, tag.captureNs, deviceId, width, height, piece, pieces, tag.quarterTurns, flags,
+                    data, offset + at, minOf(BodyProtocol.MAX_VIDEO_PAYLOAD, length - at),
+                )
+                try {
+                    s.send(DatagramPacket(sendBuffer, size, address, BodyProtocol.BODY_PORT))
+                    sentPackets++
+                } catch (_: Exception) {
+                    // The network is changing; the PC asks for a keyframe once it is back.
+                }
             }
         }
+        return true
     }
 
     // Parsed once per text typed, not once per frame: half-typed text can mean a name lookup.
@@ -78,7 +102,8 @@ class PcLink(private val deviceId: Int) {
         val discover = ByteArray(BodyProtocol.HEADER_SIZE)
         BodyProtocol.writeDiscover(discover)
         val pong = ByteArray(BodyProtocol.PONG_SIZE)
-        val reply = DatagramPacket(ByteArray(256), 256)
+        val reply = DatagramPacket(ByteArray(1024), 1024)
+        val pose = BodyProtocol.Frame()
         var nextDiscoverMs = 0L
         while (!s.isClosed) {
             val now = SystemClock.elapsedRealtime()
@@ -104,6 +129,8 @@ class PcLink(private val deviceId: Int) {
             }
             when (BodyProtocol.typeOf(reply.data, reply.length)) {
                 BodyProtocol.TYPE_PC_HERE -> foundAddress = reply.address
+                BodyProtocol.TYPE_BODY -> if (BodyProtocol.readBody(reply.data, reply.length, pose)) onPose?.invoke(pose)
+                BodyProtocol.TYPE_KEYFRAME_REQUEST -> onKeyframeRequest?.invoke()
                 BodyProtocol.TYPE_TIME_PING -> {
                     val phoneNs = SystemClock.elapsedRealtimeNanos()
                     BodyProtocol.writePong(

@@ -7,7 +7,7 @@ import android.graphics.Paint
 import android.view.View
 
 /**
- * Draws the pose found on the camera preview: a dot per point, green when the model is sure the
+ * Draws the pose the PC found on the camera preview: a dot per point, green when the model is sure the
  * point is in view, yellow when unsure, red when it is guessing. The preview fits the image inside
  * the view, so the image's rectangle is worked out the same way here.
  */
@@ -25,7 +25,7 @@ class PoseOverlay(context: Context) : View(context) {
         strokeWidth = 6f
     }
 
-    /** Called from the pose thread with each frame's points; [landmarks] is copied. */
+    /** Called from the link's thread with each frame's points; [landmarks] is copied. */
     fun show(landmarks: FloatArray, landmarkCount: Int, width: Int, height: Int) {
         synchronized(points) {
             landmarkCount.coerceIn(0, BodyProtocol.LANDMARK_COUNT).let { n ->

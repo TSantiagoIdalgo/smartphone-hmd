@@ -7,8 +7,17 @@ import java.nio.ByteOrder
  * UDP packets between a body camera phone and the PC. Little-endian, with the same 20-byte header
  * as the headset's packets: magic "HMD1", type, 3 bytes of padding, seq (u32), timestamp (i64 ns).
  *
- * Body packet (type 7, phone to PC port 9946), 48 bytes + 20 per landmark:
- * - timestamp: when the camera took the frame, on the phone's elapsedRealtimeNanos clock;
+ * Video packet (type 10, phone to PC port 9946): a piece of one H.264 frame, 36 bytes + payload.
+ * - seq: the frame's number, counting up by one per frame sent; timestamp: when the camera took
+ *   it, on the phone's elapsedRealtimeNanos clock;
+ * - 20 device id (u32), 24 picture width (u16), 26 picture height (u16), as the camera's sensor
+ *   sees it; 28 piece index (u16), 30 piece count (u16); 32 quarter turns clockwise that make the
+ *   picture upright (u8), 33 flags (u8: keyframe, exposure locked), 34 padding (u16);
+ * - 36 the frame's bytes, [MAX_VIDEO_PAYLOAD] per piece except the last. Keyframes start with
+ *   the stream's headers. The PC asks for one with a header-only keyframe request (type 11).
+ *
+ * Body packet (type 7, PC to phone): the pose found in one frame, 48 bytes + 20 per landmark:
+ * - seq and timestamp: the video frame's;
  * - 20 device id (u32), 24 image width (u16), 26 image height (u16), both upright;
  * - 28 pose inference time in ms (f32), 32 flags (u8), 33 landmark count (u8), 34 padding (u16);
  * - 36 ball x, 40 ball y, 44 ball radius (f32), a Move's bulb for calibration, 0 when not seen;
@@ -28,16 +37,21 @@ object BodyProtocol {
     const val LANDMARK_COUNT = 33
     const val BODY_PACKET_SIZE = BODY_HEADER_SIZE + LANDMARK_SIZE * LANDMARK_COUNT
     const val PONG_SIZE = 32
+    const val VIDEO_HEADER_SIZE = 36
+    const val MAX_VIDEO_PAYLOAD = 1400
 
     const val TYPE_DISCOVER: Byte = 4
     const val TYPE_PC_HERE: Byte = 5
     const val TYPE_BODY: Byte = 7
     const val TYPE_TIME_PING: Byte = 8
     const val TYPE_TIME_PONG: Byte = 9
+    const val TYPE_VIDEO: Byte = 10
+    const val TYPE_KEYFRAME_REQUEST: Byte = 11
 
     const val FLAG_POSE = 1
     const val FLAG_EXPOSURE_LOCKED = 2
     const val FLAG_BALL = 4
+    const val FLAG_KEYFRAME = 8
 
     private val MAGIC = byteArrayOf('H'.code.toByte(), 'M'.code.toByte(), 'D'.code.toByte(), '1'.code.toByte())
 
@@ -57,22 +71,47 @@ object BodyProtocol {
         val landmarks: FloatArray = FloatArray(LANDMARK_COUNT * 5),
     )
 
-    /** Writes [frame] into [out] ([BODY_PACKET_SIZE] bytes) and returns the packet's length. */
-    fun writeBody(out: ByteArray, frame: Frame): Int {
-        val count = frame.landmarkCount.coerceIn(0, LANDMARK_COUNT)
-        val buffer = header(out, TYPE_BODY, frame.seq, frame.captureNs)
-        buffer.putInt(frame.deviceId)
-        buffer.putShort(frame.width.toShort())
-        buffer.putShort(frame.height.toShort())
-        buffer.putFloat(frame.inferenceMs)
-        buffer.put(frame.flags.toByte())
-        buffer.put(count.toByte())
-        buffer.putShort(0)
-        buffer.putFloat(frame.ballX)
-        buffer.putFloat(frame.ballY)
-        buffer.putFloat(frame.ballRadius)
-        for (i in 0 until count * 5) buffer.putFloat(frame.landmarks[i])
-        return BODY_HEADER_SIZE + count * LANDMARK_SIZE
+    /** Reads a body packet into [into]; false if [data] is not a whole body packet. */
+    fun readBody(data: ByteArray, length: Int, into: Frame): Boolean {
+        if (typeOf(data, length) != TYPE_BODY || length < BODY_HEADER_SIZE) return false
+        val buffer = ByteBuffer.wrap(data, 0, length).order(ByteOrder.LITTLE_ENDIAN)
+        val count = data[33].toInt() and 0xFF
+        if (count > LANDMARK_COUNT || length < BODY_HEADER_SIZE + count * LANDMARK_SIZE) return false
+        into.seq = buffer.getInt(8)
+        into.captureNs = buffer.getLong(12)
+        into.deviceId = buffer.getInt(20)
+        into.width = buffer.getShort(24).toInt() and 0xFFFF
+        into.height = buffer.getShort(26).toInt() and 0xFFFF
+        into.inferenceMs = buffer.getFloat(28)
+        into.flags = data[32].toInt() and 0xFF
+        into.ballX = buffer.getFloat(36)
+        into.ballY = buffer.getFloat(40)
+        into.ballRadius = buffer.getFloat(44)
+        into.landmarkCount = count
+        for (i in 0 until count * 5) into.landmarks[i] = buffer.getFloat(BODY_HEADER_SIZE + i * 4)
+        return true
+    }
+
+    /**
+     * Writes one piece of a video frame into [out] ([VIDEO_HEADER_SIZE] + [MAX_VIDEO_PAYLOAD]
+     * bytes): [length] bytes of [data] from [offset]. Returns the packet's length.
+     */
+    fun writeVideo(
+        out: ByteArray, seq: Int, captureNs: Long, deviceId: Int, width: Int, height: Int, piece: Int, pieces: Int,
+        quarterTurns: Int, flags: Int, data: ByteArray, offset: Int, length: Int,
+    ): Int {
+        header(out, TYPE_VIDEO, seq, captureNs).apply {
+            putInt(deviceId)
+            putShort(width.toShort())
+            putShort(height.toShort())
+            putShort(piece.toShort())
+            putShort(pieces.toShort())
+            put(quarterTurns.toByte())
+            put(flags.toByte())
+            putShort(0)
+            put(data, offset, length)
+        }
+        return VIDEO_HEADER_SIZE + length
     }
 
     /** Writes a header-only discover packet into [out] ([HEADER_SIZE] bytes). */
