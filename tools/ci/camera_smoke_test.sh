@@ -2,7 +2,7 @@
 # Installs the body camera APK on a running emulator and opens it with its encoder self-test: the
 # app must stay alive, open the camera or say there is none, and encode a made-up picture that
 # then decodes on this side (as on the PC) into the same picture. Prints the crash stack trace if
-# it died. Usage: camera_smoke_test.sh camera.apk  (needs Python with PyAV)
+# it died. Usage: camera_smoke_test.sh camera.apk  (needs Python with PyAV and NumPy)
 set -u
 APK="$1"
 PKG=com.smartphonehmd.camera

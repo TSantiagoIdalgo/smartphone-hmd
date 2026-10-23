@@ -6,7 +6,7 @@ the picture it was made from: grey, with a red square at the top left.
 """
 import sys
 
-import av
+import av  # and NumPy, for to_ndarray
 
 
 def main(path):
