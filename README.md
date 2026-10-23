@@ -2,9 +2,12 @@
 
 Convierte un smartphone Android en un visor (HMD) que SteamVR reconoce.
 
-- `android/`: app Kotlin que envía los sensores del móvil por UDP y muestra la imagen.
+- `android/app`: app Kotlin que envía los sensores del móvil por UDP y muestra la imagen.
+- `android/camera`: app "HMD Cámara" para el body tracking: un móvil viejo como cámara que manda
+  su video a la PC (en pruebas, ver al final).
 - `driver/`: driver de SteamVR en C++ que recibe los sensores y se presenta como un HMD estéreo.
 - `tools/sim/send_imu.py`: simulador que se hace pasar por el móvil, para probar el driver sin él.
+- `tools/body_tracker.py`: encuentra tu pose en el video de las cámaras de body tracking.
 - `docs/PLAN.md`: plan del proyecto y protocolo.
 
 ## Descargar las compilaciones
@@ -13,6 +16,7 @@ Cada push a `main` y cada pull request compilan el APK y el driver en GitHub Act
 Ve a la pestaña **Actions**, abre la ejecución más reciente y descarga:
 
 - `smartphone-hmd-apk`: la app para instalar en el móvil.
+- `smartphone-hmd-camera-apk`: la app de cámara para el body tracking.
 - `smartphone_hmd-driver`: la carpeta del driver para SteamVR.
 
 ## Compilar en local
@@ -146,8 +150,9 @@ con un LED, configurada en PSMoveServiceEx como visor virtual). Agacharte, incli
 mueve entonces la vista, y la cabeza y las manos quedan en el mismo espacio. La rotación sigue
 llegando del móvil, así que girar la cabeza no tiene más latencia que antes.
 
-Viene desactivado. Para activarlo, con SteamVR cerrado, añade en `Steam\config\steamvr.vrsettings`,
-dentro de `"driver_smartphone_hmd"`:
+Viene desactivado. Para activarlo, con SteamVR cerrado, cambia o añade en
+`smartphone_hmd\resources\settings\default.vrsettings`, dentro de `"driver_smartphone_hmd"`
+(no en `Steam\config\steamvr.vrsettings`, que SteamVR reescribe):
 
 ```
 "head_position_enabled" : true,
@@ -172,3 +177,48 @@ valores.
   la altura de los ojos y cuánto tiembla la medida.
 - `psms_controller_id` (por defecto -1) hace que siga un PS Move en vez del visor virtual: sirve
   para probar con un Move pegado al visor.
+
+## Body tracking: cámaras y pose en la PC (en pruebas)
+
+Primer paso del body tracking: cada móvil que hace de cámara corre la app **HMD Cámara**, que manda
+a la PC el video de su cámara (H.264, unos 2 Mb/s). En la PC, `tools/body_tracker.py` encuentra tu
+pose en cada cuadro con MediaPipe y le devuelve los puntos al móvil, que los dibuja sobre la imagen.
+Así un móvil viejo solo filma, y el trabajo pesado lo hace la PC. El driver todavía no usa la pose;
+por ahora sirve para medir cuántos cuadros por segundo llegan, el retraso y si la pose es estable.
+
+En la PC, con Python 3 instalado, una sola vez:
+
+```
+pip install -r tools\requirements-body.txt
+```
+
+Y cada vez:
+
+```
+python tools\body_tracker.py
+python tools\body_tracker.py --record prueba.jsonl
+```
+
+La primera vez descarga el modelo de pose a `tools\models` y Windows pregunta si Python puede usar
+la red: permítelo en redes privadas (puerto UDP 9946). `--model lite` usa un modelo más rápido y
+menos exacto, y `--model heavy` uno más exacto y lento; el normal (`full`) tarda unos 20 ms por
+cuadro. `--record` guarda cada pose en un archivo para reproducirla después.
+
+1. Instala `smartphone-hmd-camera-apk` en el móvil que hará de cámara y dale permiso de cámara. Si
+   tenías la versión anterior, desinstálala primero.
+2. Conéctalo como el visor: anclaje USB por cable, o la misma red Wi-Fi que la PC. Busca la PC
+   solo; si no la encuentra, escribe su IP.
+3. Ponlo fijo, a la altura de la cadera o algo más, de modo que te vea entero de pie donde juegas.
+   La imagen se endereza sola esté el móvil vertical u horizontal.
+4. En la pantalla: los puntos verdes son seguros, los amarillos dudosos y los rojos adivinados. Las
+   líneas de arriba dicen los cuadros por segundo de la cámara y del video, las poses por segundo
+   que vuelven de la PC, el tiempo de ida y vuelta (desde que la cámara toma el cuadro hasta que su
+   pose vuelve al móvil) y qué tan seguros están la cadera, las rodillas y los tobillos. Un toque
+   en la imagen oculta los controles.
+5. Con los puntos en verde, pulsa **Fijar exposición** para que la imagen deje de cambiar de brillo
+   y de foco. Los botones cambian también los fps de la cámara y la cámara trasera o frontal.
+
+Cada 2 segundos `body_tracker.py` muestra por móvil los cuadros por segundo y los Mb/s que llegan,
+las poses por segundo, cuánto tarda el modelo, a los cuántos ms de tomado el cuadro llega a la PC y
+está lista su pose, los cuadros perdidos y la seguridad de cada punto. "saltados" quiere decir que
+la CPU no da abasto y la pose se calcula solo en el cuadro más nuevo.

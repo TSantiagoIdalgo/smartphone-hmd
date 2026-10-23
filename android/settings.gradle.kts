@@ -15,4 +15,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "smartphone-hmd"
-include(":app")
+include(":app", ":camera")
