@@ -309,7 +309,11 @@ calibra de nuevo. Con los dos Moves encendidos no comprueba nada y lo dice.
 En `vrserver.txt`, cada 10 segundos, `Body camera …` dice por cámara los cuadros por segundo, a los
 cuántos ms de tomado llega cada cuadro, qué parte tiene un cuadro de la otra cámara a menos de
 20 ms, en qué parte se ve una persona y la bola, y si está calibrada; `Body:` cuántos puntos se usan
-y cuántos se descartan.
+y cuántos se descartan; y `Body trackers` por tracker (cadera, pie izquierdo, pie derecho) a qué
+altura del piso estuvo en promedio, la más baja y la más alta, cuánto se apartó de su lugar
+promedio y qué parte del tiempo tuvo posición. Quieto, lo que se aparta es su temblor: debe quedar
+en menos de 1 cm, y si no, baja `body_agility`. Al caminar, la altura más baja de cada pie es la del
+tobillo apoyado, unos 0,07-0,10 m.
 
 Ajustes de `default.vrsettings`, que normalmente no hace falta tocar:
 

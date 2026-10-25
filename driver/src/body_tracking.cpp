@@ -229,7 +229,11 @@ void BodyTracking::FinishCalibration()
 void BodyTracking::Publish(double now)
 {
     const TrackerPose poses[3] = {session_.Waist(now), session_.Foot(true, now), session_.Foot(false, now)};
+    ++published_;
     for (int i = 0; i < 3; ++i) {
+        if (poses[i].valid) {
+            spreads_[i].Add(poses[i].position);
+        }
         vr::DriverPose_t pose{};
         pose.qWorldFromDriverRotation.w = 1.0;
         pose.qDriverFromHeadRotation.w = 1.0;
@@ -268,6 +272,28 @@ void BodyTracking::LogReport(double now)
                   "(re)started",
                   f.updates, f.outliers, f.swapped, f.started);
     }
+    if (spreads_[0].count + spreads_[1].count + spreads_[2].count > 0) {
+        static const char* const kNames[3] = {"hips", "left foot", "right foot"};
+        std::string text = "Body trackers (height above the floor, lowest to highest, and how far from where it was "
+                           "on average: its tremor when still):";
+        for (int i = 0; i < 3; ++i) {
+            const PoseSpread& s = spreads_[i];
+            char part[128];
+            if (s.count == 0) {
+                std::snprintf(part, sizeof(part), "%s %s nowhere", i > 0 ? ";" : "", kNames[i]);
+            } else {
+                std::snprintf(part, sizeof(part), "%s %s %.2f m (%.2f to %.2f), %.1f cm, %.0f%% of the time",
+                              i > 0 ? ";" : "", kNames[i], s.Mean().y, s.lowest, s.highest, s.Deviation() * 100.0,
+                              100.0 * s.count / published_);
+            }
+            text += part;
+        }
+        DriverLog("%s", text.c_str());
+    }
+    for (PoseSpread& s : spreads_) {
+        s = PoseSpread{};
+    }
+    published_ = 0;
     if (report.checks > 0) {
         // Two cameras close together see a point from nearly the same side: across their view they
         // place it well, but in depth several times worse.

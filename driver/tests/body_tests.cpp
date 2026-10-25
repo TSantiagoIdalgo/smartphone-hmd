@@ -483,6 +483,7 @@ struct SessionSimulation {
     bool others_tracked = true;  // false: the other Moves are on but out of the PS Eye's sight
     double move_jitter = 0.0;    // of PSMoveServiceEx's positions, m
     int move_samples = 0;
+    double pixel_noise = 1.0;    // of the pose's points
 
     // A slow loop through the room, about 0.3 m/s.
     static Vec3 MovePath(double t)
@@ -512,8 +513,8 @@ struct SessionSimulation {
             for (int j = 0; j < kJointCount; ++j) {
                 truth[camera].Project(person->Joint(j), &u, &v);
                 float* p = frame.point[kJointLandmark[j]];
-                p[0] = static_cast<float>((u + noise()) / frame.width);
-                p[1] = static_cast<float>((v + noise()) / frame.height);
+                p[0] = static_cast<float>((u + pixel_noise * noise()) / frame.width);
+                p[1] = static_cast<float>((v + pixel_noise * noise()) / frame.height);
                 p[3] = 0.9f;
             }
         }
@@ -628,6 +629,48 @@ void TestSessionNeedsOneMove()
     CHECK(!results[0].result.ok && !results[0].result.problem.empty());
 }
 
+void TestPoseSpread()
+{
+    PoseSpread spread;
+    CHECK(spread.Deviation() == 0.0);
+    for (int i = 0; i < 100; ++i) {
+        spread.Add({i % 2 ? 0.01 : -0.01, 1.0 + 0.001 * i, 0.0});
+    }
+    CHECK_NEAR(spread.Mean().y, 1.0495, 1e-9);
+    CHECK_NEAR(spread.lowest, 1.0, 1e-12);
+    CHECK_NEAR(spread.highest, 1.099, 1e-12);
+    CHECK_NEAR(spread.Deviation(), std::sqrt(0.01 * 0.01 + 0.001 * 0.001 * (100 * 100 - 1) / 12.0), 1e-9);
+}
+
+void TestSessionTrackersStillWhenStandingStill()
+{
+    // The fifth stage's test: standing still, hips and feet move less than 1 cm, with the pose's
+    // points 2 px unsteady, each frame on its own (body_tracker.py's smoothing leaves less).
+    SessionSimulation sim;
+    sim.pixel_noise = 2.0;
+    sim.session.SetCamera(sim.ids[0], sim.truth[0]);
+    sim.session.SetCamera(sim.ids[1], sim.truth[1]);
+    const Person person;
+    sim.Run(3.0, &person, false);
+    PoseSpread spreads[3];
+    for (int i = 0; i < 10 * 26; ++i) {
+        sim.Run(1.0 / 26.0, &person, false);
+        for (int k = 0; k < 4; ++k) {  // published at about 120 Hz, between the frames too
+            const double now = sim.time + k / 104.0;
+            const TrackerPose poses[3] = {sim.session.Waist(now), sim.session.Foot(true, now),
+                                          sim.session.Foot(false, now)};
+            for (int t = 0; t < 3; ++t) {
+                CHECK(poses[t].valid);
+                spreads[t].Add(poses[t].position);
+            }
+        }
+    }
+    for (const PoseSpread& s : spreads) {
+        CHECK(s.Deviation() < 0.01);
+    }
+    CHECK_NEAR(spreads[1].Mean().y, person.Joint(kLeftAnkle).y, 0.02);
+}
+
 void TestSessionNeedsTheOtherMoveOff()
 {
     // As in the second test's check: the other Move on in the other hand, out of the PS Eye's
@@ -732,6 +775,8 @@ int main()
     TestSessionCalibratesAndChecks();
     TestSessionCheckTellsCamerasCloseTogether();
     TestSessionNeedsOneMove();
+    TestPoseSpread();
+    TestSessionTrackersStillWhenStandingStill();
     TestSessionNeedsTheOtherMoveOff();
     TestSessionCalibratesWithAJitteryMove();
     TestSessionForgetsACalibrationThatNoLongerFits();

@@ -37,6 +37,9 @@ private:
     PsmsClient* psms_;
     TrackerDevice* trackers_[3];
     BodySession session_;  // only touched by the thread
+    // Since the last report: each tracker's poses, and how many times all three were published.
+    PoseSpread spreads_[3];
+    int published_ = 0;
 
     Calibration calibration_ = Calibration::Off;
     double calibration_at_ = 0.0;  // when the countdown ends, or the collecting started

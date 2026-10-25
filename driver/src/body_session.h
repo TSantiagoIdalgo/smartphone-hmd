@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <deque>
 #include <map>
@@ -20,6 +22,31 @@
 // enough of those spread through the room, each camera's position, direction and lens follow.
 // Since the Move's positions are the ones the head light and the hands use, the body comes out in
 // the same space as them.
+// How a tracker went over a while, for the log: how high on average and from where to where, and
+// how far on average from where it was on average, which standing still is its tremor.
+struct PoseSpread {
+    int count = 0;
+    Vec3 sum;
+    double squares = 0.0;
+    double lowest = 0.0;
+    double highest = 0.0;
+
+    void Add(Vec3 p)
+    {
+        lowest = count == 0 ? p.y : std::min(lowest, p.y);
+        highest = count == 0 ? p.y : std::max(highest, p.y);
+        ++count;
+        sum = sum + p;
+        squares += Dot(p, p);
+    }
+    Vec3 Mean() const { return count > 0 ? sum * (1.0 / count) : Vec3{}; }
+    double Deviation() const
+    {
+        const Vec3 mean = Mean();
+        return count > 0 ? std::sqrt(std::max(squares / count - Dot(mean, mean), 0.0)) : 0.0;
+    }
+};
+
 struct BodySessionConfig {
     double move_latency_seconds = 0.040;  // from the PS Eye seeing the Move to its position arriving
     int calibration_controller_id = -1;   // -1: whichever single Move is tracked
