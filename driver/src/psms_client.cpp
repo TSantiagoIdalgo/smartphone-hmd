@@ -28,6 +28,7 @@ namespace {
 
 constexpr size_t kMaxQueuedSamples = 256;
 constexpr size_t kMaxQueuedControllerSamples = 1024;
+constexpr double kUntrackedMoveSeconds = 0.25;
 constexpr int kRetryMilliseconds = 2000;
 constexpr double kDeviceRetrySeconds = 5.0;
 constexpr double kCameraRetrySeconds = 1.0;
@@ -392,6 +393,7 @@ void PsmsClient::Stream(const Api& api)
         int id;
         bool tracking;
         PSMVector3f position;
+        double sent;
     };
     std::vector<Followed> followed;
     bool list_controllers = config_.stream_controllers;
@@ -554,7 +556,7 @@ void PsmsClient::Stream(const Api& api)
                     if (api.AllocateControllerListener(id) == PSMResult_Success &&
                         api.StartControllerDataStream(id, PSMStreamFlags_includePositionData, kRequestTimeoutMs) ==
                             PSMResult_Success) {
-                        followed.push_back({id, false, PSMVector3f{}});
+                        followed.push_back({id, false, PSMVector3f{}, 0.0});
                     } else {
                         api.FreeControllerListener(id);
                     }
@@ -572,11 +574,14 @@ void PsmsClient::Stream(const Api& api)
             const bool tracked = api.GetIsControllerTracking(f.id, &tracking) == PSMResult_Success;
             const bool valid = api.GetControllerPosition(f.id, &position) == PSMResult_Success;
             tracking = tracked && tracking && valid;
-            if (tracking != f.tracking || (tracking && std::memcmp(&position, &f.position, sizeof(position)) != 0)) {
-                PushController({MonoSeconds(), f.id, Vec3{position.x * 0.01, position.y * 0.01, position.z * 0.01},
-                                tracking});
+            // An untracked Move is still lit for the phones to see: say now and then that it is on.
+            const double now = MonoSeconds();
+            if (tracking != f.tracking || (tracking && std::memcmp(&position, &f.position, sizeof(position)) != 0) ||
+                (!tracking && now - f.sent >= kUntrackedMoveSeconds)) {
+                PushController({now, f.id, Vec3{position.x * 0.01, position.y * 0.01, position.z * 0.01}, tracking});
                 f.tracking = tracking;
                 f.position = position;
+                f.sent = now;
             }
         }
         Sleep(1);

@@ -7,6 +7,8 @@ namespace {
 
 constexpr double kMoveHistorySeconds = 3.0;
 constexpr double kMaxMoveGapSeconds = 0.12;      // between the two Move samples around a frame
+constexpr double kMoveOnSeconds = 0.5;           // a sample this near a frame: the Move is on
+constexpr double kSpeedSeconds = 0.1;
 constexpr double kMaxCalibrationSpeed = 0.5;     // m/s: faster, a few ms of timing error matter
 constexpr double kMinSampleSpacingM = 0.03;      // a Move held still adds one sample, not hundreds
 constexpr size_t kMinCalibrationSamples = 60;
@@ -91,7 +93,8 @@ bool BodySession::AddFrame(const body_protocol::Frame& frame, double arrived)
             }
             ambiguous_ += ambiguous;
         }
-        if (camera.calibrated) {
+        // Not while calibrating: the calibration about to be replaced may no longer fit.
+        if (camera.calibrated && !calibrating_) {
             camera.ball = {true, time, u, v};
             for (const auto& entry : cameras_) {
                 const Camera& other = entry.second;
@@ -102,8 +105,10 @@ bool BodySession::AddFrame(const body_protocol::Frame& frame, double arrived)
                 Vec3 seen, move;
                 double speed = 0.0;
                 bool ambiguous = false;
-                if (Triangulate({{&camera.model, u, v}, {&other.model, other.ball.u, other.ball.v}}, &seen) &&
-                    MoveAt(0.5 * (time + other.ball.time), &move, &speed, &ambiguous) && speed < kMaxCheckSpeed) {
+                const bool one = MoveAt(0.5 * (time + other.ball.time), &move, &speed, &ambiguous);
+                check_ambiguous_ += ambiguous;
+                if (one && speed < kMaxCheckSpeed &&
+                    Triangulate({{&camera.model, u, v}, {&other.model, other.ball.u, other.ball.v}}, &seen)) {
                     const Vec3 off = seen - move;
                     const double distance = Length(off);
                     const Vec3 a = Unit(seen - camera.model.position), b = Unit(seen - other.model.position);
@@ -133,37 +138,50 @@ void BodySession::AddMove(const ControllerSample& sample)
 
 bool BodySession::MoveAt(double time, Vec3* position, double* speed, bool* ambiguous) const
 {
-    int found = 0;
-    for (const auto& entry : moves_) {
-        if (config_.calibration_controller_id >= 0 && entry.first != config_.calibration_controller_id) {
-            continue;
-        }
-        // PSMoveServiceEx's positions are of a moment a little before they arrive.
+    // PSMoveServiceEx's positions are of a moment a little before they arrive.
+    const double latency = config_.move_latency_seconds;
+    const auto at = [latency](const std::deque<ControllerSample>& history, double t, Vec3* out) {
         const ControllerSample* before = nullptr;
         const ControllerSample* after = nullptr;
-        for (const ControllerSample& s : entry.second) {
-            if (s.time - config_.move_latency_seconds <= time) {
+        for (const ControllerSample& s : history) {
+            if (s.time - latency <= t) {
                 before = &s;
             } else {
                 after = &s;
                 break;
             }
         }
-        if (!before || !after || !before->tracking || !after->tracking) {
+        if (!before || !after || !before->tracking || !after->tracking ||
+            after->time - before->time > kMaxMoveGapSeconds) {
+            return false;
+        }
+        const double t0 = before->time - latency, t1 = after->time - latency;
+        *out = before->position + (after->position - before->position) * (t1 > t0 ? (t - t0) / (t1 - t0) : 0.0);
+        return true;
+    };
+    // Every Move that is on has its bulb lit, tracked or not, and the phones may see that one.
+    int on = 0;
+    bool found = false;
+    for (const auto& entry : moves_) {
+        if (config_.calibration_controller_id >= 0 && entry.first != config_.calibration_controller_id) {
             continue;
         }
-        const double t0 = before->time - config_.move_latency_seconds;
-        const double t1 = after->time - config_.move_latency_seconds;
-        if (t1 - t0 > kMaxMoveGapSeconds) {
-            continue;
+        const std::deque<ControllerSample>& history = entry.second;
+        const bool lit = std::any_of(history.begin(), history.end(), [&](const ControllerSample& s) {
+            return std::fabs(s.time - latency - time) <= kMoveOnSeconds;
+        });
+        on += lit;
+        // How fast over a tenth of a second, not between two samples: PSMoveServiceEx's own
+        // jitter would make a Move held still look fast.
+        Vec3 early, late;
+        if (lit && at(history, time, position) && at(history, time - 0.5 * kSpeedSeconds, &early) &&
+            at(history, time + 0.5 * kSpeedSeconds, &late)) {
+            *speed = Length(late - early) / kSpeedSeconds;
+            found = true;
         }
-        const double f = t1 > t0 ? (time - t0) / (t1 - t0) : 0.0;
-        *position = before->position + (after->position - before->position) * f;
-        *speed = t1 > t0 ? Length(after->position - before->position) / (t1 - t0) : 0.0;
-        ++found;
     }
-    *ambiguous = found > 1;
-    return found == 1;
+    *ambiguous = on > 1;
+    return found && on == 1;
 }
 
 void BodySession::SetCamera(uint32_t id, const CameraModel& model)
@@ -303,6 +321,8 @@ BodySession::Report BodySession::TakeReport(double now)
     }
     report.filter = filter_.TakeStats();
     report.checks = checks_;
+    report.check_ambiguous = check_ambiguous_;
+    check_ambiguous_ = 0;
     report.check_mean_m = checks_ > 0 ? check_sum_ / checks_ : 0.0;
     report.check_max_m = check_max_;
     if (checks_ > 0) {

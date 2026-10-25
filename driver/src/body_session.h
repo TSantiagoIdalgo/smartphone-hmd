@@ -46,6 +46,7 @@ public:
         // The calibration checked against the Move: where the cameras put its bulb, as far from
         // PSMoveServiceEx's position on average and at most.
         int checks = 0;
+        int check_ambiguous = 0;  // not checked: more than one Move was on, either could be the bulb
         double check_mean_m = 0.0;
         double check_max_m = 0.0;
         // Of that, how much along the cameras' view (in depth, where two cameras close together
@@ -63,7 +64,7 @@ public:
 
     struct Progress {
         std::vector<CameraProgress> cameras;
-        int ambiguous = 0;  // bulbs seen while more than one Move was tracked: not used
+        int ambiguous = 0;  // bulbs seen while more than one Move was on: not used
         bool enough = false;  // every camera has enough samples, spread enough
     };
 
@@ -118,7 +119,8 @@ private:
         std::vector<double> times;  // when the frames were taken, sorted
     };
 
-    // Where the Move was at `time`, and how fast it went; false if no single Move was tracked then.
+    // Where the Move was at `time`, and how fast it went; false unless a single Move was on then,
+    // and tracked.
     bool MoveAt(double time, Vec3* position, double* speed, bool* ambiguous) const;
     void RebuildFilter();
 
@@ -130,6 +132,7 @@ private:
     int ambiguous_ = 0;
     double report_start_ = -1.0;
     int checks_ = 0;
+    int check_ambiguous_ = 0;
     double check_sum_ = 0.0;
     double check_max_ = 0.0;
     double check_depth_sum_ = 0.0;

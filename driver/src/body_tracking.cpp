@@ -200,7 +200,7 @@ void BodyTracking::LogProgress()
         text += part;
     }
     if (progress.ambiguous > 0) {
-        text += " " + std::to_string(progress.ambiguous) + " bulbs left out: more than one Move was tracked";
+        text += " " + std::to_string(progress.ambiguous) + " bulbs left out: more than one Move was on";
     }
     DriverLog("%s", text.c_str());
 }
@@ -279,5 +279,9 @@ void BodyTracking::LogReport(double now)
                   report.check_angle_degrees < kFewDegreesApart ? ": too few for depth; place the phones 60 to 90 "
                                                                   "degrees apart around where you play"
                                                                 : "");
+    } else if (report.check_ambiguous > 0) {
+        DriverLog("Body check: none; both phones saw a bulb %d times, but more than one Move was on and either "
+                  "could be it: turn off all but one",
+                  report.check_ambiguous);
     }
 }

@@ -33,7 +33,7 @@ struct ControllerSample {
     double time;    // MonoSeconds() when it arrived
     int id;         // PSMoveServiceEx's controller number
     Vec3 position;  // metres, as LightSample: the centre of the Move's bulb
-    bool tracking;
+    bool tracking;  // false: on (its bulb lit) but not seen; sent a few times a second while so
 };
 
 class PsmsClient {

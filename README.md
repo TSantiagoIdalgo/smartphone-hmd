@@ -280,8 +280,9 @@ sin posición.
 **Calibrar las cámaras** (una vez, y otra si mueves un móvil):
 
 1. Pon los dos móviles fijos como en el dibujo. Abre la app en los dos y `body_tracker.py` en la PC.
-2. Con PSMoveServiceEx y SteamVR abiertos, enciende **un solo** Move (apaga el otro) y pulsa
-   **Ctrl+Alt+C** en la PC.
+2. Con PSMoveServiceEx y SteamVR abiertos, enciende **un solo** Move y pulsa **Ctrl+Alt+C** en la
+   PC. El otro, apagado del todo: aunque la PS Eye no lo vea, su bola sigue encendida y los móviles
+   pueden confundirla con la del que mueves.
 3. A los 5 segundos empieza. Durante un minuto, con el Move en la mano, muévelo despacio por toda
    la zona de juego: alto y bajo, cerca y lejos, donde lo vean los dos móviles y la PS Eye. Cada
    móvil marca la bola con un anillo celeste cuando la ve. Termina sola cuando tiene suficiente, o
@@ -290,11 +291,12 @@ sin posición.
    final, si quedó calibrada, cuánto se aparta (en píxeles y centímetros), dónde está y hacia dónde
    mira. La calibración se guarda en SteamVR y se usa sola la próxima vez.
 
-**Comprobarla:** deja el Move quieto en varios lugares donde lo vean los dos móviles. Cada 10
-segundos, la línea `Body check:` dice a cuántos centímetros ponen las cámaras la bola de donde la
-pone PSMoveServiceEx (con menos de 3 cm está bien), cuánto de eso es en profundidad y cuánto de
-lado, y con cuántos grados de diferencia la ven los dos móviles. Si casi todo es profundidad y
-los grados son menos de 40, los móviles están muy juntos: sepáralos y calibra de nuevo.
+**Comprobarla:** con un solo Move encendido, como al calibrar, déjalo quieto en varios lugares
+donde lo vean los dos móviles. Cada 10 segundos, la línea `Body check:` dice a cuántos centímetros
+ponen las cámaras la bola de donde la pone PSMoveServiceEx (con menos de 3 cm está bien), cuánto de
+eso es en profundidad y cuánto de lado, y con cuántos grados de diferencia la ven los dos móviles.
+Si casi todo es profundidad y los grados son menos de 40, los móviles están muy juntos: sepáralos y
+calibra de nuevo. Con los dos Moves encendidos no comprueba nada y lo dice.
 
 En `vrserver.txt`, cada 10 segundos, `Body camera …` dice por cámara los cuadros por segundo, a los
 cuántos ms de tomado llega cada cuadro, qué parte tiene un cuadro de la otra cámara a menos de
@@ -309,5 +311,6 @@ Ajustes de `default.vrsettings`, que normalmente no hace falta tocar:
   y sigue más lento.
 - `body_pixel_noise` (3.0): cuánto se cree que tiemblan los puntos de la pose, en píxeles.
 - `body_psms_latency_ms` (40): el retraso de PSMoveServiceEx al calibrar.
-- `body_calibration_controller_id` (-1): qué Move usar al calibrar, si no quieres apagar el otro.
+- `body_calibration_controller_id` (-1): qué Move usar al calibrar y comprobar, si no quieres
+  apagar el otro; ese otro no debe estar donde lo vean los móviles.
 - `body_calibration_seconds` (60) y `body_port` (9947).

@@ -480,6 +480,9 @@ struct SessionSimulation {
     double frame_age = 0.12;
     double second_camera_later = 0.0;  // its frames arrive this much older
     int moves_lit = 1;
+    bool others_tracked = true;  // false: the other Moves are on but out of the PS Eye's sight
+    double move_jitter = 0.0;    // of PSMoveServiceEx's positions, m
+    int move_samples = 0;
 
     // A slow loop through the room, about 0.3 m/s.
     static Vec3 MovePath(double t)
@@ -522,9 +525,18 @@ struct SessionSimulation {
         const double period = 1.0 / 26.0;
         for (double end = time + seconds; time < end; time += period) {
             // PSMoveServiceEx: 60 positions a second, each arriving a little after the PS Eye saw it.
-            for (; next_move <= time; next_move += 1.0 / 60.0) {
-                for (int id = 0; id < moves_lit; ++id) {
-                    session.AddMove({next_move + move_latency, id, MovePath(next_move) + Vec3{0.3 * id, 0, 0}, true});
+            for (; next_move <= time; next_move += 1.0 / 60.0, ++move_samples) {
+                Vec3 jitter;
+                if (move_jitter > 0.0) {
+                    jitter = {Gaussian(random, move_jitter), Gaussian(random, move_jitter), Gaussian(random, move_jitter)};
+                }
+                session.AddMove({next_move + move_latency, 0, MovePath(next_move) + jitter, true});
+                for (int id = 1; id < moves_lit; ++id) {
+                    // An untracked one is only said to be on, four times a second.
+                    if (others_tracked || move_samples % 15 == 0) {
+                        session.AddMove({next_move + move_latency, id, MovePath(next_move) + Vec3{0.3 * id, 0, 0},
+                                         others_tracked});
+                    }
                 }
             }
             for (int camera = 0; camera < 2; ++camera) {
@@ -616,6 +628,59 @@ void TestSessionNeedsOneMove()
     CHECK(!results[0].result.ok && !results[0].result.problem.empty());
 }
 
+void TestSessionNeedsTheOtherMoveOff()
+{
+    // As in the second test's check: the other Move on in the other hand, out of the PS Eye's
+    // sight. The phones may see its bulb, so neither calibrating nor checking takes any.
+    SessionSimulation sim;
+    sim.moves_lit = 2;
+    sim.others_tracked = false;
+    sim.session.StartCalibration();
+    sim.Run(10.0, nullptr);
+    const BodySession::Progress progress = sim.session.CalibrationProgress();
+    CHECK(progress.ambiguous > 100);
+    CHECK(progress.cameras.size() == 2 && progress.cameras[0].samples == 0);
+    sim.session.CancelCalibration();
+
+    sim.session.SetCamera(sim.ids[0], sim.truth[0]);
+    sim.session.SetCamera(sim.ids[1], sim.truth[1]);
+    sim.session.TakeReport(sim.time);
+    sim.Run(10.0, nullptr);
+    BodySession::Report report = sim.session.TakeReport(sim.time);
+    CHECK(report.checks == 0);
+    CHECK(report.check_ambiguous > 100);
+
+    // Turned off, it soon stops counting.
+    sim.moves_lit = 1;
+    sim.Run(1.0, nullptr);
+    sim.session.TakeReport(sim.time);
+    sim.Run(10.0, nullptr);
+    report = sim.session.TakeReport(sim.time);
+    CHECK(report.checks > 100);
+    CHECK(report.check_ambiguous == 0);
+}
+
+void TestSessionCalibratesWithAJitteryMove()
+{
+    // PSMoveServiceEx's positions jitter a few millimetres from one to the next: that alone must
+    // not make the Move look too fast to calibrate or check with.
+    SessionSimulation sim;
+    sim.move_jitter = 0.004;
+    sim.session.StartCalibration();
+    sim.Run(60.0, nullptr);
+    const BodySession::Progress progress = sim.session.CalibrationProgress();
+    CHECK(progress.enough);
+    const std::vector<BodySession::CameraCalibration> results = sim.session.FinishCalibration();
+    for (const BodySession::CameraCalibration& camera : results) {
+        CHECK(camera.result.ok);
+    }
+    sim.session.TakeReport(sim.time);
+    sim.Run(10.0, nullptr);
+    const BodySession::Report report = sim.session.TakeReport(sim.time);
+    CHECK(report.checks > 300);  // judged between two samples, about two thirds look too fast
+    CHECK(report.check_mean_m < 0.02);
+}
+
 void TestSessionForgetsACalibrationThatNoLongerFits()
 {
     SessionSimulation sim;
@@ -667,6 +732,8 @@ int main()
     TestSessionCalibratesAndChecks();
     TestSessionCheckTellsCamerasCloseTogether();
     TestSessionNeedsOneMove();
+    TestSessionNeedsTheOtherMoveOff();
+    TestSessionCalibratesWithAJitteryMove();
     TestSessionForgetsACalibrationThatNoLongerFits();
     TestSessionPairsFramesWhicheverArrivesFirst();
     if (g_failures == 0) {
