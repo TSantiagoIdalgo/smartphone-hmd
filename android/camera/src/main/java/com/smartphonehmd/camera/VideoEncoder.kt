@@ -51,7 +51,7 @@ class VideoEncoder(
 
     init {
         bitrateMode = try {
-            configure(bitrate).also { codec.start() }
+            open(bitrate)
         } catch (e: Exception) {
             codec.release()
             throw e
@@ -60,12 +60,12 @@ class VideoEncoder(
     }
 
     /**
-     * Configures the encoder with the best format it takes, and says its bitrate mode. A steady
+     * Starts the encoder with the best format it takes, and says its bitrate mode. A steady
      * bitrate first: each frame about the same size, so none takes the Wi-Fi long to send, where
      * left to itself an encoder may send several times the bitrate asked. An encoder that refuses
-     * one of the hints still takes the plainer formats after it.
+     * one of the hints, when configured or when started, still takes the plainer formats after it.
      */
-    private fun configure(bitrate: Int): String {
+    private fun open(bitrate: Int): String {
         val capabilities = try {
             codec.codecInfo.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC).encoderCapabilities
         } catch (_: Exception) {
@@ -80,6 +80,7 @@ class VideoEncoder(
             val (lowLatency, mode) = attempt
             try {
                 codec.configure(format(bitrate, lowLatency, mode), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                codec.start()
                 return when (mode) {
                     MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR -> "CBR"
                     MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR -> "VBR"
