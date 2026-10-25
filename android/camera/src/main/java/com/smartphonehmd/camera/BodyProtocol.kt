@@ -20,7 +20,8 @@ import java.nio.ByteOrder
  * - seq and timestamp: the video frame's;
  * - 20 device id (u32), 24 image width (u16), 26 image height (u16), both upright;
  * - 28 pose inference time in ms (f32), 32 flags (u8), 33 landmark count (u8), 34 padding (u16);
- * - 36 ball x, 40 ball y, 44 ball radius (f32), a Move's bulb for calibration, 0 when not seen;
+ * - 36 ball x, 40 ball y (0-1 across the upright image), 44 ball radius (over its width) (f32): a
+ *   Move's bulb for calibration, with the ball flag, 0 when not seen;
  * - 48 per landmark: x, y (0-1 across the upright image), z, visibility, presence (f32).
  *
  * Time sync: the PC sends a ping (type 8) with its own clock in the timestamp. The phone answers

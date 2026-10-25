@@ -8,8 +8,9 @@ import android.view.View
 
 /**
  * Draws the pose the PC found on the camera preview: a dot per point, green when the model is sure the
- * point is in view, yellow when unsure, red when it is guessing. The preview fits the image inside
- * the view, so the image's rectangle is worked out the same way here.
+ * point is in view, yellow when unsure, red when it is guessing, and a ring around a PS Move's bulb
+ * when the PC sees one (for calibrating the cameras). The preview fits the image inside the view,
+ * so the image's rectangle is worked out the same way here.
  */
 class PoseOverlay(context: Context) : View(context) {
     /** The front camera's preview is a mirror image; the points are not. */
@@ -19,14 +20,25 @@ class PoseOverlay(context: Context) : View(context) {
     private var count = 0
     private var imageWidth = 0
     private var imageHeight = 0
+    private var ballX = 0f
+    private var ballY = 0f
+    private var ballRadius = 0f  // over the image's width; 0 when there is no ball
     private val dot = Paint(Paint.ANTI_ALIAS_FLAG)
     private val bone = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.argb(200, 255, 255, 255)
         strokeWidth = 6f
     }
+    private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.CYAN
+        style = Paint.Style.STROKE
+        strokeWidth = 6f
+    }
 
-    /** Called from the link's thread with each frame's points; [landmarks] is copied. */
-    fun show(landmarks: FloatArray, landmarkCount: Int, width: Int, height: Int) {
+    /**
+     * Called from the link's thread with each frame's points; [landmarks] is copied. [ballRadius]
+     * is 0 when the PC saw no Move bulb.
+     */
+    fun show(landmarks: FloatArray, landmarkCount: Int, width: Int, height: Int, ballX: Float, ballY: Float, ballRadius: Float) {
         synchronized(points) {
             landmarkCount.coerceIn(0, BodyProtocol.LANDMARK_COUNT).let { n ->
                 System.arraycopy(landmarks, 0, points, 0, n * 5)
@@ -34,6 +46,9 @@ class PoseOverlay(context: Context) : View(context) {
             }
             imageWidth = width
             imageHeight = height
+            this.ballX = ballX
+            this.ballY = ballY
+            this.ballRadius = ballRadius
         }
         postInvalidateOnAnimation()
     }
@@ -61,6 +76,10 @@ class PoseOverlay(context: Context) : View(context) {
                     else -> Color.RED
                 }
                 canvas.drawCircle(x(i), y(i), if (i in 23..32) 14f else 9f, dot)
+            }
+            if (ballRadius > 0f) {
+                val ballLeft = left + drawnWidth * (if (mirrored) 1 - ballX else ballX)
+                canvas.drawCircle(ballLeft, top + drawnHeight * ballY, drawnWidth * ballRadius + 12f, ring)
             }
         }
     }

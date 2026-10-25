@@ -502,7 +502,8 @@ class MainActivity : ComponentActivity() {
             kneeVisibility = pairVisibility(pose, 25)
             ankleVisibility = pairVisibility(pose, 27)
         }
-        poseOverlay.show(pose.landmarks, count, pose.width, pose.height)
+        val ball = pose.flags and BodyProtocol.FLAG_BALL != 0
+        poseOverlay.show(pose.landmarks, count, pose.width, pose.height, pose.ballX, pose.ballY, if (ball) pose.ballRadius else 0f)
     }
 
     /** The lower visibility of a left point and its right twin, which follows it. */
