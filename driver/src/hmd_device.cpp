@@ -212,6 +212,10 @@ vr::EVRInitError HmdDevice::Activate(uint32_t object_id)
     const vr::PropertyContainerHandle_t container =
         vr::VRProperties()->TrackedDeviceToPropertyContainer(object_id);
     vr::VRProperties()->SetStringProperty(container, vr::Prop_ModelNumber_String, model_number_.c_str());
+    // As Valve's sample HMD: without an input profile, games that read the head through SteamVR
+    // Input (Unity's OpenVR plugin: VRChat, ChilloutVR) never see the head move.
+    vr::VRProperties()->SetStringProperty(container, vr::Prop_InputProfilePath_String,
+                                          "{smartphone_hmd}/input/smartphone_hmd_profile.json");
 
     // The IPD gives each eye its own position, which is what produces the 3D effect.
     const float ipd = vr::VRSettings()->GetFloat(vr::k_pch_SteamVR_Section, vr::k_pch_SteamVR_IPD_Float);
