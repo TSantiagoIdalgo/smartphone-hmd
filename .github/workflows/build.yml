@@ -24,6 +24,10 @@ jobs:
         with:
           name: smartphone-hmd-apk
           path: android/app/build/outputs/apk/debug/app-debug.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smartphone-hmd-camera-apk
+          path: android/camera/build/outputs/apk/debug/camera-debug.apk
 
   android-smoke:
     name: Android app starts (emulator)
@@ -39,6 +43,15 @@ jobs:
         with:
           name: smartphone-hmd-apk
           path: apk
+      - uses: actions/download-artifact@v4
+        with:
+          name: smartphone-hmd-camera-apk
+          path: camera-apk
+      # To decode the camera app's self-test video as the PC does.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install av numpy
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -51,7 +64,28 @@ jobs:
           target: google_apis
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: bash tools/ci/android_smoke_test.sh apk/app-debug.apk
+          script: bash tools/ci/android_smoke_test.sh apk/app-debug.apk && bash tools/ci/camera_smoke_test.sh camera-apk/camera-debug.apk
+
+  body-tracker:
+    name: PC body tracker (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        shell: bash
+        run: |
+          # MediaPipe needs these on Linux; Windows has what it needs.
+          if [ "$RUNNER_OS" = Linux ]; then sudo apt-get update -q && sudo apt-get install -y -q libegl1 libgles2; fi
+          pip install -r tools/requirements-body.txt
+      - name: Test
+        run: python -m unittest discover -s tools -p "test_*.py" -v
 
   driver:
     name: SteamVR driver (Windows)
