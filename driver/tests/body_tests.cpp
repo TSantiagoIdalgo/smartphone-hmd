@@ -566,6 +566,8 @@ void TestSessionCalibratesAndChecks()
     BodySession::Report report = sim.session.TakeReport(sim.time);
     CHECK(report.checks > 100);
     CHECK(report.check_mean_m < 0.015);
+    CHECK(report.check_depth_m <= report.check_mean_m && report.check_across_m <= report.check_mean_m);
+    CHECK(report.check_angle_degrees > 60.0 && report.check_angle_degrees < 85.0);
     CHECK(report.cameras.size() == 2);
     CHECK_NEAR(report.cameras[0].frames_per_second, 26.0, 0.5);
     CHECK_NEAR(report.cameras[0].age_ms, 120.0, 0.5);
@@ -581,6 +583,24 @@ void TestSessionCalibratesAndChecks()
     report = sim.session.TakeReport(sim.time);
     CHECK(report.cameras[0].person_share > 0.99);
     CHECK(report.filter.started == kJointCount);
+}
+
+void TestSessionCheckTellsCamerasCloseTogether()
+{
+    // As the phones of the second test: half a metre apart, side by side, so they see the Move
+    // from nearly the same side and put it far worse in depth than across.
+    SessionSimulation sim;
+    sim.truth = {LookAt({-0.25, 1.0, -2.5}, {0.0, 1.0, 0.0}, 520.0, -0.05),
+                 LookAt({0.25, 1.0, -2.5}, {0.0, 1.0, 0.0}, 500.0, -0.08)};
+    sim.session.SetCamera(sim.ids[0], sim.truth[0]);
+    sim.session.SetCamera(sim.ids[1], sim.truth[1]);
+    sim.Run(1.0, nullptr);
+    sim.session.TakeReport(sim.time);
+    sim.Run(10.0, nullptr);
+    const BodySession::Report report = sim.session.TakeReport(sim.time);
+    CHECK(report.checks > 100);
+    CHECK(report.check_angle_degrees > 8.0 && report.check_angle_degrees < 16.0);
+    CHECK(report.check_depth_m > 3.0 * report.check_across_m);
 }
 
 void TestSessionNeedsOneMove()
@@ -645,6 +665,7 @@ int main()
     TestBodyNeedsTwoCamerasToStart();
     TestBodyHoldsThenLetsGo();
     TestSessionCalibratesAndChecks();
+    TestSessionCheckTellsCamerasCloseTogether();
     TestSessionNeedsOneMove();
     TestSessionForgetsACalibrationThatNoLongerFits();
     TestSessionPairsFramesWhicheverArrivesFirst();

@@ -17,6 +17,7 @@ constexpr double kEnoughHeightM = 0.8;
 constexpr double kPairWindowSeconds = 0.02;
 constexpr double kCheckWindowSeconds = 0.025;
 constexpr double kMaxCheckSpeed = 0.3;  // m/s
+constexpr double kDegreesPerRadian = 180.0 / 3.14159265358979;
 
 double Median(std::vector<double> values)
 {
@@ -103,10 +104,17 @@ bool BodySession::AddFrame(const body_protocol::Frame& frame, double arrived)
                 bool ambiguous = false;
                 if (Triangulate({{&camera.model, u, v}, {&other.model, other.ball.u, other.ball.v}}, &seen) &&
                     MoveAt(0.5 * (time + other.ball.time), &move, &speed, &ambiguous) && speed < kMaxCheckSpeed) {
-                    const double off = Length(seen - move);
+                    const Vec3 off = seen - move;
+                    const double distance = Length(off);
+                    const Vec3 a = Unit(seen - camera.model.position), b = Unit(seen - other.model.position);
+                    const Vec3 depth = Unit(a + b);
+                    const double along = Dot(off, depth);
                     ++checks_;
-                    check_sum_ += off;
-                    check_max_ = std::max(check_max_, off);
+                    check_sum_ += distance;
+                    check_max_ = std::max(check_max_, distance);
+                    check_depth_sum_ += std::fabs(along);
+                    check_across_sum_ += Length(off - depth * along);
+                    check_angle_sum_ += std::acos(std::clamp(Dot(a, b), -1.0, 1.0));
                 }
             }
         }
@@ -297,7 +305,12 @@ BodySession::Report BodySession::TakeReport(double now)
     report.checks = checks_;
     report.check_mean_m = checks_ > 0 ? check_sum_ / checks_ : 0.0;
     report.check_max_m = check_max_;
+    if (checks_ > 0) {
+        report.check_depth_m = check_depth_sum_ / checks_;
+        report.check_across_m = check_across_sum_ / checks_;
+        report.check_angle_degrees = check_angle_sum_ / checks_ * kDegreesPerRadian;
+    }
     checks_ = 0;
-    check_sum_ = check_max_ = 0.0;
+    check_sum_ = check_max_ = check_depth_sum_ = check_across_sum_ = check_angle_sum_ = 0.0;
     return report;
 }

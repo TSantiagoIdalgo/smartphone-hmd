@@ -255,9 +255,12 @@ sin posición.
 
 **Calibrar las cámaras** (una vez, y otra si mueves un móvil):
 
-1. Pon los dos móviles fijos, en vertical, adelante a tu izquierda y a tu derecha, separados unos
-   60° vistos desde donde juegas, a 2-3 m y a 1,0-1,2 m del piso. Abre la app en los dos y
-   `body_tracker.py` en la PC.
+1. Pon los dos móviles fijos, en vertical, a 2-3 m de donde juegas y a 1,0-1,2 m del piso,
+   **separados entre 60° y 90°** vistos desde ahí: por ejemplo uno adelante a la izquierda y el otro
+   adelante a la derecha, a 2,5-3,5 m uno del otro, o uno adelante y otro a un costado. Juntos (uno
+   al lado del otro junto a la PS Eye) cada uno ve bien hacia los lados, pero la profundidad sale
+   varias veces peor: a medio metro uno del otro, el cuerpo tiembla y se va adelante y atrás varios
+   centímetros. Abre la app en los dos y `body_tracker.py` en la PC.
 2. Con PSMoveServiceEx y SteamVR abiertos, enciende **un solo** Move (apaga el otro) y pulsa
    **Ctrl+Alt+C** en la PC.
 3. A los 5 segundos empieza. Durante un minuto, con el Move en la mano, muévelo despacio por toda
@@ -270,7 +273,9 @@ sin posición.
 
 **Comprobarla:** deja el Move quieto en varios lugares donde lo vean los dos móviles. Cada 10
 segundos, la línea `Body check:` dice a cuántos centímetros ponen las cámaras la bola de donde la
-pone PSMoveServiceEx; con menos de 3 cm está bien.
+pone PSMoveServiceEx (con menos de 3 cm está bien), cuánto de eso es en profundidad y cuánto de
+lado, y con cuántos grados de diferencia la ven los dos móviles. Si casi todo es profundidad y
+los grados son menos de 40, los móviles están muy juntos: sepáralos y calibra de nuevo.
 
 En `vrserver.txt`, cada 10 segundos, `Body camera …` dice por cámara los cuadros por segundo, a los
 cuántos ms de tomado llega cada cuadro, qué parte tiene un cuadro de la otra cámara a menos de

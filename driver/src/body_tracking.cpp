@@ -20,6 +20,7 @@ constexpr double kProgressSeconds = 5.0;
 constexpr double kReportSeconds = 10.0;
 constexpr double kPublishSeconds = 1.0 / 120.0;
 constexpr double kRadiansToDegrees = 180.0 / 3.14159265358979;
+constexpr double kFewDegreesApart = 40.0;  // between two cameras' views, for depth
 
 // Ctrl+Alt+C starts calibrating the body cameras, or stops it.
 bool CalibrateHotkeyDown()
@@ -215,10 +216,11 @@ void BodyTracking::FinishCalibration()
             continue;
         }
         const Vec3 forward = Row(r.camera.rotation, 2);
+        const double down = std::asin(std::clamp(-forward.y, -1.0, 1.0)) * kRadiansToDegrees;
         DriverLog("Body calibration: camera %04X calibrated, %.1f px (%.1f cm) off on average over %d samples, %d left "
-                  "out; at (%.2f, %.2f, %.2f) m, looking %.0f degrees down, %.0f degrees across",
+                  "out; at (%.2f, %.2f, %.2f) m, looking %.0f degrees %s, %.0f degrees across",
                   ShortId(camera.id), r.rms_px, r.rms_m * 100.0, r.inliers, r.outliers, r.camera.position.x,
-                  r.camera.position.y, r.camera.position.z, std::asin(std::clamp(-forward.y, -1.0, 1.0)) * kRadiansToDegrees,
+                  r.camera.position.y, r.camera.position.z, std::fabs(down), down >= 0.0 ? "down" : "up",
                   2.0 * std::atan(0.5 * r.camera.width / r.camera.focal) * kRadiansToDegrees);
         vr::VRSettings()->SetString(kSettingsSection, CameraKey(camera.id).c_str(), r.camera.Serialize().c_str());
     }
@@ -267,8 +269,15 @@ void BodyTracking::LogReport(double now)
                   f.updates, f.outliers, f.swapped, f.started);
     }
     if (report.checks > 0) {
+        // Two cameras close together see a point from nearly the same side: across their view they
+        // place it well, but in depth several times worse.
         DriverLog("Body check: the cameras put the Move's bulb %.1f cm from where PSMoveServiceEx has it on average "
-                  "(%.1f cm at most), %d times",
-                  report.check_mean_m * 100.0, report.check_max_m * 100.0, report.checks);
+                  "(%.1f cm at most), %d times; %.1f cm of it in depth and %.1f cm across. They see it %.0f degrees "
+                  "apart%s",
+                  report.check_mean_m * 100.0, report.check_max_m * 100.0, report.checks,
+                  report.check_depth_m * 100.0, report.check_across_m * 100.0, report.check_angle_degrees,
+                  report.check_angle_degrees < kFewDegreesApart ? ": too few for depth; place the phones 60 to 90 "
+                                                                  "degrees apart around where you play"
+                                                                : "");
     }
 }

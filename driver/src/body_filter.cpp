@@ -37,12 +37,6 @@ int Partner(int joint)
     return joint ^ 1;
 }
 
-Vec3 Unit(Vec3 v)
-{
-    const double length = Length(v);
-    return length > 1e-9 ? v * (1.0 / length) : Vec3{};
-}
-
 // The rotation whose columns are the given axes.
 Quat FromAxes(Vec3 x, Vec3 y, Vec3 z)
 {

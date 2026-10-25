@@ -48,6 +48,11 @@ public:
         int checks = 0;
         double check_mean_m = 0.0;
         double check_max_m = 0.0;
+        // Of that, how much along the cameras' view (in depth, where two cameras close together
+        // pin a point down worst) and how much across it; and how far apart the cameras see it.
+        double check_depth_m = 0.0;
+        double check_across_m = 0.0;
+        double check_angle_degrees = 0.0;
     };
 
     struct CameraProgress {
@@ -127,4 +132,7 @@ private:
     int checks_ = 0;
     double check_sum_ = 0.0;
     double check_max_ = 0.0;
+    double check_depth_sum_ = 0.0;
+    double check_across_sum_ = 0.0;
+    double check_angle_sum_ = 0.0;
 };

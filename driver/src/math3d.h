@@ -13,6 +13,11 @@ inline Vec3 operator*(Vec3 a, double s) { return {a.x * s, a.y * s, a.z * s}; }
 inline double Dot(Vec3 a, Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 inline Vec3 Cross(Vec3 a, Vec3 b) { return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; }
 inline double Length(Vec3 a) { return std::sqrt(Dot(a, a)); }
+inline Vec3 Unit(Vec3 a)
+{
+    const double length = Length(a);
+    return length > 1e-9 ? a * (1.0 / length) : Vec3{};
+}
 
 struct Quat {
     double w = 1, x = 0, y = 0, z = 0;

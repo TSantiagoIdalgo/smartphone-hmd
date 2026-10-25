@@ -56,6 +56,10 @@ vr::EVRInitError DeviceProvider::Init(vr::IVRDriverContext* driver_context)
         body_ = std::make_unique<BodyTracking>(psms_.get(), trackers_[0].get(), trackers_[1].get(), trackers_[2].get());
         body_->Start();
         DriverLog("Body tracking: on, with hip and foot trackers");
+        if (!head) {
+            DriverLog("Body tracking: head_position_enabled is off, so the head stays put while the hips and feet "
+                      "move: turn it on for the body to line up with the head");
+        }
     }
     if (psms_) {
         psms_->Start(psms);
