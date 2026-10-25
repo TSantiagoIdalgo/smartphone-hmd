@@ -187,8 +187,9 @@ los puntos al móvil, que los dibuja sobre la imagen.
 Así un móvil viejo solo filma, y el trabajo pesado lo hace la PC. El driver todavía no usa la pose;
 por ahora sirve para medir cuántos cuadros por segundo llegan, el retraso y si la pose es estable.
 
-En la PC, con Python 3.10 o más nuevo, una sola vez (y otra vez al actualizar, porque cambian las
-librerías):
+En la PC, con Python de 64 bits entre el 3.10 y el 3.14 (LiteRT, que corre el modelo, no tiene
+paquetes para otros: pip dice "from versions: none"), una sola vez (y otra vez al actualizar,
+porque cambian las librerías):
 
 ```
 pip install -r tools\requirements-body.txt
