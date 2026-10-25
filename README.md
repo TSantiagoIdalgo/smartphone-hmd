@@ -253,14 +253,33 @@ Al abrir SteamVR aparecen tres trackers (cadera, pie izquierdo y pie derecho) co
 así que VRChat los usa sin configurar nada en "Manage Trackers". Hasta calibrar las cámaras quedan
 sin posición.
 
+**Dónde poner los móviles** (visto desde arriba):
+
+```
+    Móvil 1          PS Eye          Móvil 2
+      [=]              [o]             [=]
+         \              |              /
+           \            |            /
+     2-3 m   \          |          /  2-3 m
+               \        |        /
+                 \  45° | 45°  /
+                   \    |    /
+                     \  |  /
+                       (tú)  <- donde juegas
+```
+
+- **Separados entre 60° y 90°** vistos desde donde juegas (en el dibujo, 90°): a 2-3 m de ti y a
+  2,5-3,5 m uno del otro. También sirve uno adelante y otro a un costado.
+- En vertical, a 1,0-1,2 m del piso y apuntando hacia ti, de modo que te vean entero, con los pies.
+- La PS Eye queda donde ya la tengas: los dos móviles y ella tienen que ver el Move en la zona de
+  juego.
+- Juntos (uno al lado del otro junto a la PS Eye) cada uno ve bien hacia los lados, pero la
+  profundidad sale varias veces peor: a medio metro uno del otro, el cuerpo tiembla y se va adelante
+  y atrás varios centímetros.
+
 **Calibrar las cámaras** (una vez, y otra si mueves un móvil):
 
-1. Pon los dos móviles fijos, en vertical, a 2-3 m de donde juegas y a 1,0-1,2 m del piso,
-   **separados entre 60° y 90°** vistos desde ahí: por ejemplo uno adelante a la izquierda y el otro
-   adelante a la derecha, a 2,5-3,5 m uno del otro, o uno adelante y otro a un costado. Juntos (uno
-   al lado del otro junto a la PS Eye) cada uno ve bien hacia los lados, pero la profundidad sale
-   varias veces peor: a medio metro uno del otro, el cuerpo tiembla y se va adelante y atrás varios
-   centímetros. Abre la app en los dos y `body_tracker.py` en la PC.
+1. Pon los dos móviles fijos como en el dibujo. Abre la app en los dos y `body_tracker.py` en la PC.
 2. Con PSMoveServiceEx y SteamVR abiertos, enciende **un solo** Move (apaga el otro) y pulsa
    **Ctrl+Alt+C** en la PC.
 3. A los 5 segundos empieza. Durante un minuto, con el Move en la mano, muévelo despacio por toda
