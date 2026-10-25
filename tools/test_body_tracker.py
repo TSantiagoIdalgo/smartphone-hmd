@@ -127,6 +127,16 @@ class PacketTest(unittest.TestCase):
             "484d44310a00000005000000141a99be1c000000040302018002e00100000100010900000000000167",
         )
 
+    def test_driver_packet_layout(self):
+        # The same bytes are expected by the driver in driver/tests/body_tests.cpp.
+        data = bt.pack_body(3, 1234, 0x0A0B0C0D, 480, 640, 121.5, bt.FLAG_POSE | bt.FLAG_BALL,
+                            [(0.25, 0.5, -0.1, 0.9, 0.95)], (0.5, 0.25, 0.02), kind=bt.TYPE_BODY_FRAME)
+        self.assertEqual(
+            data.hex(),
+            "484d44310c00000003000000d2040000000000000d0c0b0ae00180020000f342050100000000003f0000803e0ad7a33c"
+            "0000803e0000003fcdccccbd6666663f3333733f",
+        )
+
     def test_frame_split_into_packets_and_joined_in_any_order(self):
         data = bytes(range(256)) * 12  # 3072 bytes: 1400 + 1400 + 272
         packets = bt.pack_video(9, 1, 2, 640, 480, 3, bt.FLAG_KEYFRAME, data)
@@ -204,6 +214,39 @@ class PoseStepsTest(unittest.TestCase):
         self.assertGreater(jump[0, 0], 0.65, "a quick move comes through")
 
 
+@unittest.skipIf(bt.np is None or cv2 is None, "needs NumPy and OpenCV")
+class BallTest(unittest.TestCase):
+    """Finding a lit Move's bulb near a hand."""
+
+    def setUp(self):
+        self.picture = bt.np.full((640, 480, 3), (110, 100, 90), dtype=bt.np.uint8)
+        self.points = standing_pose()
+        self.points[15] = (0.5, 0.5, 0.0, 0.9, 0.99)  # left wrist in the middle
+        self.points[13] = (0.5, 0.6, 0.0, 0.9, 0.99)  # its elbow below
+
+    def draw_bulb(self, x, y, colour=(255, 40, 230)):
+        cv2.circle(self.picture, (x, y), 9, colour, -1, lineType=cv2.LINE_AA)
+        cv2.circle(self.picture, (x, y), 5, (255, 255, 255), -1, lineType=cv2.LINE_AA)
+
+    def test_finds_the_bulb_by_the_hand(self):
+        self.draw_bulb(255, 290)
+        x, y, radius = bt.find_ball(self.picture, self.points)
+        self.assertAlmostEqual(x * 480, 255.5, delta=1.0)
+        self.assertAlmostEqual(y * 640, 290.5, delta=1.0)
+        self.assertAlmostEqual(radius * 480, 9, delta=2.5)
+
+    def test_nothing_without_a_bulb_or_far_from_the_hands(self):
+        self.assertIsNone(bt.find_ball(self.picture, self.points))
+        self.draw_bulb(60, 600)  # by the feet
+        self.assertIsNone(bt.find_ball(self.picture, self.points))
+        self.assertIsNone(bt.find_ball(self.picture, []), "no person, no hands")
+
+    def test_white_lights_and_skin_are_not_bulbs(self):
+        cv2.circle(self.picture, (250, 300), 12, (255, 255, 255), -1)  # a lamp
+        cv2.circle(self.picture, (230, 330), 14, (225, 170, 140), -1)  # a hand
+        self.assertIsNone(bt.find_ball(self.picture, self.points))
+
+
 class TrackerTest(unittest.TestCase):
     def setUp(self):
         self.sent = []
@@ -211,9 +254,10 @@ class TrackerTest(unittest.TestCase):
         self.record = io.StringIO()
         self.poses = []
         self.pc_now = 0
+        self.to_driver = []
         self.tracker = bt.Tracker(lambda data, address: self.sent.append((data, address)), self.make_pose,
                                   out=self.lines.append, record=self.record, now=lambda: self.pc_now,
-                                  threaded=False)
+                                  threaded=False, send_driver=self.to_driver.append)
         self.phone = FakePhone()
 
     def make_pose(self):
@@ -289,6 +333,7 @@ class TrackerTest(unittest.TestCase):
         self.assertEqual((bt.parse_header(ping)[0], address), (bt.TYPE_TIME_PING, PHONE))
         self.tracker.handle(self.phone.pong(ping, now + 2_000_000), PHONE, now + 4_000_000)
 
+        self.assertEqual(self.to_driver, [], "nothing for the driver before the phone's clock is known")
         self.stream(encoded[1:], now + 10_000_000, first_seq=2)
         self.tracker.tick(now + SECOND)
         report = self.lines[-1]
@@ -300,6 +345,15 @@ class TrackerTest(unittest.TestCase):
         self.assertEqual(len(recorded), 31)
         self.assertEqual(recorded[-1]["offset_ns"], 5 * SECOND)
         self.assertEqual(len(recorded[-1]["landmarks"]), 33)
+
+        # The driver gets each frame on the PC's clock, with how long ago the camera took it.
+        frames = [bt.parse_body(data, kind=bt.TYPE_BODY_FRAME) for data in self.to_driver]
+        self.assertEqual(len(frames), 30)
+        self.assertEqual(frames[0]["seq"], 2)
+        self.assertEqual(frames[0]["capture_ns"], now + 10_000_000, "the PC's time of the picture")
+        self.assertAlmostEqual(frames[0]["inference_ms"], 30.0, places=3, msg="its age: taken 30 ms before")
+        self.assertEqual(frames[0]["device"], DEVICE)
+        self.assertEqual(len(frames[0]["landmarks"]), 33)
 
     @needs_video
     def test_pose_thread_keeps_up_and_closes(self):

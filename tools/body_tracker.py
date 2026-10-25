@@ -3,15 +3,19 @@
 
 The phones (the "HMD Cámara" app) send their camera's video here. For each phone this decodes it,
 finds the person's 33 pose points with MediaPipe's pose model, run on several CPU cores with
-LiteRT, and sends them back to the phone, which draws them on its screen. Every 2 s it prints per
-phone: frames per second, how often it sees a person, the model's time per frame, the delay from
-the camera to the finished pose, lost frames, and how sure it is of the hips, knees and ankles.
+LiteRT, and sends them back to the phone, which draws them on its screen. It also finds a lit PS
+Move's bulb near the hands, for calibrating the cameras, and hands each frame's points to the
+headset driver on this PC, which turns the cameras' points into the body in 3D. Every 2 s it
+prints per phone: frames per second, how often it sees a person, the model's time per frame, the
+delay from the camera to the finished pose, lost frames, and how sure it is of the hips, knees and
+ankles.
 
     pip install -r tools/requirements-body.txt
     python tools/body_tracker.py                   # watch
     python tools/body_tracker.py --model heavy     # more exact model, slower
     python tools/body_tracker.py --threads 8       # more cores per camera
     python tools/body_tracker.py --record a.jsonl  # also save every pose, to replay later
+    python tools/body_tracker.py --snapshots fotos # a picture of each camera every 2 s
 
 The first run downloads the pose model next to this script. On Windows, allow Python through the
 firewall on private networks when asked.
@@ -37,6 +41,10 @@ try:
     import numpy as np
 except ImportError:  # the packets work without them; main() says what to install
     av = np = None
+try:
+    import cv2
+except ImportError:  # only the LiteRT pose and the Move's ball need it
+    cv2 = None
 
 PORT = 9946
 MAGIC = b"HMD1"
@@ -47,8 +55,14 @@ TYPE_TIME_PING = 8
 TYPE_TIME_PONG = 9
 TYPE_VIDEO = 10
 TYPE_KEYFRAME_REQUEST = 11
+# Here to the headset driver: one camera frame's pose, laid out as TYPE_BODY but with the frame's
+# age (ms from the camera taking it to this packet leaving) where the inference time goes, so the
+# driver puts it on its own clock without sharing ours. See driver/src/body_protocol.h.
+TYPE_BODY_FRAME = 12
+DRIVER_PORT = 9947
 FLAG_POSE = 1
 FLAG_EXPOSURE_LOCKED = 2
+FLAG_BALL = 4
 FLAG_KEYFRAME = 8
 MAX_PAYLOAD = 1400
 
@@ -70,6 +84,7 @@ MODEL_SHA256 = {
 # A frame this far behind the newest means the phone's app started again and counts from 1.
 RESTART_GAP = 300
 KEYFRAME_REQUEST_EVERY_NS = 300_000_000
+SNAPSHOT_EVERY_NS = 2_000_000_000
 
 
 def header(kind, seq=0, timestamp_ns=0):
@@ -86,19 +101,20 @@ def parse_header(data):
     return kind, seq, timestamp
 
 
-def pack_body(seq, capture_ns, device, width, height, inference_ms, flags, landmarks, ball=(0.0, 0.0, 0.0)):
-    """A body packet: one frame's pose, from here to the phone."""
-    data = header(TYPE_BODY, seq, capture_ns)
+def pack_body(seq, capture_ns, device, width, height, inference_ms, flags, landmarks, ball=(0.0, 0.0, 0.0),
+              kind=TYPE_BODY):
+    """A body packet: one frame's pose, from here to the phone (or, as TYPE_BODY_FRAME, the driver)."""
+    data = header(kind, seq, capture_ns)
     data += BODY.pack(device, width, height, inference_ms, flags, len(landmarks), *ball)
     for point in landmarks:
         data += LANDMARK.pack(*point)
     return data
 
 
-def parse_body(data):
+def parse_body(data, kind=TYPE_BODY):
     """A dict with the frame's fields, or None if the packet is short or not a body packet."""
     head = parse_header(data)
-    if head is None or head[0] != TYPE_BODY or len(data) < HEADER.size + BODY.size:
+    if head is None or head[0] != kind or len(data) < HEADER.size + BODY.size:
         return None
     _, seq, capture_ns = head
     device, width, height, inference_ms, flags, count, ball_x, ball_y, ball_r = BODY.unpack_from(data, HEADER.size)
@@ -217,6 +233,7 @@ class Stats:
         self.lost = 0
         self.poses = 0
         self.persons = 0
+        self.balls = 0
         self.skipped = 0
         self.inference = 0.0
         self.arrivals = []
@@ -249,6 +266,8 @@ class Stats:
                 parts.append(f"saltados {self.skipped} (el modelo seguía con el anterior)")
             if self.persons:
                 parts.append(" ".join(f"{k} {100 * sum(v) / len(v):.0f}%" for k, v in self.visibility.items()))
+            if self.balls:
+                parts.append(f"bola del Move en {100 * self.balls / self.poses:.0f}%")
             sync = clock.best()
             if sync is not None:
                 parts.append(f"reloj ±{sync[1] / 2e6:.1f} ms")
@@ -315,6 +334,7 @@ class Camera:
         self.worker = None
         self.pose = None  # when the pose runs on the main thread
         self.last_pose_ms = 0
+        self.next_snapshot_ns = 0
 
     def decode(self, data):
         """(worked, the decoded frame or None)."""
@@ -334,12 +354,15 @@ class Tracker:
 
     send(data, address) sends a packet; out(text) prints a line; make_pose() opens a pose model
     (an object with detect(rgb image, ms) -> points and close()); now() gives monotonic ns. With
-    threaded=False the pose runs on the caller's thread, for tests.
+    threaded=False the pose runs on the caller's thread, for tests. send_driver(data), if given,
+    hands each frame's pose to the headset driver once the phone's clock is known.
     """
 
     def __init__(self, send, make_pose, out=print, record=None, now=time.perf_counter_ns,
-                 threaded=True, report_every_ns=2_000_000_000):
+                 threaded=True, report_every_ns=2_000_000_000, send_driver=None, snapshots=None):
         self.send = send
+        self.send_driver = send_driver
+        self.snapshots = snapshots  # a folder for a picture of each camera every few seconds
         self.make_pose = make_pose
         self.out = out
         self.record = record
@@ -463,14 +486,27 @@ class Tracker:
         points = pose.detect(rgb, ms)
         done = self.now()
         inference_ms = (done - start) / 1e6
-        flags = (FLAG_POSE if points else 0) | (frame["flags"] & FLAG_EXPOSURE_LOCKED)
-        packet = pack_body(frame["seq"], frame["capture_ns"], camera.device, width, height, inference_ms, flags, points)
+        ball = find_ball(rgb, points)
+        flags = (FLAG_POSE if points else 0) | (FLAG_BALL if ball else 0) | (frame["flags"] & FLAG_EXPOSURE_LOCKED)
+        ball = ball or (0.0, 0.0, 0.0)
+        packet = pack_body(frame["seq"], frame["capture_ns"], camera.device, width, height, inference_ms, flags, points,
+                           ball)
         self.send(packet, camera.address)
 
         sync = camera.clock.best()
+        if self.send_driver and sync is not None:
+            captured = frame["capture_ns"] + sync[0]
+            age_ms = (self.now() - captured) / 1e6
+            self.send_driver(pack_body(frame["seq"], captured, camera.device, width, height, age_ms, flags, points,
+                                       ball, kind=TYPE_BODY_FRAME))
+        if self.snapshots and done >= camera.next_snapshot_ns:
+            camera.next_snapshot_ns = done + SNAPSHOT_EVERY_NS
+            save_snapshot(Path(self.snapshots) / f"camara_{camera.device & 0xFFFF:04X}.jpg", rgb, points,
+                          ball if flags & FLAG_BALL else None)
         stats = camera.stats
         with stats.lock:
             stats.poses += 1
+            stats.balls += bool(flags & FLAG_BALL)
             stats.inference += inference_ms
             if sync is not None:
                 captured = frame["capture_ns"] + sync[0]
@@ -592,7 +628,6 @@ class LiteRtPose:
     MIN_DETECTION, MIN_PRESENCE, MIN_OVERLAP = 0.5, 0.5, 0.3
 
     def __init__(self, model_path, threads=4):
-        import cv2
         from ai_edge_litert.interpreter import Interpreter
 
         self.cv2 = cv2
@@ -710,6 +745,76 @@ class LiteRtPose:
         return np.hstack([points[:33], visibility, presence]), next_square
 
 
+WRISTS_AND_ELBOWS = ((15, 13), (16, 14))
+
+
+def find_ball(rgb, points):
+    """Where a lit PS Move bulb is, as (x, y, radius) over the picture's width and height (the
+    radius over its width), or None. The driver calibrates the cameras with it. It is looked for
+    near each wrist, within a forearm and a bit: the bulb is far brighter and more coloured than
+    anything else there."""
+    if not points or cv2 is None:
+        return None
+    height, width = rgb.shape[:2]
+    best = None
+    for wrist, elbow in WRISTS_AND_ELBOWS:
+        if points[wrist][3] < 0.3:
+            continue
+        wx, wy = points[wrist][0] * width, points[wrist][1] * height
+        forearm = math.hypot(wx - points[elbow][0] * width, wy - points[elbow][1] * height)
+        reach = min(max(1.3 * forearm, 0.08 * height), 0.3 * height)
+        x0, y0 = int(max(wx - reach, 0)), int(max(wy - reach, 0))
+        x1, y1 = int(min(wx + reach, width)), int(min(wy + reach, height))
+        if x1 - x0 < 4 or y1 - y0 < 4:
+            continue
+        blob = bright_blob(rgb[y0:y1, x0:x1])
+        if blob and (best is None or blob[3] > best[3]):
+            best = (blob[0] + x0, blob[1] + y0, blob[2], blob[3])
+    if best is None:
+        return None
+    return best[0] / width, best[1] / height, best[2] / width
+
+
+def bright_blob(patch):
+    """The most coloured glowing blob in an RGB patch: (centre x, y, radius in pixels, score), or
+    None. Glowing means it has pixels near white (the bulb blows out the camera) or very bright,
+    and coloured means saturated, which a white lamp or wall is not and skin is too little."""
+    patch = patch.astype(np.int16)
+    top, bottom = patch.max(axis=2), patch.min(axis=2)
+    coloured = (top >= 150) & (top - bottom >= 0.5 * top)
+    hot = top >= 235
+    count, labels, stats, centres = cv2.connectedComponentsWithStats((coloured | (top >= 245)).astype(np.uint8),
+                                                                     connectivity=8)
+    best = None
+    for i in range(1, count):
+        area = stats[i, cv2.CC_STAT_AREA]
+        w, h = stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
+        if area < 5 or area < 0.35 * w * h or max(w, h) > 2.5 * min(w, h):
+            continue  # a speck, or not round
+        inside = labels == i
+        colour = int(np.count_nonzero(coloured & inside))
+        if colour < 0.1 * area or np.count_nonzero(hot & inside) < 2:
+            continue  # a white light, or something coloured that does not glow
+        if best is None or colour > best[3]:
+            best = (centres[i][0] + 0.5, centres[i][1] + 0.5, math.sqrt(area / math.pi), colour)
+    return best
+
+
+def save_snapshot(path, rgb, points, ball):
+    """A JPEG of what the pose and ball finders saw: the points in green and the ball in a ring."""
+    if cv2 is None:
+        return
+    picture = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    height, width = picture.shape[:2]
+    for x, y, _, visibility, _ in points:
+        if visibility >= 0.5:
+            cv2.circle(picture, (int(x * width), int(y * height)), 3, (0, 255, 0), -1)
+    if ball:
+        cv2.circle(picture, (int(ball[0] * width), int(ball[1] * height)), int(ball[2] * width) + 6, (255, 255, 0), 2)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(path), picture)
+
+
 class MediaPipePose:
     """MediaPipe's pose landmarker for a video: one person, 33 points. The same as LiteRtPose but
     on one core, as MediaPipe's Python package has no setting for more."""
@@ -755,7 +860,7 @@ def ensure_model(name, folder=MODEL_DIR, out=print):
     return path
 
 
-def run(port, record_path, model, threads, engine):
+def run(port, record_path, model, threads, engine, driver_port, snapshots):
     model_path = ensure_model(model)
     if engine == "mediapipe":
         make_pose, cores = (lambda: MediaPipePose(model_path)), "1 núcleo, con MediaPipe"
@@ -768,7 +873,17 @@ def run(port, record_path, model, threads, engine):
     sock.bind(("0.0.0.0", port))
     sock.settimeout(0.05)
     record = open(record_path, "w", encoding="utf-8") if record_path else None
-    tracker = Tracker(sock.sendto, make_pose, record=record)
+    # Its own socket: on Windows, packets to a driver that is not running would make the phones'
+    # socket report errors.
+    driver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    def send_driver(data):
+        try:
+            driver.sendto(data, ("127.0.0.1", driver_port))
+        except OSError:
+            pass
+
+    tracker = Tracker(sock.sendto, make_pose, record=record, send_driver=send_driver, snapshots=snapshots)
     print(f"Modelo «{model}» listo ({cores}). Esperando las cámaras en el puerto UDP {port}… (Ctrl+C para salir)")
     try:
         while True:
@@ -787,6 +902,7 @@ def run(port, record_path, model, threads, engine):
         if record:
             record.close()
         sock.close()
+        driver.close()
 
 
 def main():
@@ -798,6 +914,10 @@ def main():
     parser.add_argument("--engine", choices=("litert", "mediapipe"), default="litert",
                         help="mediapipe runs the same model on one core (needs pip install mediapipe)")
     parser.add_argument("--record", metavar="FILE", help="save every pose as one JSON line")
+    parser.add_argument("--driver-port", type=int, default=DRIVER_PORT,
+                        help=f"UDP port of the headset driver on this PC (default {DRIVER_PORT})")
+    parser.add_argument("--snapshots", metavar="FOLDER",
+                        help="save what each camera sees, with the points and the Move's ball, every 2 s")
     args = parser.parse_args()
     if args.threads < 1:
         parser.error("--threads must be 1 or more")
@@ -806,15 +926,14 @@ def main():
             import mediapipe  # noqa: F401
         else:
             import ai_edge_litert  # noqa: F401
-            import cv2  # noqa: F401
-        missing = av is None or np is None
+        missing = av is None or np is None or cv2 is None
     except ImportError:
         missing = True
     if missing:
         print("Faltan librerías. Instálalas con:  pip install -r tools/requirements-body.txt"
               + ("  y  pip install mediapipe" if args.engine == "mediapipe" else ""))
         return 1
-    run(args.port, args.record, args.model, args.threads, args.engine)
+    run(args.port, args.record, args.model, args.threads, args.engine, args.driver_port, args.snapshots)
     return 0
 
 
