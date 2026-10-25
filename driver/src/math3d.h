@@ -164,6 +164,63 @@ inline bool Inverse(const Mat3& a, Mat3* out)
     return true;
 }
 
+inline Mat3 Rows(Vec3 a, Vec3 b, Vec3 c)
+{
+    Mat3 r;
+    const Vec3 rows[3] = {a, b, c};
+    for (int i = 0; i < 3; ++i) {
+        r.m[i][0] = rows[i].x;
+        r.m[i][1] = rows[i].y;
+        r.m[i][2] = rows[i].z;
+    }
+    return r;
+}
+
+inline Vec3 Row(const Mat3& a, int i) { return {a.m[i][0], a.m[i][1], a.m[i][2]}; }
+
+inline double Determinant(const Mat3& a)
+{
+    return Dot(Row(a, 0), Cross(Row(a, 1), Row(a, 2)));
+}
+
+// The rotation matrix of a quaternion: Rotate(q, v) == QuatToMat3(q) * v.
+inline Mat3 QuatToMat3(Quat q)
+{
+    const double w = q.w, x = q.x, y = q.y, z = q.z;
+    return Rows({1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)},
+                {2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)},
+                {2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)});
+}
+
+// The quaternion of a rotation matrix (nearly orthonormal is enough).
+inline Quat Mat3ToQuat(const Mat3& r)
+{
+    const auto& m = r.m;
+    const double trace = m[0][0] + m[1][1] + m[2][2];
+    Quat q;
+    if (trace > 0.0) {
+        const double s = 2.0 * std::sqrt(trace + 1.0);
+        q = {0.25 * s, (m[2][1] - m[1][2]) / s, (m[0][2] - m[2][0]) / s, (m[1][0] - m[0][1]) / s};
+    } else if (m[0][0] > m[1][1] && m[0][0] > m[2][2]) {
+        const double s = 2.0 * std::sqrt(1.0 + m[0][0] - m[1][1] - m[2][2]);
+        q = {(m[2][1] - m[1][2]) / s, 0.25 * s, (m[0][1] + m[1][0]) / s, (m[0][2] + m[2][0]) / s};
+    } else if (m[1][1] > m[2][2]) {
+        const double s = 2.0 * std::sqrt(1.0 + m[1][1] - m[0][0] - m[2][2]);
+        q = {(m[0][2] - m[2][0]) / s, (m[0][1] + m[1][0]) / s, 0.25 * s, (m[1][2] + m[2][1]) / s};
+    } else {
+        const double s = 2.0 * std::sqrt(1.0 + m[2][2] - m[0][0] - m[1][1]);
+        q = {(m[1][0] - m[0][1]) / s, (m[0][2] + m[2][0]) / s, (m[1][2] + m[2][1]) / s, 0.25 * s};
+    }
+    return Normalize(q);
+}
+
+// The rotation by the vector's length (radians) around its direction.
+inline Mat3 RotationFromVector(Vec3 v)
+{
+    const double angle = Length(v);
+    return angle > 0.0 ? QuatToMat3(AxisAngle(v * (1.0 / angle), angle)) : Mat3::Identity();
+}
+
 // Where `orientation` will be after `seconds` turning at `world_angular_velocity` (rad/s).
 inline Quat Predict(Quat orientation, Vec3 world_angular_velocity, double seconds)
 {

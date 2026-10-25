@@ -1,0 +1,623 @@
+// Tests for the body tracking side of the driver: camera calibration and triangulation, the
+// packets from the pose program, and the body filter. Run with ctest.
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <string>
+#include <functional>
+#include <random>
+#include <vector>
+
+#include "body_filter.h"
+#include "body_protocol.h"
+#include "body_session.h"
+#include "camera_model.h"
+
+namespace {
+
+int g_failures = 0;
+
+#define CHECK(cond)                                                              \
+    do {                                                                         \
+        if (!(cond)) {                                                           \
+            std::printf("%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, #cond); \
+            ++g_failures;                                                        \
+        }                                                                        \
+    } while (0)
+
+#define CHECK_NEAR(a, b, tol) CHECK(std::fabs((a) - (b)) <= (tol))
+
+constexpr double kPi = 3.14159265358979;
+
+// A camera at `position` looking at `target`, upright.
+CameraModel LookAt(Vec3 position, Vec3 target, double focal, double k1, int width = 480, int height = 640)
+{
+    const Vec3 forward = (target - position) * (1.0 / Length(target - position));
+    Vec3 right = Cross(forward, Vec3{0, 1, 0});
+    right = right * (1.0 / Length(right));
+    const Vec3 down = Cross(forward, right);
+    CameraModel camera;
+    camera.width = width;
+    camera.height = height;
+    camera.focal = focal;
+    camera.k1 = k1;
+    camera.rotation = Rows(right, down, forward);
+    camera.position = position;
+    return camera;
+}
+
+double AngleBetween(const Mat3& a, const Mat3& b)
+{
+    const Mat3 d = a * Transpose(b);
+    const double trace = d.m[0][0] + d.m[1][1] + d.m[2][2];
+    return std::acos(std::fmax(-1.0, std::fmin(1.0, (trace - 1.0) / 2.0)));
+}
+
+// Where someone might wave a Move: in front of the cameras, from the knees to above the head.
+Vec3 RoomPoint(std::mt19937& random)
+{
+    std::uniform_real_distribution<double> x(-1.0, 1.0), y(0.3, 2.1), z(-1.0, 1.0);
+    return {x(random), y(random), z(random)};
+}
+
+std::vector<uint8_t> FromHex(const std::string& hex)
+{
+    std::vector<uint8_t> bytes;
+    for (size_t i = 0; i + 1 < hex.size(); i += 2) {
+        bytes.push_back(static_cast<uint8_t>(std::stoi(hex.substr(i, 2), nullptr, 16)));
+    }
+    return bytes;
+}
+
+void TestBodyPacket()
+{
+    // As tools/body_tracker.py sends it (see its test_driver_packet_layout).
+    const std::vector<uint8_t> data = FromHex(
+        "484d44310c00000003000000d2040000000000000d0c0b0ae00180020000f342050100000000003f0000803e0ad7a33c"
+        "0000803e0000003fcdccccbd6666663f3333733f");
+    body_protocol::Frame frame;
+    CHECK(body_protocol::Parse(data.data(), data.size(), &frame));
+    CHECK(frame.seq == 3);
+    CHECK(frame.camera == 0x0A0B0C0D);
+    CHECK(frame.width == 480 && frame.height == 640);
+    CHECK_NEAR(frame.age_seconds, 0.1215, 1e-6);
+    CHECK(frame.flags == (body_protocol::kFlagPose | body_protocol::kFlagBall));
+    CHECK(frame.points == 1);
+    CHECK_NEAR(frame.ball[0], 0.5, 1e-6);
+    CHECK_NEAR(frame.ball[1], 0.25, 1e-6);
+    CHECK_NEAR(frame.ball[2], 0.02, 1e-6);
+    CHECK_NEAR(frame.point[0][0], 0.25, 1e-6);
+    CHECK_NEAR(frame.point[0][1], 0.5, 1e-6);
+    CHECK_NEAR(frame.point[0][3], 0.9, 1e-6);
+    CHECK(!body_protocol::Parse(data.data(), data.size() - 1, &frame));  // a point cut short
+    std::vector<uint8_t> other = data;
+    other[4] = 7;  // the phone's pose packet
+    CHECK(!body_protocol::Parse(other.data(), other.size(), &frame));
+}
+
+void TestCameraProjectsAndCastsRays()
+{
+    const CameraModel camera = LookAt({2.0, 1.1, -2.0}, {0.0, 1.0, 0.0}, 500.0, -0.1);
+    double u = 0.0, v = 0.0;
+    CHECK(camera.Project({0.0, 1.0, 0.0}, &u, &v));
+    CHECK_NEAR(u, 240.0, 1e-6);  // what it looks at is in the middle
+    CHECK_NEAR(v, 320.0, 1e-6);
+    CHECK(camera.Project({0.0, 1.5, 0.0}, &u, &v));
+    CHECK(v < 320.0);  // higher up is higher in the picture
+    const Vec3 point{0.4, 1.6, 0.3};
+    CHECK(camera.Project(point, &u, &v));
+    const Vec3 ray = camera.Ray(u, v);
+    const Vec3 towards = (point - camera.position) * (1.0 / Length(point - camera.position));
+    CHECK(Length(ray - towards) < 1e-6);
+    CHECK(!camera.Project({4.0, 1.0, -4.0}, &u, &v));  // behind
+
+    CameraModel copy;
+    CHECK(CameraModel::Parse(camera.Serialize(), &copy));
+    CHECK(copy.width == 480 && copy.height == 640);
+    CHECK_NEAR(copy.focal, 500.0, 1e-6);
+    CHECK_NEAR(copy.k1, -0.1, 1e-9);
+    CHECK(Length(copy.position - camera.position) < 1e-6);
+    CHECK(AngleBetween(copy.rotation, camera.rotation) < 1e-6);
+    CHECK(!CameraModel::Parse("v1 480 640 nope", &copy));
+}
+
+std::vector<CalibrationSample> Samples(const CameraModel& camera, int count, double noise_px, double wrong_share,
+                                       unsigned seed)
+{
+    std::mt19937 random(seed);
+    std::normal_distribution<double> noise(0.0, noise_px);
+    std::uniform_real_distribution<double> anywhere(0.0, 1.0);
+    std::vector<CalibrationSample> samples;
+    while (static_cast<int>(samples.size()) < count) {
+        CalibrationSample s;
+        s.world = RoomPoint(random);
+        if (!camera.Project(s.world, &s.u, &s.v) || s.u < 0 || s.v < 0 || s.u > camera.width || s.v > camera.height) {
+            continue;
+        }
+        if (anywhere(random) < wrong_share) {
+            s.u = anywhere(random) * camera.width;  // a misread bulb
+            s.v = anywhere(random) * camera.height;
+        } else {
+            s.u += noise(random);
+            s.v += noise(random);
+        }
+        samples.push_back(s);
+    }
+    return samples;
+}
+
+void TestCalibrationFindsTheCamera()
+{
+    const CameraModel truth = LookAt({1.8, 1.15, -2.3}, {0.0, 1.0, 0.0}, 520.0, -0.08);
+    const CalibrationResult result = CalibrateCamera(Samples(truth, 600, 1.0, 0.08, 7), 480, 640);
+    CHECK(result.ok);
+    CHECK(Length(result.camera.position - truth.position) < 0.02);
+    CHECK(AngleBetween(result.camera.rotation, truth.rotation) < 0.5 * kPi / 180.0);
+    CHECK_NEAR(result.camera.focal, 520.0, 8.0);
+    CHECK_NEAR(result.camera.k1, -0.08, 0.03);
+    CHECK_NEAR(result.rms_px, 1.4, 0.4);  // the noise: 1 px in u and v
+    CHECK(result.outliers >= 30 && result.outliers <= 70);
+    CHECK(result.rms_m < 0.01);
+}
+
+void TestCalibrationNeedsAgreeingSamples()
+{
+    const CameraModel truth = LookAt({1.8, 1.15, -2.3}, {0.0, 1.0, 0.0}, 520.0, 0.0);
+    CHECK(!CalibrateCamera(Samples(truth, 20, 1.0, 0.0, 3), 480, 640).ok);
+    const CalibrationResult noise = CalibrateCamera(Samples(truth, 300, 1.0, 1.0, 3), 480, 640);
+    CHECK(!noise.ok);
+    CHECK(!noise.problem.empty());
+}
+
+void TestTriangulatesFromTwoCameras()
+{
+    const CameraModel left = LookAt({-1.6, 1.1, -2.4}, {0.0, 1.0, 0.0}, 520.0, -0.05);
+    const CameraModel right = LookAt({1.7, 1.0, -2.2}, {0.0, 1.0, 0.0}, 500.0, -0.08);
+    std::mt19937 random(11);
+    std::normal_distribution<double> noise(0.0, 1.0);
+    double sum = 0.0;
+    int count = 0;
+    for (int i = 0; i < 200; ++i) {
+        const Vec3 point = RoomPoint(random);
+        double u1, v1, u2, v2;
+        if (!left.Project(point, &u1, &v1) || !right.Project(point, &u2, &v2)) {
+            continue;
+        }
+        Vec3 found;
+        CHECK(Triangulate({{&left, u1 + noise(random), v1 + noise(random)}, {&right, u2 + noise(random), v2 + noise(random)}},
+                          &found));
+        sum += Length(found - point);
+        ++count;
+    }
+    CHECK(count > 150);
+    CHECK(sum / count < 0.01);
+
+    Vec3 found;
+    double u, v;
+    left.Project({0, 1, 0}, &u, &v);
+    CHECK(!Triangulate({{&left, u, v}}, &found));            // one camera has no depth
+    CHECK(!Triangulate({{&left, u, v}, {&left, u, v}}, &found));  // nor two views along one ray
+}
+
+
+// A person standing at `root` (the floor under their hips), facing `facing` radians from -z
+// (towards the cameras) to the left: where each of the filter's joints is.
+struct Person {
+    Vec3 root{0.0, 0.0, 0.0};
+    double facing = 0.0;
+    double left_foot_lift = 0.0;  // m, the left foot raised
+    Vec3 left_foot_shift;         // m, world, the left foot moved
+
+    Vec3 Joint(int joint) const
+    {
+        // Offsets: to the person's right, up, forward.
+        static const double offsets[kJointCount][3] = {
+            {-0.18, 1.45, 0.0}, {0.18, 1.45, 0.0}, {-0.1, 0.95, 0.0}, {0.1, 0.95, 0.0},   {-0.1, 0.5, 0.03},
+            {0.1, 0.5, 0.03},   {-0.1, 0.08, 0.0}, {0.1, 0.08, 0.0}, {-0.1, 0.03, -0.05}, {0.1, 0.03, -0.05},
+            {-0.1, 0.03, 0.15}, {0.1, 0.03, 0.15},
+        };
+        const Vec3 forward{-std::sin(facing), 0.0, -std::cos(facing)};
+        const Vec3 right = Cross(forward, Vec3{0, 1, 0});
+        Vec3 p = root + right * offsets[joint][0] + Vec3{0, offsets[joint][1], 0} + forward * offsets[joint][2];
+        const bool left_foot = joint == kLeftAnkle || joint == kLeftHeel || joint == kLeftToe;
+        if (left_foot || joint == kLeftKnee) {
+            p = p + left_foot_shift * (left_foot ? 1.0 : 0.5) + Vec3{0, left_foot_lift * (left_foot ? 1.0 : 0.5), 0};
+        }
+        return p;
+    }
+};
+
+struct BodySimulation {
+    std::vector<CameraModel> cameras{LookAt({-1.6, 1.1, -2.4}, {0.0, 0.9, 0.0}, 520.0, -0.05),
+                                     LookAt({1.7, 1.0, -2.2}, {0.0, 0.9, 0.0}, 500.0, -0.08)};
+    BodyFilter filter;
+    std::mt19937 random{5};
+    double time = 100.0;
+    double noise_px = 1.0;  // white, per frame: worse than MediaPipe's smoothed points
+
+    BodySimulation() { filter.SetCameras(cameras); }
+
+    BodyView View(int camera, const Person& person, double at)
+    {
+        std::normal_distribution<double> noise(0.0, noise_px);
+        BodyView view;
+        view.camera = camera;
+        view.time = at;
+        for (int j = 0; j < kJointCount; ++j) {
+            cameras[camera].Project(person.Joint(j), &view.u[j], &view.v[j]);
+            view.u[j] += noise(random);
+            view.v[j] += noise(random);
+            view.visibility[j] = 0.9;
+        }
+        return view;
+    }
+
+    // Both cameras at 26 frames a second, half a frame apart; `edit` can change a frame.
+    void Run(double seconds, const std::function<Person(double)>& person,
+             const std::function<void(BodyView*)>& edit = nullptr)
+    {
+        const double period = 1.0 / 26.0;
+        for (double end = time + seconds; time < end; time += period) {
+            for (int camera = 0; camera < 2; ++camera) {
+                const double at = time + camera * period / 2;
+                BodyView view = View(camera, person(at), at);
+                if (edit) {
+                    edit(&view);
+                }
+                filter.Add(view);
+            }
+        }
+    }
+
+    double Error(int joint, const Person& person, double at) const
+    {
+        Vec3 found;
+        return filter.Joint(joint, at, &found) ? Length(found - person.Joint(joint)) : 1e9;
+    }
+};
+
+Person StandingStill(double)
+{
+    return Person{};
+}
+
+void TestBodyStandingStill()
+{
+    BodySimulation sim;
+    sim.Run(2.0, StandingStill);
+    const double now = sim.time;
+    for (int j = 0; j < kJointCount; ++j) {
+        CHECK(sim.Error(j, Person{}, now) < 0.015);
+    }
+    // The plan's goal: less than 1 cm of shaking while still.
+    std::vector<Vec3> feet;
+    BodySimulation& s = sim;
+    for (int i = 0; i < 26; ++i) {
+        s.Run(1.0 / 26.0, StandingStill);
+        Vec3 p;
+        CHECK(s.filter.Joint(kLeftAnkle, s.time, &p));
+        feet.push_back(p);
+    }
+    Vec3 mean;
+    for (const Vec3& p : feet) mean = mean + p * (1.0 / feet.size());
+    double spread = 0.0;
+    for (const Vec3& p : feet) spread = std::fmax(spread, Length(p - mean));
+    CHECK(spread < 0.01);
+
+    const TrackerPose waist = sim.filter.Waist(sim.time);
+    CHECK(waist.valid && !waist.holding);
+    CHECK(Length(waist.position - Vec3{0.0, 0.95, 0.0}) < 0.015);
+    // Facing the cameras (-z): the tracker's +x is the person's right (+x), +z behind them (+z).
+    CHECK(Length(Rotate(waist.orientation, {1, 0, 0}) - Vec3{1, 0, 0}) < 0.1);
+    CHECK(Length(Rotate(waist.orientation, {0, 1, 0}) - Vec3{0, 1, 0}) < 0.1);
+    const TrackerPose foot = sim.filter.Foot(true, sim.time);
+    CHECK(foot.valid);
+    CHECK(Length(foot.position - Person{}.Joint(kLeftAnkle)) < 0.015);
+    CHECK(Length(Rotate(foot.orientation, {0, 0, -1}) - Vec3{0, 0, -1}) < 0.15);  // the toes point forward
+
+    const BodyFilter::Stats stats = sim.filter.TakeStats();
+    CHECK(stats.started == kJointCount);
+    CHECK(stats.updates > 1000);
+    CHECK(stats.outliers < stats.updates / 50);
+    CHECK(stats.swapped == 0);
+}
+
+void TestBodyTurnsAndWalks()
+{
+    BodySimulation sim;
+    sim.Run(1.0, StandingStill);
+    // Turns a quarter left while stepping 1 m sideways in 2 s.
+    const double start = sim.time;
+    const auto moving = [start](double t) {
+        const double f = std::fmin((t - start) / 2.0, 1.0);
+        Person p;
+        p.root = {-1.0 * f, 0.0, 0.0};
+        p.facing = f * kPi / 2;
+        return p;
+    };
+    sim.Run(1.0, moving);
+    const Person halfway = moving(sim.time);
+    for (int j : {kLeftHip, kRightHip, kLeftAnkle, kRightAnkle}) {
+        CHECK(sim.Error(j, halfway, sim.time) < 0.06);  // following at 0.5 m/s while turning
+    }
+    sim.Run(1.5, moving);
+    const Person last = moving(sim.time);
+    for (int j : {kLeftHip, kRightHip, kLeftAnkle, kRightAnkle}) {
+        CHECK(sim.Error(j, last, sim.time) < 0.03);
+    }
+    const TrackerPose waist = sim.filter.Waist(sim.time);
+    // Facing +x... no: facing a quarter left of -z is -x; the person's right is then -z.
+    CHECK(Length(Rotate(waist.orientation, {1, 0, 0}) - Vec3{0, 0, -1}) < 0.15);
+}
+
+void TestBodyFootHiddenFromOneCamera()
+{
+    BodySimulation sim;
+    sim.Run(1.5, StandingStill);
+    // The left camera stops seeing the left foot while it is lifted 20 cm in 0.3 s.
+    const double start = sim.time;
+    const auto lifted = [start](double t) {
+        Person p;
+        p.left_foot_lift = 0.2 * std::fmin((t - start) / 0.3, 1.0);
+        return p;
+    };
+    sim.Run(1.0, lifted, [](BodyView* view) {
+        if (view->camera == 0) {
+            view->visibility[kLeftAnkle] = view->visibility[kLeftHeel] = view->visibility[kLeftToe] = 0.1;
+        }
+    });
+    // The other camera still sees it rise; its depth along that camera's ray is only roughly
+    // known, but it stays put instead of drifting away.
+    CHECK(sim.Error(kLeftAnkle, lifted(sim.time), sim.time) < 0.07);
+    Vec3 then, later;
+    sim.filter.Joint(kLeftAnkle, sim.time, &then);
+    sim.Run(1.0, lifted, [](BodyView* view) {
+        if (view->camera == 0) {
+            view->visibility[kLeftAnkle] = view->visibility[kLeftHeel] = view->visibility[kLeftToe] = 0.1;
+        }
+    });
+    sim.filter.Joint(kLeftAnkle, sim.time, &later);
+    CHECK(Length(later - then) < 0.02);
+    // Once both see it again, it is right.
+    sim.Run(0.5, lifted);
+    CHECK(sim.Error(kLeftAnkle, lifted(sim.time), sim.time) < 0.015);
+}
+
+void TestBodyLeftAndRightMixedUp()
+{
+    BodySimulation sim;
+    sim.Run(1.5, StandingStill);
+    // The right camera mixes up left and right for a second (as from behind), while the left
+    // foot steps forward.
+    const auto stepped = [](double) {
+        Person p;
+        p.left_foot_shift = {0.0, 0.0, -0.25};
+        return p;
+    };
+    sim.Run(1.0, stepped, [](BodyView* view) {
+        if (view->camera == 1) {
+            for (int j = 0; j < kJointCount; j += 2) {
+                std::swap(view->u[j], view->u[j + 1]);
+                std::swap(view->v[j], view->v[j + 1]);
+            }
+        }
+    });
+    CHECK(sim.Error(kLeftAnkle, stepped(0), sim.time) < 0.03);
+    CHECK(sim.Error(kRightAnkle, stepped(0), sim.time) < 0.03);
+    CHECK(sim.filter.TakeStats().swapped > 20);
+}
+
+void TestBodyLateFrames()
+{
+    // The right camera's frames arrive 30 ms late, after the left camera's newer ones.
+    BodySimulation sim;
+    std::vector<BodyView> late;
+    const double period = 1.0 / 26.0;
+    for (int i = 0; i < 78; ++i) {
+        const double t = sim.time + i * period;
+        const Person p;
+        sim.filter.Add(sim.View(0, p, t));
+        late.push_back(sim.View(1, p, t - 0.03));
+        if (late.size() > 1) {
+            sim.filter.Add(late[late.size() - 2]);
+        }
+    }
+    const double now = sim.time + 77 * period;
+    for (int j = 0; j < kJointCount; ++j) {
+        CHECK(sim.Error(j, Person{}, now) < 0.02);
+    }
+}
+
+void TestBodyNeedsTwoCamerasToStart()
+{
+    BodySimulation sim;
+    for (int i = 0; i < 26; ++i) {
+        sim.filter.Add(sim.View(0, Person{}, sim.time + i / 26.0));
+    }
+    Vec3 p;
+    CHECK(!sim.filter.Joint(kLeftHip, sim.time + 1.0, &p));
+    CHECK(!sim.filter.Waist(sim.time + 1.0).valid);
+}
+
+void TestBodyHoldsThenLetsGo()
+{
+    BodySimulation sim;
+    sim.Run(1.0, StandingStill);
+    bool holding = false;
+    Vec3 p;
+    CHECK(sim.filter.Joint(kLeftAnkle, sim.time + 1.0, &p, &holding));
+    CHECK(holding);  // nothing new for a second: held where it was
+    CHECK(Length(p - Person{}.Joint(kLeftAnkle)) < 0.015);
+    CHECK(!sim.filter.Joint(kLeftAnkle, sim.time + 6.0, &p));
+}
+
+
+// A whole session: the PS Moves through PSMoveServiceEx and two phones' frames, as the driver
+// gets them.
+struct SessionSimulation {
+    std::vector<CameraModel> truth{LookAt({-1.6, 1.1, -2.4}, {0.0, 1.0, 0.0}, 520.0, -0.05),
+                                   LookAt({1.7, 1.0, -2.2}, {0.0, 1.0, 0.0}, 500.0, -0.08)};
+    std::vector<uint32_t> ids{0x11114444, 0x2222BBBB};
+    BodySession session;
+    std::mt19937 random{9};
+    double time = 50.0;
+    double next_move = 50.0;
+    double move_latency = 0.04;
+    double frame_age = 0.12;
+    int moves_lit = 1;
+
+    // A slow loop through the room, about 0.3 m/s.
+    static Vec3 MovePath(double t)
+    {
+        return {0.8 * std::sin(0.35 * t), 1.2 + 0.7 * std::sin(0.23 * t + 1.0), 0.6 * std::sin(0.29 * t + 2.0)};
+    }
+
+    body_protocol::Frame MakeFrame(int camera, double at, const Person* person, bool ball)
+    {
+        std::normal_distribution<double> noise(0.0, 1.0);
+        body_protocol::Frame frame;
+        frame.camera = ids[camera];
+        frame.width = truth[camera].width;
+        frame.height = truth[camera].height;
+        frame.age_seconds = frame_age;
+        double u = 0.0, v = 0.0;
+        if (ball && truth[camera].Project(MovePath(at), &u, &v) && u > 0 && v > 0 && u < frame.width &&
+            v < frame.height) {
+            frame.flags |= body_protocol::kFlagBall;
+            frame.ball[0] = static_cast<float>((u + noise(random)) / frame.width);
+            frame.ball[1] = static_cast<float>((v + noise(random)) / frame.height);
+            frame.ball[2] = 0.02f;
+        }
+        if (person) {
+            frame.flags |= body_protocol::kFlagPose;
+            frame.points = body_protocol::kPoints;
+            for (int j = 0; j < kJointCount; ++j) {
+                truth[camera].Project(person->Joint(j), &u, &v);
+                float* p = frame.point[kJointLandmark[j]];
+                p[0] = static_cast<float>((u + noise(random)) / frame.width);
+                p[1] = static_cast<float>((v + noise(random)) / frame.height);
+                p[3] = 0.9f;
+            }
+        }
+        return frame;
+    }
+
+    void Run(double seconds, const Person* person, bool ball = true)
+    {
+        const double period = 1.0 / 26.0;
+        for (double end = time + seconds; time < end; time += period) {
+            // PSMoveServiceEx: 60 positions a second, each arriving a little after the PS Eye saw it.
+            for (; next_move <= time; next_move += 1.0 / 60.0) {
+                for (int id = 0; id < moves_lit; ++id) {
+                    session.AddMove({next_move + move_latency, id, MovePath(next_move) + Vec3{0.3 * id, 0, 0}, true});
+                }
+            }
+            for (int camera = 0; camera < 2; ++camera) {
+                const double at = time - frame_age + camera * period / 2;
+                if (session.AddFrame(MakeFrame(camera, at, person, ball), at + frame_age)) {
+                    ++fresh;
+                }
+            }
+        }
+    }
+
+    int fresh = 0;
+};
+
+void TestSessionCalibratesAndChecks()
+{
+    SessionSimulation sim;
+    sim.Run(1.0, nullptr);
+    CHECK(sim.fresh == 2);
+    sim.session.StartCalibration();
+    sim.Run(60.0, nullptr);
+    const BodySession::Progress progress = sim.session.CalibrationProgress();
+    CHECK(progress.enough);
+    CHECK(progress.ambiguous == 0);
+    const std::vector<BodySession::CameraCalibration> results = sim.session.FinishCalibration();
+    CHECK(results.size() == 2);
+    for (size_t i = 0; i < results.size(); ++i) {
+        const int camera = results[i].id == sim.ids[0] ? 0 : 1;
+        CHECK(results[i].result.ok);
+        CHECK(Length(results[i].result.camera.position - sim.truth[camera].position) < 0.03);
+        CHECK(results[i].result.rms_px < 2.5);
+        CHECK(sim.session.Calibrated(results[i].id));
+    }
+
+    // Afterwards the cameras put the Move's bulb where PSMoveServiceEx has it.
+    sim.session.TakeReport(sim.time);
+    sim.Run(10.0, nullptr);
+    BodySession::Report report = sim.session.TakeReport(sim.time);
+    CHECK(report.checks > 100);
+    CHECK(report.check_mean_m < 0.015);
+    CHECK(report.cameras.size() == 2);
+    CHECK_NEAR(report.cameras[0].frames_per_second, 26.0, 0.5);
+    CHECK_NEAR(report.cameras[0].age_ms, 120.0, 0.5);
+    CHECK(report.cameras[0].ball_share > 0.5);
+    CHECK(report.cameras[0].paired_share > 0.9);  // 19 ms apart
+
+    // And the body comes out of the person's points.
+    const Person person;
+    sim.Run(2.0, &person, false);
+    const TrackerPose waist = sim.session.Waist(sim.time);
+    CHECK(waist.valid);
+    CHECK(Length(waist.position - Vec3{0.0, 0.95, 0.0}) < 0.03);
+    report = sim.session.TakeReport(sim.time);
+    CHECK(report.cameras[0].person_share > 0.99);
+    CHECK(report.filter.started == kJointCount);
+}
+
+void TestSessionNeedsOneMove()
+{
+    SessionSimulation sim;
+    sim.moves_lit = 2;
+    sim.session.StartCalibration();
+    sim.Run(10.0, nullptr);
+    const BodySession::Progress progress = sim.session.CalibrationProgress();
+    CHECK(progress.ambiguous > 100);
+    CHECK(progress.cameras.size() == 2 && progress.cameras[0].samples == 0);
+    const std::vector<BodySession::CameraCalibration> results = sim.session.FinishCalibration();
+    CHECK(!results[0].result.ok && !results[0].result.problem.empty());
+}
+
+void TestSessionForgetsACalibrationThatNoLongerFits()
+{
+    SessionSimulation sim;
+    sim.session.SetCamera(sim.ids[0], sim.truth[0]);
+    sim.session.SetCamera(sim.ids[1], sim.truth[1]);
+    sim.Run(0.5, nullptr);
+    CHECK(sim.session.Calibrated(sim.ids[0]));
+    // The phone was turned: its picture is now the other way round.
+    body_protocol::Frame frame = sim.MakeFrame(0, sim.time, nullptr, false);
+    std::swap(frame.width, frame.height);
+    sim.session.AddFrame(frame, sim.time + sim.frame_age);
+    CHECK(!sim.session.Calibrated(sim.ids[0]));
+    CHECK(sim.session.Calibrated(sim.ids[1]));
+}
+
+}  // namespace
+
+int main()
+{
+    TestBodyPacket();
+    TestCameraProjectsAndCastsRays();
+    TestCalibrationFindsTheCamera();
+    TestCalibrationNeedsAgreeingSamples();
+    TestTriangulatesFromTwoCameras();
+    TestBodyStandingStill();
+    TestBodyTurnsAndWalks();
+    TestBodyFootHiddenFromOneCamera();
+    TestBodyLeftAndRightMixedUp();
+    TestBodyLateFrames();
+    TestBodyNeedsTwoCamerasToStart();
+    TestBodyHoldsThenLetsGo();
+    TestSessionCalibratesAndChecks();
+    TestSessionNeedsOneMove();
+    TestSessionForgetsACalibrationThatNoLongerFits();
+    if (g_failures == 0) {
+        std::printf("All body tests passed\n");
+        return 0;
+    }
+    std::printf("%d check(s) failed\n", g_failures);
+    return 1;
+}
