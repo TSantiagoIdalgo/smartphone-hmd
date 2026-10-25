@@ -1,11 +1,13 @@
 """Tests for body_tracker.py: python -m unittest discover -s tools -p "test_*.py"
 
-The video tests need PyAV and NumPy, and the last one MediaPipe and the internet (it downloads the
-pose model and a photo of a person); each is skipped when what it needs is missing.
+The video tests need PyAV and NumPy, and the last ones LiteRT, OpenCV and the internet (they
+download the pose model and a photo of a person); the comparison with MediaPipe also needs
+MediaPipe. Each is skipped when what it needs is missing.
 """
 import hashlib
 import io
 import json
+import math
 import tempfile
 import time
 import unittest
@@ -15,6 +17,11 @@ from pathlib import Path
 
 import body_tracker as bt
 
+try:
+    import ai_edge_litert
+    import cv2
+except ImportError:
+    ai_edge_litert = cv2 = None
 try:
     import mediapipe
 except ImportError:
@@ -28,7 +35,10 @@ PHOTO_URL = "https://storage.googleapis.com/mediapipe-assets/pose.jpg"
 PHOTO_SHA256 = "c8a830ed683c0276d713dd5aeda28f415f10cd6291972084a40d0d8b934ed62b"
 needs_video = unittest.skipIf(bt.av is None or bt.np is None or "libx264" not in bt.av.codecs_available,
                               "needs NumPy and PyAV with libx264, to make the phone's video")
-needs_model = unittest.skipIf(bt.av is None or bt.np is None or mediapipe is None, "needs PyAV, NumPy and MediaPipe")
+needs_numpy = unittest.skipIf(bt.np is None, "needs NumPy")
+needs_model = unittest.skipIf(bt.av is None or bt.np is None or ai_edge_litert is None,
+                              "needs PyAV, NumPy, LiteRT and OpenCV")
+needs_mediapipe = unittest.skipIf(mediapipe is None, "needs MediaPipe, to compare with")
 
 
 def standing_pose(visibility=0.9):
@@ -152,6 +162,48 @@ class ClockTest(unittest.TestCase):
         self.assertEqual(clock.best(), (70, 40))
 
 
+@needs_numpy
+class PoseStepsTest(unittest.TestCase):
+    """The steps around the models, on made-up numbers."""
+
+    def test_one_anchor_per_detector_box(self):
+        anchors = bt.ssd_anchors()
+        self.assertEqual(anchors.shape, (2254, 2))
+        bt.np.testing.assert_allclose(anchors[0], (0.5 / 28, 0.5 / 28))
+        bt.np.testing.assert_allclose(anchors[-1], (6.5 / 7, 6.5 / 7))
+
+    def test_square_around_a_person(self):
+        # Standing: the size point is straight above the hips, so no turn.
+        x, y, w, h, rotation = bt.pose_square((320, 300), (320, 200), 640, 480)
+        self.assertEqual((x, y), (0.5, 300 / 480))
+        self.assertAlmostEqual(w * 640, 250)  # twice the distance, and a quarter more
+        self.assertAlmostEqual(h * 480, 250)
+        self.assertAlmostEqual(rotation, 0)
+        # Lying with the head to the right: a quarter turn.
+        self.assertAlmostEqual(bt.pose_square((320, 300), (420, 300), 640, 480)[4], math.pi / 2)
+
+    def test_heatmap_moves_a_point_to_its_peak(self):
+        heatmap = bt.np.full((64, 64, 2), -20.0, dtype=bt.np.float32)
+        heatmap[20, 30, 0] = 10.0  # sure, near the first point
+        heatmap[40, 40, 1] = -1.0  # unsure: the second point stays
+        points = bt.np.array([[31 / 64, 22 / 64, 0.0], [41 / 64, 41 / 64, 0.0]])
+        bt.refine_from_heatmap(points, heatmap)
+        self.assertAlmostEqual(points[0, 0], 30 / 64, places=4)
+        self.assertAlmostEqual(points[0, 1], 20 / 64, places=4)
+        self.assertEqual(tuple(points[1, :2]), (41 / 64, 41 / 64))
+
+    def test_smoothing_steadies_a_still_point_and_follows_a_moving_one(self):
+        smoother = bt.PoseSmoother()
+        point = bt.np.array([[0.5, 0.5, 0.0, 0.9, 0.9]])
+        self.assertEqual(smoother.apply(point, 1000, 640, 480, 200).tolist(), point.tolist(), "the first passes")
+        jitter = point + [[0.002, 0, 0, -0.5, 0]]
+        steady = smoother.apply(jitter, 1033, 640, 480, 200)
+        self.assertLess(abs(steady[0, 0] - 0.5), 0.001, "a small wobble is mostly smoothed away")
+        self.assertAlmostEqual(steady[0, 3], 0.85, msg="visibility moves a tenth of the way")
+        jump = smoother.apply(point + [[0.2, 0, 0, 0, 0]], 1066, 640, 480, 200)
+        self.assertGreater(jump[0, 0], 0.65, "a quick move comes through")
+
+
 class TrackerTest(unittest.TestCase):
     def setUp(self):
         self.sent = []
@@ -266,7 +318,7 @@ class TrackerTest(unittest.TestCase):
 
 @needs_model
 class RealPoseTest(unittest.TestCase):
-    """MediaPipe on a real photo of a person, which it must find standing upright."""
+    """The pose model on a real photo of a person, which it must find standing upright."""
 
     @classmethod
     def setUpClass(cls):
@@ -288,20 +340,46 @@ class RealPoseTest(unittest.TestCase):
         self.assertLess(nose[1], min(h[1] for h in hips), "upright: the head is above the hips")
 
     def test_finds_the_person(self):
-        pose = bt.MediaPipePose(self.model)
+        pose = bt.LiteRtPose(self.model, threads=2)
         try:
             points = pose.detect(self.upright, 0)
+            self.assertEqual(pose.detect(bt.np.zeros_like(self.upright), 33), [], "no one in a black picture")
         finally:
             pose.close()
         self.assertEqual(len(points), 33)
         self.assert_standing(points)
+
+    @needs_mediapipe
+    def test_same_points_as_mediapipe(self):
+        # The person moves, turns and is gone for a moment, so the following, the detector and the
+        # smoothing all take part.
+        height, width = self.upright.shape[:2]
+        frames = []
+        for i in range(45):
+            turn = cv2.getRotationMatrix2D((width / 2, height / 2), 20 * math.sin(i / 8), 1 + 0.1 * math.sin(i / 13))
+            turn[:, 2] += (50 * math.sin(i / 6), 0)
+            frames.append(cv2.warpAffine(self.upright, turn, (width, height)) if not 25 <= i < 30
+                          else bt.np.zeros_like(self.upright))
+        ours, theirs = bt.LiteRtPose(self.model, threads=2), bt.MediaPipePose(self.model)
+        try:
+            pairs = [(ours.detect(f, 1000 + i * 33), theirs.detect(f, 1000 + i * 33)) for i, f in enumerate(frames)]
+        finally:
+            ours.close()
+            theirs.close()
+        self.assertEqual([bool(a) for a, b in pairs], [bool(b) for a, b in pairs], "a person in the same frames")
+        both = [(bt.np.array(a), bt.np.array(b)) for a, b in pairs if a]
+        self.assertEqual(len(both), 40)
+        apart = bt.np.array([bt.np.abs(a[:, :2] - b[:, :2]) for a, b in both])
+        self.assertLess(apart.mean(), 0.002, "on average within a fifth of a percent of the picture")
+        self.assertLess(apart.max(), 0.03)
+        self.assertLess(max(bt.np.abs(a[:, 3] - b[:, 3]).max() for a, b in both), 0.05, "visibility")
 
     @needs_video
     def test_finds_the_person_sent_as_video(self):
         # Held upside down: the phone says to turn it half a turn.
         sensor = bt.np.ascontiguousarray(bt.np.rot90(self.upright, 2))
         sent = []
-        tracker = bt.Tracker(lambda data, address: sent.append(data), lambda: bt.MediaPipePose(self.model),
+        tracker = bt.Tracker(lambda data, address: sent.append(data), lambda: bt.LiteRtPose(self.model, threads=2),
                              out=lambda text: None, threaded=False)
         phone = FakePhone()
         for i, frame in enumerate(encode([sensor] * 10)):

@@ -81,9 +81,9 @@ jobs:
       - name: Install
         shell: bash
         run: |
-          # MediaPipe needs these on Linux; Windows has what it needs.
+          # MediaPipe, which the tests compare with, needs these on Linux; Windows has what it needs.
           if [ "$RUNNER_OS" = Linux ]; then sudo apt-get update -q && sudo apt-get install -y -q libegl1 libgles2; fi
-          pip install -r tools/requirements-body.txt
+          pip install -r tools/requirements-body.txt mediapipe
       - name: Test
         run: python -m unittest discover -s tools -p "test_*.py" -v
 

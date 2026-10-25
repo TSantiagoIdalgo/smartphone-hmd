@@ -2,14 +2,15 @@
 """Body tracking on the PC: finds the pose of the person the body camera phones see.
 
 The phones (the "HMD Cámara" app) send their camera's video here. For each phone this decodes it,
-finds the person's 33 pose points with MediaPipe on the CPU and sends them back to the phone, which
-draws them on its screen. Every 2 s it prints per phone: frames per second, how often it sees a
-person, the model's time per frame, the delay from the camera to the finished pose, lost frames,
-and how sure it is of the hips, knees and ankles.
+finds the person's 33 pose points with MediaPipe's pose model, run on several CPU cores with
+LiteRT, and sends them back to the phone, which draws them on its screen. Every 2 s it prints per
+phone: frames per second, how often it sees a person, the model's time per frame, the delay from
+the camera to the finished pose, lost frames, and how sure it is of the hips, knees and ankles.
 
     pip install -r tools/requirements-body.txt
     python tools/body_tracker.py                   # watch
-    python tools/body_tracker.py --model lite      # quicker model, less exact
+    python tools/body_tracker.py --model heavy     # more exact model, slower
+    python tools/body_tracker.py --threads 8       # more cores per camera
     python tools/body_tracker.py --record a.jsonl  # also save every pose, to replay later
 
 The first run downloads the pose model next to this script. On Windows, allow Python through the
@@ -18,6 +19,7 @@ firewall on private networks when asked.
 import argparse
 import hashlib
 import json
+import math
 import os
 import socket
 import struct
@@ -25,6 +27,7 @@ import sys
 import threading
 import time
 import urllib.request
+import zipfile
 from pathlib import Path
 
 os.environ.setdefault("GLOG_minloglevel", "2")  # MediaPipe's start-up chatter
@@ -243,7 +246,7 @@ class Stats:
                 parts.append(f"pose lista a los {delays[len(delays) // 2]:.0f} ms (máx {delays[-1]:.0f})")
             parts.append(f"perdidos {self.lost}")
             if self.skipped:
-                parts.append(f"saltados {self.skipped} (la CPU no da abasto)")
+                parts.append(f"saltados {self.skipped} (el modelo seguía con el anterior)")
             if self.persons:
                 parts.append(" ".join(f"{k} {100 * sum(v) / len(v):.0f}%" for k, v in self.visibility.items()))
             sync = clock.best()
@@ -485,8 +488,231 @@ class Tracker:
                 self.record.write(json.dumps(line) + "\n")
 
 
+def ssd_anchors():
+    """The centres of the pose detector's 2254 boxes, in the order of its output (x, y in 0..1)."""
+    centres = []
+    # 28x28 cells of 2 boxes, 14x14 of 2 and 7x7 of 6: the 5 layers, those of the same stride together.
+    for cells, per_cell in ((28, 2), (14, 2), (7, 6)):
+        for y in range(cells):
+            for x in range(cells):
+                centres += [((x + 0.5) / cells, (y + 0.5) / cells)] * per_cell
+    return np.array(centres, dtype=np.float32)
+
+
+def sigmoid(x):
+    return 0.5 + 0.5 * np.tanh(0.5 * x)  # 1 / (1 + e^-x), without overflowing for large -x
+
+
+def pose_square(centre, scale, width, height):
+    """The square around a person that the landmark model looks at, from the centre of their hips
+    and a point whose distance gives their size and whose direction which way they stand (pixels).
+    As MediaPipe's rects: centre and size over the picture's width and height, rotation in radians."""
+    (x0, y0), (x1, y1) = centre, scale
+    size = 2 * math.hypot(x1 - x0, y1 - y0) * 1.25  # the margin the model was trained with
+    rotation = math.pi / 2 - math.atan2(y0 - y1, x1 - x0)
+    rotation -= 2 * math.pi * math.floor((rotation + math.pi) / (2 * math.pi))
+    return x0 / width, y0 / height, size / width, size / height, rotation
+
+
+def refine_from_heatmap(points, heatmap, kernel=7, min_confidence=0.5):
+    """Moves each point (x, y over the model's picture) to the weighted centre of the model's
+    heatmap around it, where the heatmap is sure enough. In place."""
+    rows, cols, count = heatmap.shape
+    col = (points[:, 0] * cols).astype(int)  # towards zero, as MediaPipe's C++ does
+    row = (points[:, 1] * rows).astype(int)
+    inside = (col >= 0) & (col < cols) & (row >= 0) & (row < rows)
+    offsets = np.arange(kernel) - kernel // 2
+    r, c = row[:, None] + offsets, col[:, None] + offsets
+    # The window shrinks at the heatmap's edges.
+    valid = ((r >= 0) & (r < rows))[:, :, None] & ((c >= 0) & (c < cols))[:, None, :]
+    values = heatmap[np.clip(r, 0, rows - 1)[:, :, None], np.clip(c, 0, cols - 1)[:, None, :],
+                     np.arange(count)[:, None, None]]
+    confidence = sigmoid(values) * valid
+    total = confidence.sum(axis=(1, 2))
+    refine = inside & (confidence.max(axis=(1, 2)) >= min_confidence) & (total > 0)
+    points[refine, 0] = (confidence * c[:, None, :]).sum(axis=(1, 2))[refine] / cols / total[refine]
+    points[refine, 1] = (confidence * r[:, :, None]).sum(axis=(1, 2))[refine] / rows / total[refine]
+
+
+class PoseSmoother:
+    """MediaPipe's smoothing of one person's points from frame to frame: a low-pass filter on how
+    visible each point is, and a one-euro filter on where it is, which smooths a point that stands
+    still a lot and one that moves quickly little. Positions are filtered in pixels, against the
+    person's size."""
+
+    MIN_CUTOFF, BETA, SPEED_CUTOFF = 0.05, 80.0, 1.0
+    VISIBILITY_ALPHA = 0.1
+
+    def __init__(self):
+        self.last_ns = -1
+        self.frequency = 30.0
+        self.raw = self.value = self.speed = self.visibility = None
+
+    def alpha(self, cutoff):
+        return 1 / (1 + self.frequency / (2 * math.pi * cutoff))
+
+    def apply(self, points, timestamp_ms, width, height, person_size):
+        """points: rows of x, y, z, visibility, presence as the model gives them; returns them smoothed."""
+        out = points.copy()
+        visibility = points[:, 3]
+        if self.visibility is not None:
+            visibility = self.VISIBILITY_ALPHA * visibility + (1 - self.VISIBILITY_ALPHA) * self.visibility
+        out[:, 3] = self.visibility = visibility
+
+        now_ns = timestamp_ms * 1_000_000
+        if now_ns <= self.last_ns:
+            return out
+        if self.last_ns != 0 and now_ns != 0:
+            self.frequency = 1e9 / (now_ns - self.last_ns)
+        self.last_ns = now_ns
+        scale = np.array([width, height, width], dtype=np.float64)
+        values = points[:, :3] * scale
+        if self.raw is None:
+            self.value, self.speed = values, np.zeros_like(values)
+        else:
+            change = (values - self.raw) * self.frequency / person_size
+            self.speed = self.speed + self.alpha(self.SPEED_CUTOFF) * (change - self.speed)
+            self.value = self.value + self.alpha(self.MIN_CUTOFF + self.BETA * np.abs(self.speed)) * (values - self.value)
+        self.raw = values
+        out[:, :3] = self.value / scale
+        return out
+
+
+class LiteRtPose:
+    """MediaPipe's pose landmarker for a video, one person and 33 points, done here step by step and
+    run on LiteRT, which unlike MediaPipe's Python package can spread each model over several cores.
+
+    The model file holds two models: a person detector, run only while no one is being followed,
+    and the landmark model, run on a square around the person that the last frame's points
+    predict. The steps between them follow MediaPipe's pose landmarker so the points come out the
+    same; test_body_tracker.py compares the two.
+    """
+
+    DETECTOR_SIZE, LANDMARKS_SIZE = 224, 256
+    MIN_DETECTION, MIN_PRESENCE, MIN_OVERLAP = 0.5, 0.5, 0.3
+
+    def __init__(self, model_path, threads=4):
+        import cv2
+        from ai_edge_litert.interpreter import Interpreter
+
+        self.cv2 = cv2
+        with zipfile.ZipFile(model_path) as bundle:
+            self.detector = Interpreter(model_content=bundle.read("pose_detector.tflite"), num_threads=threads)
+            self.landmarker = Interpreter(model_content=bundle.read("pose_landmarks_detector.tflite"),
+                                          num_threads=threads)
+        for model in (self.detector, self.landmarker):
+            model.allocate_tensors()
+
+        def output(model, shape):  # found by shape, as the names are just Identity, Identity_1…
+            return next(d["index"] for d in model.get_output_details() if tuple(d["shape"]) == shape)
+
+        self.detector_in = self.detector.get_input_details()[0]["index"]
+        self.boxes_out = output(self.detector, (1, 2254, 12))
+        self.scores_out = output(self.detector, (1, 2254, 1))
+        self.landmarker_in = self.landmarker.get_input_details()[0]["index"]
+        self.points_out = output(self.landmarker, (1, 195))
+        self.presence_out = output(self.landmarker, (1, 1))
+        self.heatmap_out = output(self.landmarker, (1, 64, 64, 39))
+        self.anchors = ssd_anchors()
+        self.square = None  # where to look for the person in the next frame
+        self.smoother = None
+        self.picture_size = None
+
+    def detect(self, rgb, timestamp_ms):
+        """The points, (x, y, z, visibility, presence) each, or [] if there is no one."""
+        height, width = rgb.shape[:2]
+        if (width, height) != self.picture_size:
+            self.picture_size = (width, height)
+            self.smoother = None
+        square = self.square or self.find_person(rgb)
+        found = self.landmarks(rgb, square) if square else None
+        if found is None:
+            self.square = self.smoother = None
+            return []
+        points, self.square = found
+        if self.smoother is None:
+            self.smoother = PoseSmoother()
+        person_size = (self.square[2] * width + self.square[3] * height) / 2
+        points = self.smoother.apply(points, timestamp_ms, width, height, person_size)
+        return [tuple(p) for p in points.tolist()]
+
+    def close(self):
+        self.detector = self.landmarker = None
+
+    def crop(self, rgb, rect, size, border):
+        """The rotated rect (centre x, y, width, height in pixels, rotation) as a size x size picture."""
+        cx, cy, w, h, rotation = rect
+        corners = self.cv2.boxPoints(((cx, cy), (w, h), math.degrees(rotation)))
+        target = np.array([[0, size], [0, 0], [size, 0], [size, size]], dtype=np.float32)
+        matrix = self.cv2.getPerspectiveTransform(corners, target)
+        picture = self.cv2.warpPerspective(rgb, matrix, (size, size), flags=self.cv2.INTER_LINEAR, borderMode=border)
+        return picture.astype(np.float32)
+
+    def find_person(self, rgb):
+        """The square around the most likely person in the whole picture, or None."""
+        height, width = rgb.shape[:2]
+        side = max(width, height)
+        size = self.DETECTOR_SIZE
+        # The whole picture, with black bars to make it square.
+        picture = self.crop(rgb, (width / 2, height / 2, side, side, 0.0), size, self.cv2.BORDER_CONSTANT)
+        self.detector.set_tensor(self.detector_in, (picture * (2 / 255) - 1)[None])
+        self.detector.invoke()
+        scores = sigmoid(np.clip(self.detector.get_tensor(self.scores_out)[0, :, 0], -100, 100))
+        found = np.flatnonzero(scores >= self.MIN_DETECTION)
+        if not found.size:
+            return None
+        found = found[np.argsort(-scores[found], kind="stable")]
+        raw = self.detector.get_tensor(self.boxes_out)[0, found] / size
+        anchors = self.anchors[found]
+        centres, half = raw[:, 0:2] + anchors, raw[:, 2:4] / 2
+        boxes = np.hstack([centres - half, centres + half])
+        keypoints = raw[:, 4:12].reshape(-1, 4, 2) + anchors[:, None]
+        # The best box, averaged with those that overlap it, weighted by their scores.
+        low, high = np.maximum(boxes[0, :2], boxes[:, :2]), np.minimum(boxes[0, 2:], boxes[:, 2:])
+        common = np.prod(np.clip(high - low, 0, None), axis=1)
+        areas = np.prod(boxes[:, 2:] - boxes[:, :2], axis=1)
+        near = common / (areas[0] + areas - common) > self.MIN_OVERLAP
+        weights = scores[found][near]
+        centre, scale = (keypoints[near, :2] * weights[:, None, None]).sum(axis=0) / weights.sum()
+        # Keypoint 0 is the centre of the hips, 1 gives the size of the whole body; to pixels
+        # of the picture, without the bars.
+        bars = np.array([side - width, side - height]) / 2
+        return pose_square(centre * side - bars, scale * side - bars, width, height)
+
+    def landmarks(self, rgb, square):
+        """(the points over the picture, the square to look at in the next frame), or None if the
+        model sees no one there."""
+        height, width = rgb.shape[:2]
+        x_centre, y_centre, w, h, rotation = square
+        if w * width < 1:
+            return None
+        size = self.LANDMARKS_SIZE
+        picture = self.crop(rgb, (x_centre * width, y_centre * height, w * width, h * height, rotation), size,
+                            self.cv2.BORDER_REPLICATE)
+        self.landmarker.set_tensor(self.landmarker_in, (picture * (1 / 255))[None])
+        self.landmarker.invoke()
+        if self.landmarker.get_tensor(self.presence_out)[0, 0] <= self.MIN_PRESENCE:
+            return None
+        raw = self.landmarker.get_tensor(self.points_out).reshape(39, 5)
+        points = raw[:, :3].astype(np.float64) / size
+        refine_from_heatmap(points, self.landmarker.get_tensor(self.heatmap_out)[0])
+        # From the square back to the whole picture.
+        x, y = points[:, 0] - 0.5, points[:, 1] - 0.5
+        cos, sin = math.cos(rotation), math.sin(rotation)
+        points[:, 0] = (cos * x - sin * y) * w + x_centre
+        points[:, 1] = (sin * x + cos * y) * h + y_centre
+        points[:, 2] *= w
+        # Points 33 and 34 are not part of the pose: like the detector's, they say where the
+        # person will be next.
+        pixels = points[33:35, :2] * (width, height)
+        next_square = pose_square(pixels[0], pixels[1], width, height)
+        visibility, presence = sigmoid(raw[:33, 3:4]), sigmoid(raw[:33, 4:5])
+        return np.hstack([points[:33], visibility, presence]), next_square
+
+
 class MediaPipePose:
-    """MediaPipe's pose landmarker for a video: one person, 33 points."""
+    """MediaPipe's pose landmarker for a video: one person, 33 points. The same as LiteRtPose but
+    on one core, as MediaPipe's Python package has no setting for more."""
 
     def __init__(self, model_path):
         import mediapipe as mp
@@ -529,17 +755,21 @@ def ensure_model(name, folder=MODEL_DIR, out=print):
     return path
 
 
-def run(port, record_path, model):
+def run(port, record_path, model, threads, engine):
     model_path = ensure_model(model)
-    MediaPipePose(model_path).close()  # fail here, clearly, rather than on the first frame
+    if engine == "mediapipe":
+        make_pose, cores = (lambda: MediaPipePose(model_path)), "1 núcleo, con MediaPipe"
+    else:
+        make_pose, cores = (lambda: LiteRtPose(model_path, threads)), f"{threads} núcleos por cámara"
+    make_pose().close()  # fail here, clearly, rather than on the first frame
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     # Room for a burst: a whole picture is tens of packets at once.
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
     sock.bind(("0.0.0.0", port))
     sock.settimeout(0.05)
     record = open(record_path, "w", encoding="utf-8") if record_path else None
-    tracker = Tracker(sock.sendto, lambda: MediaPipePose(model_path), record=record)
-    print(f"Modelo «{model}» listo. Esperando las cámaras en el puerto UDP {port}… (Ctrl+C para salir)")
+    tracker = Tracker(sock.sendto, make_pose, record=record)
+    print(f"Modelo «{model}» listo ({cores}). Esperando las cámaras en el puerto UDP {port}… (Ctrl+C para salir)")
     try:
         while True:
             tracker.tick(time.perf_counter_ns())
@@ -564,16 +794,27 @@ def main():
     parser.add_argument("--port", type=int, default=PORT)
     parser.add_argument("--model", choices=sorted(MODEL_SHA256), default="full",
                         help="lite is quicker, heavy more exact; full (default) is in between")
+    parser.add_argument("--threads", type=int, default=4, help="cores for each camera's pose model (default 4)")
+    parser.add_argument("--engine", choices=("litert", "mediapipe"), default="litert",
+                        help="mediapipe runs the same model on one core (needs pip install mediapipe)")
     parser.add_argument("--record", metavar="FILE", help="save every pose as one JSON line")
     args = parser.parse_args()
+    if args.threads < 1:
+        parser.error("--threads must be 1 or more")
     try:
-        import mediapipe  # noqa: F401
+        if args.engine == "mediapipe":
+            import mediapipe  # noqa: F401
+        else:
+            import ai_edge_litert  # noqa: F401
+            import cv2  # noqa: F401
+        missing = av is None or np is None
     except ImportError:
-        mediapipe = None
-    if av is None or np is None or mediapipe is None:
-        print("Faltan librerías. Instálalas con:  pip install -r tools/requirements-body.txt")
+        missing = True
+    if missing:
+        print("Faltan librerías. Instálalas con:  pip install -r tools/requirements-body.txt"
+              + ("  y  pip install mediapipe" if args.engine == "mediapipe" else ""))
         return 1
-    run(args.port, args.record, args.model)
+    run(args.port, args.record, args.model, args.threads, args.engine)
     return 0
 
 
