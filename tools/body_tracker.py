@@ -83,7 +83,8 @@ MODEL_SHA256 = {
 }
 # A frame this far behind the newest means the phone's app started again and counts from 1.
 RESTART_GAP = 300
-KEYFRAME_REQUEST_EVERY_NS = 300_000_000
+# Often enough that a whole picture lost on the way, the frames' largest, costs a few frames, not ten.
+KEYFRAME_REQUEST_EVERY_NS = 100_000_000
 SNAPSHOT_EVERY_NS = 2_000_000_000
 
 
@@ -231,6 +232,7 @@ class Stats:
         self.frames = 0
         self.bytes = 0
         self.lost = 0
+        self.discarded = 0  # frames that came while waiting for a whole picture after a loss
         self.poses = 0
         self.persons = 0
         self.balls = 0
@@ -262,6 +264,8 @@ class Stats:
                 parts.append(f"llega a los {arrivals[len(arrivals) // 2]:.0f} ms")
                 parts.append(f"pose lista a los {delays[len(delays) // 2]:.0f} ms (máx {delays[-1]:.0f})")
             parts.append(f"perdidos {self.lost}")
+            if self.discarded:
+                parts.append(f"descartados {self.discarded} (esperando un cuadro completo)")
             if self.skipped:
                 parts.append(f"saltados {self.skipped} (el modelo seguía con el anterior)")
             if self.persons:
@@ -448,12 +452,12 @@ class Tracker:
         # After a loss the frames that follow only make sense on top of the lost one: skip them
         # until a whole picture arrives.
         if camera.waiting_keyframe:
-            self.request_keyframe(camera, arrived_ns)
+            self.discard(camera, arrived_ns)
             return
         worked, image = camera.decode(frame["data"])
         if not worked:
             camera.waiting_keyframe = True
-            self.request_keyframe(camera, arrived_ns)
+            self.discard(camera, arrived_ns)
             return
         if image is None:
             return
@@ -466,6 +470,11 @@ class Tracker:
         if camera.worker is None:
             camera.worker = PoseWorker(self.make_pose, lambda pose, j, c=camera: self.run_pose(c, pose, j), camera.stats)
         camera.worker.submit(job)
+
+    def discard(self, camera, now_ns):
+        with camera.stats.lock:
+            camera.stats.discarded += 1
+        self.request_keyframe(camera, now_ns)
 
     def request_keyframe(self, camera, now_ns):
         if now_ns >= camera.next_keyframe_request_ns:

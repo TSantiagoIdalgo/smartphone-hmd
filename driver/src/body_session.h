@@ -103,15 +103,14 @@ private:
         bool calibrated = false;
         CameraModel model;
         int index = -1;  // in the filter
-        std::deque<double> recent;  // the newest frames' times
         Sighting ball;
         std::vector<CalibrationSample> samples;
         // Report counters.
         int frames = 0;
         int persons = 0;
         int balls = 0;
-        int paired = 0;
         std::vector<double> ages;
+        std::vector<double> times;  // when the frames were taken, sorted
     };
 
     // Where the Move was at `time`, and how fast it went; false if no single Move was tracked then.

@@ -306,16 +306,17 @@ class TrackerTest(unittest.TestCase):
 
         seqs = [bt.parse_body(data)["seq"] for data in self.sent_of_type(bt.TYPE_BODY)]
         self.assertEqual(seqs, [1, 2, 3] + list(range(11, 26)), "frames 5-10 build on the lost one")
-        self.assertEqual(len(self.sent_of_type(bt.TYPE_KEYFRAME_REQUEST)), 1)
+        # Asked at once, and again 100 ms later in case the whole picture went missing too.
+        self.assertEqual(len(self.sent_of_type(bt.TYPE_KEYFRAME_REQUEST)), 2)
         self.tracker.tick(0)
         self.tracker.tick(2 * SECOND)
-        self.assertIn("perdidos 1", self.lines[-1])
+        self.assertIn("perdidos 1, descartados 6 (esperando un cuadro completo)", self.lines[-1])
 
     @needs_video
     def test_a_phone_joining_late_is_asked_for_a_whole_picture(self):
         encoded = encode([marked_picture()] * 12, gop=10)
         self.stream(encoded[2:], 0)  # its first frame builds on frames it never sent here
-        self.assertEqual(len(self.sent_of_type(bt.TYPE_KEYFRAME_REQUEST)), 1)
+        self.assertEqual(len(self.sent_of_type(bt.TYPE_KEYFRAME_REQUEST)), 2)
         self.assertEqual([bt.parse_body(d)["seq"] for d in self.sent_of_type(bt.TYPE_BODY)], [9, 10])
 
     @needs_video

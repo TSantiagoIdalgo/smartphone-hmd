@@ -478,6 +478,7 @@ struct SessionSimulation {
     double next_move = 50.0;
     double move_latency = 0.04;
     double frame_age = 0.12;
+    double second_camera_later = 0.0;  // its frames arrive this much older
     int moves_lit = 1;
 
     // A slow loop through the room, about 0.3 m/s.
@@ -493,7 +494,7 @@ struct SessionSimulation {
         frame.camera = ids[camera];
         frame.width = truth[camera].width;
         frame.height = truth[camera].height;
-        frame.age_seconds = frame_age;
+        frame.age_seconds = frame_age + camera * second_camera_later;
         double u = 0.0, v = 0.0;
         if (ball && truth[camera].Project(MovePath(at), &u, &v) && u > 0 && v > 0 && u < frame.width &&
             v < frame.height) {
@@ -527,8 +528,9 @@ struct SessionSimulation {
                 }
             }
             for (int camera = 0; camera < 2; ++camera) {
-                const double at = time - frame_age + camera * period / 2;
-                if (session.AddFrame(MakeFrame(camera, at, person, ball), at + frame_age)) {
+                const double age = frame_age + camera * second_camera_later;
+                const double at = time - age + camera * period / 2;
+                if (session.AddFrame(MakeFrame(camera, at, person, ball), at + age)) {
                     ++fresh;
                 }
             }
@@ -609,6 +611,23 @@ void TestSessionForgetsACalibrationThatNoLongerFits()
     CHECK(sim.session.Calibrated(sim.ids[1]));
 }
 
+
+void TestSessionPairsFramesWhicheverArrivesFirst()
+{
+    // As the two phones of the first test: one's frames arrive 20 ms older than the other's.
+    SessionSimulation sim;
+    sim.second_camera_later = 0.02;
+    sim.Run(1.0, nullptr);
+    sim.session.TakeReport(sim.time);
+    sim.Run(10.0, nullptr);
+    const BodySession::Report report = sim.session.TakeReport(sim.time);
+    CHECK(report.cameras.size() == 2);
+    for (const BodySession::CameraReport& camera : report.cameras) {
+        CHECK(camera.paired_share > 0.95);
+    }
+    CHECK_NEAR(report.cameras[1].age_ms - report.cameras[0].age_ms, sim.ids[1] > sim.ids[0] ? 20.0 : -20.0, 0.5);
+}
+
 }  // namespace
 
 int main()
@@ -628,6 +647,7 @@ int main()
     TestSessionCalibratesAndChecks();
     TestSessionNeedsOneMove();
     TestSessionForgetsACalibrationThatNoLongerFits();
+    TestSessionPairsFramesWhicheverArrivesFirst();
     if (g_failures == 0) {
         std::printf("All body tests passed\n");
         return 0;

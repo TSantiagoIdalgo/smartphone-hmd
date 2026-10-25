@@ -17,7 +17,6 @@ constexpr double kEnoughHeightM = 0.8;
 constexpr double kPairWindowSeconds = 0.02;
 constexpr double kCheckWindowSeconds = 0.025;
 constexpr double kMaxCheckSpeed = 0.3;  // m/s
-constexpr size_t kRecentFrames = 4;
 
 double Median(std::vector<double> values)
 {
@@ -61,20 +60,7 @@ bool BodySession::AddFrame(const body_protocol::Frame& frame, double arrived)
 
     ++camera.frames;
     camera.ages.push_back(frame.age_seconds * 1000.0);
-    bool paired = false;
-    for (const auto& entry : cameras_) {
-        if (entry.first == frame.camera) {
-            continue;
-        }
-        for (double t : entry.second.recent) {
-            paired = paired || std::fabs(t - time) <= kPairWindowSeconds;
-        }
-    }
-    camera.paired += paired;
-    camera.recent.push_back(time);
-    if (camera.recent.size() > kRecentFrames) {
-        camera.recent.pop_front();
-    }
+    camera.times.insert(std::upper_bound(camera.times.begin(), camera.times.end(), time), time);
 
     const bool person = (frame.flags & body_protocol::kFlagPose) && frame.points >= body_protocol::kPoints;
     camera.persons += person;
@@ -269,6 +255,23 @@ BodySession::Report BodySession::TakeReport(double now)
     Report report;
     const double seconds = report_start_ >= 0.0 ? now - report_start_ : 0.0;
     report_start_ = now;
+    // Paired when another camera took a frame within 20 ms, whichever arrived first.
+    const auto paired = [this](uint32_t id, double time) {
+        for (const auto& entry : cameras_) {
+            const std::vector<double>& times = entry.second.times;
+            const auto next = std::lower_bound(times.begin(), times.end(), time - kPairWindowSeconds);
+            if (entry.first != id && next != times.end() && *next <= time + kPairWindowSeconds) {
+                return true;
+            }
+        }
+        return false;
+    };
+    std::map<uint32_t, int> paired_frames;
+    for (const auto& entry : cameras_) {
+        for (double time : entry.second.times) {
+            paired_frames[entry.first] += paired(entry.first, time);
+        }
+    }
     for (auto& entry : cameras_) {
         Camera& camera = entry.second;
         CameraReport r;
@@ -281,11 +284,14 @@ BodySession::Report BodySession::TakeReport(double now)
             r.age_ms = Median(camera.ages);
             r.person_share = static_cast<double>(camera.persons) / camera.frames;
             r.ball_share = static_cast<double>(camera.balls) / camera.frames;
-            r.paired_share = static_cast<double>(camera.paired) / camera.frames;
+            r.paired_share = static_cast<double>(paired_frames[entry.first]) / camera.frames;
         }
-        camera.frames = camera.persons = camera.balls = camera.paired = 0;
+        camera.frames = camera.persons = camera.balls = 0;
         camera.ages.clear();
         report.cameras.push_back(r);
+    }
+    for (auto& entry : cameras_) {
+        entry.second.times.clear();
     }
     report.filter = filter_.TakeStats();
     report.checks = checks_;
