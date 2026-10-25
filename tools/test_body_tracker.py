@@ -246,6 +246,35 @@ class BallTest(unittest.TestCase):
         cv2.circle(self.picture, (230, 330), 14, (225, 170, 140), -1)  # a hand
         self.assertIsNone(bt.find_ball(self.picture, self.points))
 
+    def test_a_red_shirt_in_good_light_is_not_a_bulb(self):
+        # As bright as it gets in red alone: a bulb blows out two colours, or all three.
+        cv2.circle(self.picture, (250, 300), 12, (245, 40, 30), -1)
+        self.assertIsNone(bt.find_ball(self.picture, self.points))
+
+    def test_nothing_too_big_or_too_small_for_a_bulb_by_this_person(self):
+        # The trunk is 233 px long here: a bulb's radius comes out between about 4 and 33 px.
+        cv2.circle(self.picture, (250, 300), 45, (255, 40, 230), -1)
+        cv2.circle(self.picture, (250, 300), 30, (255, 255, 255), -1)
+        self.assertIsNone(bt.find_ball(self.picture, self.points))
+        self.setUp()
+        cv2.circle(self.picture, (250, 300), 2, (255, 255, 255), -1)
+        cv2.circle(self.picture, (253, 300), 1, (255, 40, 230), -1)
+        self.assertIsNone(bt.find_ball(self.picture, self.points))
+
+    def test_only_the_moves_colour_when_given(self):
+        magenta, cyan = bt.BALL_HUES["magenta"], bt.BALL_HUES["cyan"]
+        self.draw_bulb(255, 290)
+        cv2.circle(self.picture, (220, 330), 10, (250, 240, 60), -1)  # a yellow light by the other side of the hand
+        cv2.circle(self.picture, (220, 330), 5, (255, 255, 255), -1)
+        x, y, _ = bt.find_ball(self.picture, self.points, magenta)
+        self.assertAlmostEqual(x * 480, 255.5, delta=1.0)
+        self.assertAlmostEqual(y * 640, 290.5, delta=1.0)
+        self.assertIsNone(bt.find_ball(self.picture, self.points, cyan))
+        self.setUp()
+        self.draw_bulb(255, 290, colour=(40, 230, 255))
+        self.assertIsNotNone(bt.find_ball(self.picture, self.points, cyan))
+        self.assertIsNone(bt.find_ball(self.picture, self.points, magenta))
+
 
 class TrackerTest(unittest.TestCase):
     def setUp(self):
@@ -280,6 +309,15 @@ class TrackerTest(unittest.TestCase):
     def test_answers_the_search_for_the_pc(self):
         self.tracker.handle(bt.header(bt.TYPE_DISCOVER), PHONE, 0)
         self.assertEqual(self.sent, [(bt.header(bt.TYPE_PC_HERE), PHONE)])
+
+    @needs_video
+    def test_keeps_a_numbered_picture_every_two_seconds(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self.tracker.snapshots = folder
+            self.stream(encode([marked_picture()] * 3), 10 * SECOND)
+            self.stream(encode([marked_picture()] * 3), 13 * SECOND, first_seq=4)
+            self.assertEqual(sorted(p.name for p in Path(folder).iterdir()),
+                             [f"camara_{DEVICE & 0xFFFF:04X}_0001.jpg", f"camara_{DEVICE & 0xFFFF:04X}_0002.jpg"])
 
     @needs_video
     def test_sends_back_the_pose_of_the_upright_picture(self):

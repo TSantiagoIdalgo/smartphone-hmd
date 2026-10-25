@@ -238,7 +238,13 @@ llegaron mientras el modelo seguía con el anterior: la pose se calcula solo en 
 que el retraso no crezca. Si son muchos, prueba más `--threads` o un modelo más rápido.
 
 `--snapshots carpeta` guarda cada 2 segundos una foto de lo que ve cada cámara, con los puntos en
-verde y la bola del Move en un anillo: sirve para ver por qué no se detecta algo.
+verde y la bola del Move en un anillo: sirve para ver por qué no se detecta algo. Van numeradas
+(`camara_19BB_0001.jpg`, …), y las que tienen una bola terminan en `_bola`.
+
+`--ball-color magenta` (o `cyan`, `yellow`, `red`, `green`, `blue`) toma por la bola del Move solo
+algo de ese color. Úsalo al calibrar con el color con que PSMoveServiceEx enciende tu Move (el
+primero sale magenta, el segundo cian): así una lámpara o una prenda de otro color junto a la mano
+no se confunde con ella.
 
 ### Cuerpo completo en SteamVR
 
@@ -279,7 +285,9 @@ sin posición.
 
 **Calibrar las cámaras** (una vez, y otra si mueves un móvil):
 
-1. Pon los dos móviles fijos como en el dibujo. Abre la app en los dos y `body_tracker.py` en la PC.
+1. Pon los dos móviles fijos como en el dibujo. Abre la app en los dos y en la PC
+   `python tools\body_tracker.py --ball-color magenta`, con el color de la bola del Move con que
+   vas a calibrar.
 2. Con PSMoveServiceEx y SteamVR abiertos, enciende **un solo** Move y pulsa **Ctrl+Alt+C** en la
    PC. El otro, apagado del todo: aunque la PS Eye no lo vea, su bola sigue encendida y los móviles
    pueden confundirla con la del que mueves.

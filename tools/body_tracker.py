@@ -16,6 +16,7 @@ ankles.
     python tools/body_tracker.py --threads 8       # more cores per camera
     python tools/body_tracker.py --record a.jsonl  # also save every pose, to replay later
     python tools/body_tracker.py --snapshots fotos # a picture of each camera every 2 s
+    python tools/body_tracker.py --ball-color magenta  # only a bulb of the Move's colour
 
 The first run downloads the pose model next to this script. On Windows, allow Python through the
 firewall on private networks when asked.
@@ -339,6 +340,7 @@ class Camera:
         self.pose = None  # when the pose runs on the main thread
         self.last_pose_ms = 0
         self.next_snapshot_ns = 0
+        self.snapshots = 0
 
     def decode(self, data):
         """(worked, the decoded frame or None)."""
@@ -363,10 +365,11 @@ class Tracker:
     """
 
     def __init__(self, send, make_pose, out=print, record=None, now=time.perf_counter_ns,
-                 threaded=True, report_every_ns=2_000_000_000, send_driver=None, snapshots=None):
+                 threaded=True, report_every_ns=2_000_000_000, send_driver=None, snapshots=None, ball_hue=None):
         self.send = send
         self.send_driver = send_driver
         self.snapshots = snapshots  # a folder for a picture of each camera every few seconds
+        self.ball_hue = ball_hue  # of the Move's bulb, in degrees; None: any colour
         self.make_pose = make_pose
         self.out = out
         self.record = record
@@ -495,7 +498,7 @@ class Tracker:
         points = pose.detect(rgb, ms)
         done = self.now()
         inference_ms = (done - start) / 1e6
-        ball = find_ball(rgb, points)
+        ball = find_ball(rgb, points, self.ball_hue)
         flags = (FLAG_POSE if points else 0) | (FLAG_BALL if ball else 0) | (frame["flags"] & FLAG_EXPOSURE_LOCKED)
         ball = ball or (0.0, 0.0, 0.0)
         packet = pack_body(frame["seq"], frame["capture_ns"], camera.device, width, height, inference_ms, flags, points,
@@ -509,9 +512,12 @@ class Tracker:
             self.send_driver(pack_body(frame["seq"], captured, camera.device, width, height, age_ms, flags, points,
                                        ball, kind=TYPE_BODY_FRAME))
         if self.snapshots and done >= camera.next_snapshot_ns:
+            # Numbered, and marked when a bulb was found, to look for the ones it got wrong.
             camera.next_snapshot_ns = done + SNAPSHOT_EVERY_NS
-            save_snapshot(Path(self.snapshots) / f"camara_{camera.device & 0xFFFF:04X}.jpg", rgb, points,
-                          ball if flags & FLAG_BALL else None)
+            camera.snapshots += 1
+            found = flags & FLAG_BALL
+            name = f"camara_{camera.device & 0xFFFF:04X}_{camera.snapshots:04d}{'_bola' if found else ''}.jpg"
+            save_snapshot(Path(self.snapshots) / name, rgb, points, ball if found else None)
         stats = camera.stats
         with stats.lock:
             stats.poses += 1
@@ -755,16 +761,26 @@ class LiteRtPose:
 
 
 WRISTS_AND_ELBOWS = ((15, 13), (16, 14))
+# The colours PSMoveServiceEx lights a Move's bulb with, as hues in degrees: the first Move gets
+# magenta, the next cyan, then yellow.
+BALL_HUES = {"magenta": 300, "cyan": 180, "yellow": 60, "red": 0, "green": 120, "blue": 240}
+BALL_HUE_TOLERANCE = 35
+# The bulb is 4.5 cm across and the trunk, shoulders to hips, about 50 cm long. With its glow the
+# bulb looks up to some three times its size, and half of it may be behind the fingers.
+BALL_RADIUS_PER_TRUNK = (0.018, 0.14)
 
 
-def find_ball(rgb, points):
+def find_ball(rgb, points, hue=None):
     """Where a lit PS Move bulb is, as (x, y, radius) over the picture's width and height (the
     radius over its width), or None. The driver calibrates the cameras with it. It is looked for
-    near each wrist, within a forearm and a bit: the bulb is far brighter and more coloured than
-    anything else there."""
+    near each wrist, within a forearm and a bit: the bulb glows brighter than anything else there,
+    is coloured, of the bulb's size next to the body, and of its colour, the hue in degrees, if
+    given."""
     if not points or cv2 is None:
         return None
     height, width = rgb.shape[:2]
+    trunk = trunk_length(points, width, height)
+    radius = (BALL_RADIUS_PER_TRUNK[0] * trunk, BALL_RADIUS_PER_TRUNK[1] * trunk) if trunk else None
     best = None
     for wrist, elbow in WRISTS_AND_ELBOWS:
         if points[wrist][3] < 0.3:
@@ -776,7 +792,7 @@ def find_ball(rgb, points):
         x1, y1 = int(min(wx + reach, width)), int(min(wy + reach, height))
         if x1 - x0 < 4 or y1 - y0 < 4:
             continue
-        blob = bright_blob(rgb[y0:y1, x0:x1])
+        blob = bright_blob(rgb[y0:y1, x0:x1], radius, hue)
         if blob and (best is None or blob[3] > best[3]):
             best = (blob[0] + x0, blob[1] + y0, blob[2], blob[3])
     if best is None:
@@ -784,28 +800,51 @@ def find_ball(rgb, points):
     return best[0] / width, best[1] / height, best[2] / width
 
 
-def bright_blob(patch):
-    """The most coloured glowing blob in an RGB patch: (centre x, y, radius in pixels, score), or
-    None. Glowing means it has pixels near white (the bulb blows out the camera) or very bright,
-    and coloured means saturated, which a white lamp or wall is not and skin is too little."""
-    patch = patch.astype(np.int16)
-    top, bottom = patch.max(axis=2), patch.min(axis=2)
+def trunk_length(points, width, height):
+    """From between the shoulders to between the hips, in pixels; None if they are not all seen."""
+    if any(points[i][3] < 0.3 for i in (11, 12, 23, 24)):
+        return None
+    shoulders = (points[11][0] + points[12][0]) * width / 2, (points[11][1] + points[12][1]) * height / 2
+    hips = (points[23][0] + points[24][0]) * width / 2, (points[23][1] + points[24][1]) * height / 2
+    return math.hypot(shoulders[0] - hips[0], shoulders[1] - hips[1])
+
+
+def bright_blob(patch, radius=None, hue=None):
+    """The most glowing coloured blob in an RGB patch: (centre x, y, radius in pixels, score), or
+    None. Glowing means at least two colours near their top (the bulb blows out the camera; a lit
+    bulb is magenta, cyan or yellow, or white in its core), which a red shirt in good light is
+    not; coloured means saturated, which a white lamp or wall is not and skin is too little.
+    radius is (smallest, largest) in pixels, hue the wanted one in degrees."""
+    channels = patch.astype(np.int16)
+    top, bottom = channels.max(axis=2), channels.min(axis=2)
     coloured = (top >= 150) & (top - bottom >= 0.5 * top)
-    hot = top >= 235
-    count, labels, stats, centres = cv2.connectedComponentsWithStats((coloured | (top >= 245)).astype(np.uint8),
+    hot = np.count_nonzero(channels >= 230, axis=2) >= 2
+    count, labels, stats, centres = cv2.connectedComponentsWithStats((coloured | hot).astype(np.uint8),
                                                                      connectivity=8)
+    hues = cv2.cvtColor(np.ascontiguousarray(patch), cv2.COLOR_RGB2HSV)[:, :, 0] * (math.pi / 90) if hue is not None \
+        else None
     best = None
     for i in range(1, count):
         area = stats[i, cv2.CC_STAT_AREA]
         w, h = stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
         if area < 5 or area < 0.35 * w * h or max(w, h) > 2.5 * min(w, h):
             continue  # a speck, or not round
+        size = math.sqrt(area / math.pi)
+        if radius and not radius[0] <= size <= radius[1]:
+            continue  # far too big or too small for a bulb by this person
         inside = labels == i
-        colour = int(np.count_nonzero(coloured & inside))
-        if colour < 0.1 * area or np.count_nonzero(hot & inside) < 2:
+        colour = coloured & inside
+        glow = int(np.count_nonzero(hot & inside))
+        if np.count_nonzero(colour) < 0.1 * area or glow < 2:
             continue  # a white light, or something coloured that does not glow
-        if best is None or colour > best[3]:
-            best = (centres[i][0] + 0.5, centres[i][1] + 0.5, math.sqrt(area / math.pi), colour)
+        if hues is not None:
+            angles = hues[colour]
+            mean = math.degrees(math.atan2(np.sin(angles).mean(), np.cos(angles).mean()))
+            if abs((mean - hue + 180) % 360 - 180) > BALL_HUE_TOLERANCE:
+                continue  # another colour than the Move's
+        score = glow / area
+        if best is None or score > best[3]:
+            best = (centres[i][0] + 0.5, centres[i][1] + 0.5, size, score)
     return best
 
 
@@ -869,7 +908,7 @@ def ensure_model(name, folder=MODEL_DIR, out=print):
     return path
 
 
-def run(port, record_path, model, threads, engine, driver_port, snapshots):
+def run(port, record_path, model, threads, engine, driver_port, snapshots, ball_color):
     model_path = ensure_model(model)
     if engine == "mediapipe":
         make_pose, cores = (lambda: MediaPipePose(model_path)), "1 núcleo, con MediaPipe"
@@ -892,8 +931,11 @@ def run(port, record_path, model, threads, engine, driver_port, snapshots):
         except OSError:
             pass
 
-    tracker = Tracker(sock.sendto, make_pose, record=record, send_driver=send_driver, snapshots=snapshots)
-    print(f"Modelo «{model}» listo ({cores}). Esperando las cámaras en el puerto UDP {port}… (Ctrl+C para salir)")
+    tracker = Tracker(sock.sendto, make_pose, record=record, send_driver=send_driver, snapshots=snapshots,
+                      ball_hue=BALL_HUES.get(ball_color))
+    ball = f"; bola del Move {ball_color}" if ball_color in BALL_HUES else ""
+    print(f"Modelo «{model}» listo ({cores}{ball}). Esperando las cámaras en el puerto UDP {port}… "
+          "(Ctrl+C para salir)")
     try:
         while True:
             tracker.tick(time.perf_counter_ns())
@@ -927,6 +969,8 @@ def main():
                         help=f"UDP port of the headset driver on this PC (default {DRIVER_PORT})")
     parser.add_argument("--snapshots", metavar="FOLDER",
                         help="save what each camera sees, with the points and the Move's ball, every 2 s")
+    parser.add_argument("--ball-color", choices=sorted(BALL_HUES) + ["any"], default="any",
+                        help="the colour of the lit Move's bulb, so nothing else is taken for it (default any)")
     args = parser.parse_args()
     if args.threads < 1:
         parser.error("--threads must be 1 or more")
@@ -942,7 +986,8 @@ def main():
         print("Faltan librerías. Instálalas con:  pip install -r tools/requirements-body.txt"
               + ("  y  pip install mediapipe" if args.engine == "mediapipe" else ""))
         return 1
-    run(args.port, args.record, args.model, args.threads, args.engine, args.driver_port, args.snapshots)
+    run(args.port, args.record, args.model, args.threads, args.engine, args.driver_port, args.snapshots,
+        args.ball_color)
     return 0
 
 
