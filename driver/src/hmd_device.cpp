@@ -5,20 +5,11 @@
 #include <cmath>
 #include <cstring>
 
-#if defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#endif
-
 #include "chaperone.h"
 #include "driver_log.h"
 #include "mono_clock.h"
 #include "protocol.h"
+#include "settings.h"
 #include "udp_socket.h"
 #if defined(_WIN32)
 #include "video_streamer.h"
@@ -26,8 +17,6 @@
 #endif
 
 namespace {
-
-const char* const kSettingsSection = "driver_smartphone_hmd";
 
 // SteamVR already predicts the head this far past each vsync.
 constexpr float kVsyncToPhotonsSeconds = 0.011f;
@@ -38,42 +27,6 @@ constexpr double kMaxPredictionSeconds = 0.08;
 // Recentering towards the camera needs the head at least this far from it, horizontally.
 constexpr double kMinCameraDistance = 0.3;
 constexpr double kHeadStatsSeconds = 10.0;
-
-std::string GetStringSetting(const char* key, const char* fallback = "")
-{
-    char buffer[1024] = {};
-    vr::EVRSettingsError error = vr::VRSettingsError_None;
-    vr::VRSettings()->GetString(kSettingsSection, key, buffer, sizeof(buffer), &error);
-    return error == vr::VRSettingsError_None ? buffer : fallback;
-}
-
-// The head position settings fall back to these defaults when a key is missing, so updating only
-// the DLL (and keeping an older default.vrsettings) still works.
-double GetDoubleSetting(const char* key, double fallback)
-{
-    vr::EVRSettingsError error = vr::VRSettingsError_None;
-    const double value = vr::VRSettings()->GetFloat(kSettingsSection, key, &error);
-    return error == vr::VRSettingsError_None ? value : fallback;
-}
-
-int GetIntSetting(const char* key, int fallback)
-{
-    vr::EVRSettingsError error = vr::VRSettingsError_None;
-    const int value = vr::VRSettings()->GetInt32(kSettingsSection, key, &error);
-    return error == vr::VRSettingsError_None ? value : fallback;
-}
-
-// Ctrl+Alt+<key> on the PC keyboard.
-bool HotkeyDown(int key)
-{
-#if defined(_WIN32)
-    return (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_MENU) & 0x8000) &&
-           (GetAsyncKeyState(key) & 0x8000);
-#else
-    (void)key;
-    return false;
-#endif
-}
 
 // Ctrl+Alt+R recenters the view.
 bool RecenterHotkeyDown()
@@ -179,7 +132,7 @@ bool DisplayComponent::ComputeInverseDistortion(vr::HmdVector2_t* result, vr::EV
 // HmdDevice
 // ---------------------------------------------------------------------------
 
-HmdDevice::HmdDevice()
+HmdDevice::HmdDevice(PsmsClient* psms) : psms_(psms)
 {
     serial_number_ = GetStringSetting("serial_number");
     model_number_ = GetStringSetting("model_number");
@@ -190,7 +143,7 @@ HmdDevice::HmdDevice()
     eyes_from_neck_ = Vec3{0.0, GetDoubleSetting("head_neck_to_eyes_up_cm", 7.5),
                            -GetDoubleSetting("head_neck_to_eyes_forward_cm", 8.0)} * 0.01;
     tracker_.SetMagnetometerGain(std::clamp(GetDoubleSetting("magnetometer_gain", 0.0), 0.0, 0.5));
-    position_enabled_ = vr::VRSettings()->GetBool(kSettingsSection, "head_position_enabled");
+    position_enabled_ = psms_ != nullptr && vr::VRSettings()->GetBool(kSettingsSection, "head_position_enabled");
     if (position_enabled_) {
         const double above = GetDoubleSetting("head_light_above_eyes_cm", 0.0);
         const double in_front = GetDoubleSetting("head_light_in_front_of_eyes_cm", 0.0);
@@ -207,13 +160,6 @@ HmdDevice::HmdDevice()
         head.prediction_gain = std::clamp(GetDoubleSetting("head_position_prediction", 0.8), 0.0, 1.0);
         head_position_ = HeadPositionEstimator(head);
         apply_head_model_ = vr::VRSettings()->GetBool(kSettingsSection, "head_position_apply_head_model");
-
-        psms_config_.dll_path = GetStringSetting("psms_client_dll");
-        psms_config_.host = GetStringSetting("psms_host", "127.0.0.1");
-        psms_config_.port = GetStringSetting("psms_port", "9512");
-        psms_config_.hmd_id = GetIntSetting("psms_hmd_id", -1);
-        psms_config_.controller_id = GetIntSetting("psms_controller_id", -1);
-        psms_ = std::make_unique<PsmsClient>();
         DriverLog("Head position from PSMoveServiceEx: on. Light %.1f cm above, %.1f cm in front and %.1f cm to the "
                   "right of the eyes; camera latency %.0f ms",
                   above, in_front, right, head.latency_seconds * 1000.0);
@@ -294,9 +240,6 @@ vr::EVRInitError HmdDevice::Activate(uint32_t object_id)
         std::lock_guard<std::mutex> lock(pose_mutex_);
         last_pose_ = MakePose(false, MonoSeconds());
     }
-    if (psms_) {
-        psms_->Start(psms_config_);
-    }
     tracking_thread_ = std::thread(&HmdDevice::TrackingThread, this);
     return vr::VRInitError_None;
 }
@@ -305,9 +248,6 @@ void HmdDevice::Deactivate()
 {
     if (active_.exchange(false) && tracking_thread_.joinable()) {
         tracking_thread_.join();
-    }
-    if (psms_) {
-        psms_->Stop();
     }
 #if defined(_WIN32)
     if (video_) {

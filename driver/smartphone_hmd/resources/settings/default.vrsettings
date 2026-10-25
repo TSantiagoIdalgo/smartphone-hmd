@@ -32,6 +32,14 @@
 		"psms_host": "127.0.0.1",
 		"psms_port": "9512",
 		"psms_hmd_id": -1,
-		"psms_controller_id": -1
+		"psms_controller_id": -1,
+		"body_tracking_enabled": false,
+		"body_port": 9947,
+		"body_psms_latency_ms": 40.0,
+		"body_calibration_controller_id": -1,
+		"body_calibration_seconds": 60.0,
+		"body_pixel_noise": 3.0,
+		"body_agility": 1.0,
+		"body_prediction": 0.3
 	}
 }

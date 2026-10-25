@@ -47,7 +47,8 @@ private:
 
 class HmdDevice : public vr::ITrackedDeviceServerDriver {
 public:
-    HmdDevice();
+    // `psms` (shared with the body tracking, may be null) gives the head light's position.
+    explicit HmdDevice(PsmsClient* psms);
     ~HmdDevice();
 
     vr::EVRInitError Activate(uint32_t object_id) override;
@@ -91,8 +92,7 @@ private:
     // 6DoF: a light on the visor, tracked by PSMoveServiceEx, gives the head a position.
     bool position_enabled_ = false;
     bool apply_head_model_ = false;
-    PsmsConfig psms_config_;
-    std::unique_ptr<PsmsClient> psms_;
+    PsmsClient* psms_ = nullptr;
     HeadPositionEstimator head_position_;  // only touched by the tracking thread, like the rest
     bool head_camera_valid_ = false;
     Vec3 head_camera_;

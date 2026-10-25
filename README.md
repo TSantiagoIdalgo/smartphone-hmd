@@ -180,12 +180,13 @@ valores.
 
 ## Body tracking: cámaras y pose en la PC (en pruebas)
 
-Primer paso del body tracking: cada móvil que hace de cámara corre la app **HMD Cámara**, que manda
-a la PC el video de su cámara (H.264, unos 2 Mb/s). En la PC, `tools/body_tracker.py` encuentra tu
-pose en cada cuadro con el modelo de pose de MediaPipe, repartido en varios núcleos, y le devuelve
-los puntos al móvil, que los dibuja sobre la imagen.
-Así un móvil viejo solo filma, y el trabajo pesado lo hace la PC. El driver todavía no usa la pose;
-por ahora sirve para medir cuántos cuadros por segundo llegan, el retraso y si la pose es estable.
+Cada móvil que hace de cámara corre la app **HMD Cámara**, que manda a la PC el video de su cámara
+(H.264, unos 2 Mb/s). En la PC, `tools/body_tracker.py` encuentra tu pose en cada cuadro con el
+modelo de pose de MediaPipe, repartido en varios núcleos, y le devuelve los puntos al móvil, que
+los dibuja sobre la imagen. Así un móvil viejo solo filma, y el trabajo pesado lo hace la PC.
+`body_tracker.py` también le pasa los puntos de cada cámara al driver, que con dos cámaras
+calibradas arma el cuerpo en 3D y lo publica en SteamVR como tres trackers: cadera y los dos pies
+(ver "Cuerpo completo en SteamVR" más abajo).
 
 En la PC, con Python de 64 bits entre el 3.10 y el 3.14 (LiteRT, que corre el modelo, no tiene
 paquetes para otros: pip dice "from versions: none"), una sola vez (y otra vez al actualizar,
@@ -213,7 +214,8 @@ modelo con la librería de MediaPipe, que usa un solo núcleo (`pip install medi
 comparar.
 
 1. Instala `smartphone-hmd-camera-apk` en el móvil que hará de cámara y dale permiso de cámara. Si
-   tenías la versión anterior, desinstálala primero.
+   tenías una versión de antes de octubre de 2026, desinstálala primero; las siguientes se instalan
+   encima y guardan sus ajustes (las dos apps se firman ahora siempre con la misma clave).
 2. Conéctalo como el visor: anclaje USB por cable, o la misma red Wi-Fi que la PC. Busca la PC
    solo; si no la encuentra, escribe su IP.
 3. Ponlo fijo, a la altura de la cadera o algo más, de modo que te vea entero de pie donde juegas.
@@ -234,3 +236,54 @@ las poses por segundo, cuánto tarda el modelo, a los cuántos ms de tomado el c
 está lista su pose, los cuadros perdidos y la seguridad de cada punto. "saltados" son cuadros que
 llegaron mientras el modelo seguía con el anterior: la pose se calcula solo en el más nuevo, para
 que el retraso no crezca. Si son muchos, prueba más `--threads` o un modelo más rápido.
+
+`--snapshots carpeta` guarda cada 2 segundos una foto de lo que ve cada cámara, con los puntos en
+verde y la bola del Move en un anillo: sirve para ver por qué no se detecta algo.
+
+### Cuerpo completo en SteamVR
+
+Necesita dos cámaras, la posición de la cabeza con la luz del visor (ver "Posición de la cabeza con
+PS Move") y un PS Move para calibrar. Con SteamVR cerrado, pon en `default.vrsettings`:
+
+```
+"body_tracking_enabled" : true,
+```
+
+Al abrir SteamVR aparecen tres trackers (cadera, pie izquierdo y pie derecho) con su rol ya puesto,
+así que VRChat los usa sin configurar nada en "Manage Trackers". Hasta calibrar las cámaras quedan
+sin posición.
+
+**Calibrar las cámaras** (una vez, y otra si mueves un móvil):
+
+1. Pon los dos móviles fijos, en vertical, adelante a tu izquierda y a tu derecha, separados unos
+   60° vistos desde donde juegas, a 2-3 m y a 1,0-1,2 m del piso. Abre la app en los dos y
+   `body_tracker.py` en la PC.
+2. Con PSMoveServiceEx y SteamVR abiertos, enciende **un solo** Move (apaga el otro) y pulsa
+   **Ctrl+Alt+C** en la PC.
+3. A los 5 segundos empieza. Durante un minuto, con el Move en la mano, muévelo despacio por toda
+   la zona de juego: alto y bajo, cerca y lejos, donde lo vean los dos móviles y la PS Eye. Cada
+   móvil marca la bola con un anillo celeste cuando la ve. Termina sola cuando tiene suficiente, o
+   pulsa Ctrl+Alt+C otra vez para cancelar.
+4. En `vrserver.txt`, las líneas `Body calibration:` dicen cuántas muestras juntó cada cámara y, al
+   final, si quedó calibrada, cuánto se aparta (en píxeles y centímetros), dónde está y hacia dónde
+   mira. La calibración se guarda en SteamVR y se usa sola la próxima vez.
+
+**Comprobarla:** deja el Move quieto en varios lugares donde lo vean los dos móviles. Cada 10
+segundos, la línea `Body check:` dice a cuántos centímetros ponen las cámaras la bola de donde la
+pone PSMoveServiceEx; con menos de 3 cm está bien.
+
+En `vrserver.txt`, cada 10 segundos, `Body camera …` dice por cámara los cuadros por segundo, a los
+cuántos ms de tomado llega cada cuadro, qué parte tiene un cuadro de la otra cámara a menos de
+20 ms, en qué parte se ve una persona y la bola, y si está calibrada; `Body:` cuántos puntos se usan
+y cuántos se descartan.
+
+Ajustes de `default.vrsettings`, que normalmente no hace falta tocar:
+
+- `body_prediction` (0.3): cuánto se adelanta el cuerpo según su velocidad, para compensar el
+  retraso. Más alto reacciona antes pero tiembla más al moverse.
+- `body_agility` (1.0): cuánto se espera que cambie la velocidad de cada punto. Más bajo suaviza más
+  y sigue más lento.
+- `body_pixel_noise` (3.0): cuánto se cree que tiemblan los puntos de la pose, en píxeles.
+- `body_psms_latency_ms` (40): el retraso de PSMoveServiceEx al calibrar.
+- `body_calibration_controller_id` (-1): qué Move usar al calibrar, si no quieres apagar el otro.
+- `body_calibration_seconds` (60) y `body_port` (9947).

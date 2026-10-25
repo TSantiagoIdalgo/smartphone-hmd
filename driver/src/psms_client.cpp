@@ -27,6 +27,7 @@
 namespace {
 
 constexpr size_t kMaxQueuedSamples = 256;
+constexpr size_t kMaxQueuedControllerSamples = 1024;
 constexpr int kRetryMilliseconds = 2000;
 constexpr double kDeviceRetrySeconds = 5.0;
 constexpr double kCameraRetrySeconds = 1.0;
@@ -45,6 +46,7 @@ void PsmsClient::Start(const PsmsConfig& config)
         return;
     }
     config_ = config;
+    prefix_ = config.follow_head ? "Head position: " : "Body tracking: ";
     running_ = true;
     thread_ = std::thread(&PsmsClient::Run, this);
 }
@@ -66,6 +68,29 @@ bool PsmsClient::Drain(std::vector<LightSample>* samples, bool* camera_valid, Ve
     *camera = camera_;
     *cameras = cameras_;
     return streaming_;
+}
+
+bool PsmsClient::DrainControllers(std::vector<ControllerSample>* samples)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    samples->swap(controller_samples_);
+    controller_samples_.clear();
+    return controllers_streaming_;
+}
+
+void PsmsClient::PushController(const ControllerSample& sample)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (controller_samples_.size() >= kMaxQueuedControllerSamples) {
+        controller_samples_.erase(controller_samples_.begin());
+    }
+    controller_samples_.push_back(sample);
+}
+
+void PsmsClient::SetControllersStreaming(bool streaming)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    controllers_streaming_ = streaming;
 }
 
 void PsmsClient::Push(const LightSample& sample)
@@ -282,8 +307,8 @@ bool IsAddressValid(const PsmsConfig& config)
 void PsmsClient::Run()
 {
     if (!IsAddressValid(config_)) {
-        DriverLog("Head position: psms_host must be an IPv4 address and psms_port a number (got \"%s\", \"%s\")",
-                  config_.host.c_str(), config_.port.c_str());
+        DriverLog("%spsms_host must be an IPv4 address and psms_port a number (got \"%s\", \"%s\")",
+                  prefix_.c_str(), config_.host.c_str(), config_.port.c_str());
         return;
     }
     timeBeginPeriod(1);
@@ -298,21 +323,21 @@ void PsmsClient::Run()
             }
             module = LoadLibraryExW(candidate.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
             if (module) {
-                DriverLog("Head position: using %s", Narrow(candidate).c_str());
+                DriverLog("%susing %s", prefix_.c_str(), Narrow(candidate).c_str());
                 break;
             }
         }
         if (!module) {
             LogOnce(searched.empty()
-                        ? "Head position: waiting for PSMoveServiceEx to run (start it from VDM), or set psms_client_dll"
-                        : "Head position: could not load PSMoveClient_CAPI.dll from " + searched);
+                        ? prefix_ + "waiting for PSMoveServiceEx to run (start it from VDM), or set psms_client_dll"
+                        : prefix_ + "could not load PSMoveClient_CAPI.dll from " + searched);
             SleepWhileRunning(kRetryMilliseconds);
         }
     }
     if (module) {
         const std::string missing = ResolveAll(module, &api);
         if (!missing.empty()) {
-            DriverLog("Head position: PSMoveClient_CAPI.dll has no %s; update PSMoveServiceEx", missing.c_str());
+            DriverLog("%sPSMoveClient_CAPI.dll has no %s; update PSMoveServiceEx", prefix_.c_str(), missing.c_str());
             running_ = false;
         }
         // The DLL stays loaded: unloading it while its network threads wind down is not safe.
@@ -328,23 +353,24 @@ void PsmsClient::Run()
             if (api.GetIsInitialized()) {
                 api.Shutdown();
             }
-            LogOnce("Head position: waiting for PSMoveServiceEx at " + config_.host + ":" + config_.port);
+            LogOnce(prefix_ + "waiting for PSMoveServiceEx at " + config_.host + ":" + config_.port);
             SleepWhileRunning(kRetryMilliseconds);
             continue;
         }
         char version[64] = {};
         api.GetServiceVersionString(version, sizeof(version) - 1, kRequestTimeoutMs);
         const char* client_version = api.GetClientVersionString();
-        LogOnce(std::string("Head position: connected to PSMoveServiceEx ") + version + " (client " +
+        LogOnce(prefix_ + "connected to PSMoveServiceEx " + version + " (client " +
                 (client_version ? client_version : "?") + ")");
         Stream(api);
         SetStreaming(false);
+        SetControllersStreaming(false);
         SetCameras(false, Vec3{}, 0);
         if (api.GetIsInitialized()) {
             api.Shutdown();
         }
         if (running_) {
-            LogOnce("Head position: lost PSMoveServiceEx; reconnecting");
+            LogOnce(prefix_ + "lost PSMoveServiceEx; reconnecting");
             SleepWhileRunning(kRetryMilliseconds);
         }
     }
@@ -360,6 +386,27 @@ void PsmsClient::Stream(const Api& api)
     double next_camera_check = 0.0;
     bool last_tracking = false;
     PSMVector3f last_position{};
+
+    // Every other PS Move, for calibrating the body cameras.
+    struct Followed {
+        int id;
+        bool tracking;
+        PSMVector3f position;
+    };
+    std::vector<Followed> followed;
+    bool list_controllers = config_.stream_controllers;
+    double next_controllers_check = 0.0;
+    const auto stop_controllers = [&]() {
+        const bool connected = api.GetIsConnected();
+        for (const Followed& f : followed) {
+            if (connected) {
+                api.StopControllerDataStream(f.id, kRequestTimeoutMs);
+            }
+            api.FreeControllerListener(f.id);
+        }
+        followed.clear();
+        SetControllersStreaming(false);
+    };
 
     const auto stop_device = [&]() {
         if (device < 0) {
@@ -387,12 +434,19 @@ void PsmsClient::Stream(const Api& api)
             break;
         }
         // Read every flag each time so a stale one does not fire later.
-        const bool devices_changed = use_controller ? api.HasControllerListChanged() : api.HasHMDListChanged();
+        const bool hmds_changed = api.HasHMDListChanged();
+        const bool controllers_changed = api.HasControllerListChanged();
+        const bool devices_changed = use_controller ? controllers_changed : hmds_changed;
         const bool trackers_changed = api.HasTrackerListChanged();
         const bool offsets_changed = api.HasPlayspaceOffsetChanged();
         if (devices_changed) {
             stop_device();
             next_device_check = 0.0;
+        }
+        if (controllers_changed && config_.stream_controllers) {
+            stop_controllers();
+            list_controllers = true;
+            next_controllers_check = 0.0;
         }
 
         if (trackers_changed || offsets_changed) {
@@ -407,7 +461,7 @@ void PsmsClient::Stream(const Api& api)
                 // Only the playspace scale (kept at 1) and per-HMD offsets would set them apart.
                 const PSMVector3f p = trackers.count > 0 ? trackers.trackers[0].tracker_pose.Position : PSMVector3f{};
                 SetCameras(trackers.count > 0, Vec3{p.x * 0.01, p.y * 0.01, p.z * 0.01}, trackers.count);
-                LogOnce("Head position: " + std::to_string(trackers.count) + " camera(s), the first at (" +
+                LogOnce(prefix_ + std::to_string(trackers.count) + " camera(s), the first at (" +
                         std::to_string(static_cast<int>(p.x)) + ", " + std::to_string(static_cast<int>(p.y)) + ", " +
                         std::to_string(static_cast<int>(p.z)) + ") cm");
             } else {
@@ -416,7 +470,7 @@ void PsmsClient::Stream(const Api& api)
             }
         }
 
-        if (device < 0 && MonoSeconds() >= next_device_check) {
+        if (config_.follow_head && device < 0 && MonoSeconds() >= next_device_check) {
             next_device_check = MonoSeconds() + kDeviceRetrySeconds;
             int found = -1;
             if (use_controller) {
@@ -488,9 +542,47 @@ void PsmsClient::Stream(const Api& api)
                 last_position = position;
             }
         }
+        if (list_controllers && MonoSeconds() >= next_controllers_check) {
+            next_controllers_check = MonoSeconds() + kDeviceRetrySeconds;
+            PSMControllerList list{};
+            if (api.GetControllerList(&list, kRequestTimeoutMs) == PSMResult_Success) {
+                for (int i = 0; i < list.count && i < PSMOVESERVICE_MAX_CONTROLLER_COUNT; ++i) {
+                    const int id = list.controller_id[i];
+                    if (list.controller_type[i] != PSMController_Move || (use_controller && id == config_.controller_id)) {
+                        continue;  // only Moves have a bulb; the one on the visor is the head's
+                    }
+                    if (api.AllocateControllerListener(id) == PSMResult_Success &&
+                        api.StartControllerDataStream(id, PSMStreamFlags_includePositionData, kRequestTimeoutMs) ==
+                            PSMResult_Success) {
+                        followed.push_back({id, false, PSMVector3f{}});
+                    } else {
+                        api.FreeControllerListener(id);
+                    }
+                }
+                // Until one is connected, look again now and then.
+                list_controllers = followed.empty();
+                SetControllersStreaming(!followed.empty());
+                LogOnce("Body tracking: following " + std::to_string(followed.size()) +
+                        " PS Move(s), for calibrating the cameras");
+            }
+        }
+        for (Followed& f : followed) {
+            bool tracking = false;
+            PSMVector3f position{};
+            const bool tracked = api.GetIsControllerTracking(f.id, &tracking) == PSMResult_Success;
+            const bool valid = api.GetControllerPosition(f.id, &position) == PSMResult_Success;
+            tracking = tracked && tracking && valid;
+            if (tracking != f.tracking || (tracking && std::memcmp(&position, &f.position, sizeof(position)) != 0)) {
+                PushController({MonoSeconds(), f.id, Vec3{position.x * 0.01, position.y * 0.01, position.z * 0.01},
+                                tracking});
+                f.tracking = tracking;
+                f.position = position;
+            }
+        }
         Sleep(1);
     }
     stop_device();
+    stop_controllers();
 }
 
 #else
