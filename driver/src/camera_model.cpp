@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <locale>
 #include <random>
 #include <sstream>
@@ -385,13 +386,14 @@ CalibrationResult CalibrateCamera(const std::vector<CalibrationSample>& samples,
     }
 
     // RANSAC: projections from small random sets, keeping the one most samples agree with.
+    // The generator's own numbers, not a std distribution: the same picks with every compiler.
     std::mt19937 random(12345);
-    std::uniform_int_distribution<int> pick(0, count - 1);
+    const auto pick = [&random, count]() { return static_cast<int>(random() % static_cast<uint32_t>(count)); };
     std::vector<int> best;
     for (int round = 0; round < kRansacRounds; ++round) {
         std::vector<int> chosen;
         while (static_cast<int>(chosen.size()) < kRansacSampleSize) {
-            const int i = pick(random);
+            const int i = pick();
             if (std::find(chosen.begin(), chosen.end(), i) == chosen.end()) {
                 chosen.push_back(i);
             }
