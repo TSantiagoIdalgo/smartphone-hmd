@@ -55,7 +55,8 @@ object EncoderSelfTest {
         }
         val bytes = synchronized(stream) { stream.toByteArray() }
         File(context.filesDir, FILE).writeBytes(bytes)
-        Log.i(TAG, "Encoder self-test: $frames frames, $keyframes keyframes, ${bytes.size} bytes from ${encoder.name}")
+        Log.i(TAG, "Encoder self-test: $frames frames, $keyframes keyframes, ${bytes.size} bytes from ${encoder.name}, " +
+            "bitrate mode ${encoder.bitrateMode.ifEmpty { "left to the encoder" }}")
     }
 
     // Planes Y, U, V: grey, with a red square of 160x120 at the top left.

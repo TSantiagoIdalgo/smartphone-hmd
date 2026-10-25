@@ -90,6 +90,10 @@ class MainActivity : ComponentActivity() {
     private val videoRate = RateMeter()
     private val bitRate = RateMeter()
     private val poseRate = RateMeter()
+    // Where the time goes before a frame leaves: the camera (from the picture to this app) and
+    // the sending of its packets; the encoder measures its own.
+    private val cameraDelay = AverageMeter()
+    private val sendDelay = AverageMeter()
 
     // Camera thread only, except the @Volatile ones, shown on screen or used by the link.
     @Volatile private var encoder: VideoEncoder? = null
@@ -259,6 +263,12 @@ class MainActivity : ComponentActivity() {
                 append(" · ${"%.1f".format(frames)} cuadros/s · ${"%.1f".format(bitRate.perSecond(now) * 8 / 1e6f)} Mb/s")
             }
             append('\n')
+            val delays = listOf("cámara" to cameraDelay, "codificador" to encoder?.delay, "envío" to sendDelay)
+                .mapNotNull { (stage, meter) -> meter?.average(now)?.let { "$stage ${"%.0f".format(it)} ms" } }
+            if (delays.isNotEmpty()) {
+                append("Demora: ${delays.joinToString(" · ")}")
+                append('\n')
+            }
             val poses = poseRate.perSecond(now)
             if (poses > 0) {
                 append("Pose de la PC: ${"%.1f".format(poses)}/s · modelo ${"%.0f".format(pcInferenceMs)} ms · ")
@@ -428,6 +438,7 @@ class MainActivity : ComponentActivity() {
         try {
             val now = SystemClock.elapsedRealtimeNanos()
             val captureNs = captureTime(image.imageInfo.timestamp, now)
+            cameraDelay.add(now, (now - captureNs) / 1e6f)
             imageSize = "${image.width}×${image.height}"
             val fps = if (currentFps > 0) currentFps else 30
             val current = encoder?.takeIf { it.width == image.width && it.height == image.height && it.fps == fps }
@@ -452,14 +463,16 @@ class MainActivity : ComponentActivity() {
         if (nowNs < encoderRetryNs) return null
         return try {
             VideoEncoder(width, height, fps, fps * BITS_PER_FRAME) { tag, keyframe, data, offset, length ->
+                val startNs = SystemClock.elapsedRealtimeNanos()
                 if (link.sendVideo(tag, width, height, keyframe, data, offset, length)) {
                     val sentNs = SystemClock.elapsedRealtimeNanos()
+                    sendDelay.add(sentNs, (sentNs - startNs) / 1e6f)
                     videoRate.tick(sentNs)
                     bitRate.tick(sentNs, length.toLong())
                 }
             }.also {
                 encoder = it
-                videoStatus = "Video H.264 (${it.name})"
+                videoStatus = "Video H.264 (${it.name}${if (it.bitrateMode.isEmpty()) "" else ", ${it.bitrateMode}"})"
                 Log.i(TAG, "Video encoder ${it.name} ${width}x$height at $fps fps")
             }
         } catch (e: Exception) {

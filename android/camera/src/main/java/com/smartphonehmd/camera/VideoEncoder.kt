@@ -5,6 +5,7 @@ import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import java.nio.ByteBuffer
 import java.util.ArrayDeque
 
@@ -31,8 +32,15 @@ class VideoEncoder(
     private val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
     val name: String = codec.name
 
-    // Tags of the frames inside the encoder, by their time in µs, oldest first.
-    private val pending = ArrayDeque<Pair<Long, Tag>>()
+    /** How the encoder keeps to the bitrate: "CBR" (steady), "VBR", or "" if it was left to choose. */
+    val bitrateMode: String
+
+    /** How long frames take from [encode] until they come out encoded, in ms. */
+    val delay = AverageMeter()
+
+    // The frames inside the encoder, by their time in µs, oldest first.
+    private class Pending(val ptsUs: Long, val tag: Tag, val handedNs: Long)
+    private val pending = ArrayDeque<Pending>()
     private var lastPtsUs = Long.MIN_VALUE
     @Volatile private var running = true
     private val drainThread: Thread
@@ -42,15 +50,8 @@ class VideoEncoder(
     private var out = ByteArray(64 * 1024)
 
     init {
-        try {
-            try {
-                codec.configure(format(bitrate, lowLatency = true), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            } catch (_: Exception) {
-                // An encoder that refuses one of the hints still takes the plain format.
-                codec.reset()
-                codec.configure(format(bitrate, lowLatency = false), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            }
-            codec.start()
+        bitrateMode = try {
+            configure(bitrate).also { codec.start() }
         } catch (e: Exception) {
             codec.release()
             throw e
@@ -58,12 +59,47 @@ class VideoEncoder(
         drainThread = Thread({ drain() }, "video-encoder").apply { start() }
     }
 
-    private fun format(bitrate: Int, lowLatency: Boolean) =
+    /**
+     * Configures the encoder with the best format it takes, and says its bitrate mode. A steady
+     * bitrate first: each frame about the same size, so none takes the Wi-Fi long to send, where
+     * left to itself an encoder may send several times the bitrate asked. An encoder that refuses
+     * one of the hints still takes the plainer formats after it.
+     */
+    private fun configure(bitrate: Int): String {
+        val capabilities = try {
+            codec.codecInfo.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC).encoderCapabilities
+        } catch (_: Exception) {
+            null
+        }
+        val modes = listOf(
+            MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR,
+            MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR,
+        ).filter { capabilities?.isBitrateModeSupported(it) == true } + listOf(null)
+        val tries = listOf(true to modes.first()) + modes.map { false to it }
+        for ((i, attempt) in tries.withIndex()) {
+            val (lowLatency, mode) = attempt
+            try {
+                codec.configure(format(bitrate, lowLatency, mode), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                return when (mode) {
+                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR -> "CBR"
+                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR -> "VBR"
+                    else -> ""
+                }
+            } catch (e: Exception) {
+                if (i == tries.lastIndex) throw e
+                codec.reset()
+            }
+        }
+        error("unreachable")
+    }
+
+    private fun format(bitrate: Int, lowLatency: Boolean, bitrateMode: Int?) =
         MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, KEYFRAME_INTERVAL_S)
+            if (bitrateMode != null) setInteger(MediaFormat.KEY_BITRATE_MODE, bitrateMode)
             if (lowLatency) {
                 setInteger(MediaFormat.KEY_PRIORITY, 0) // real time
                 if (Build.VERSION.SDK_INT >= 29) setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
@@ -76,6 +112,7 @@ class VideoEncoder(
      * it had no room for it, so the frame is skipped. Always called from the same thread.
      */
     fun encode(planes: Array<YuvPlane>, tag: Tag): Boolean {
+        val handedNs = SystemClock.elapsedRealtimeNanos()
         val index = codec.dequeueInputBuffer(INPUT_WAIT_US)
         if (index < 0) return false
         // The encoder wants strictly increasing times.
@@ -90,7 +127,7 @@ class VideoEncoder(
                 MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
             Yuv.copy(planes, Yuv.layout(codec.getInputBuffer(index)!!, width, height, semiPlanar), width, height)
         }
-        synchronized(pending) { pending.addLast(ptsUs to tag) }
+        synchronized(pending) { pending.addLast(Pending(ptsUs, tag, handedNs)) }
         codec.queueInputBuffer(index, 0, width * height * 3 / 2, ptsUs, 0)
         return true
     }
@@ -142,15 +179,18 @@ class VideoEncoder(
     }
 
     private fun sendFrame(buffer: ByteBuffer, info: MediaCodec.BufferInfo) {
-        val tag = synchronized(pending) {
+        val frame = synchronized(pending) {
             // Frames the encoder dropped leave their tags behind; skip past them.
-            var found: Tag? = null
-            while (pending.isNotEmpty() && pending.peekFirst()!!.first <= info.presentationTimeUs) {
-                val (pts, t) = pending.removeFirst()
-                if (pts == info.presentationTimeUs) found = t
+            var found: Pending? = null
+            while (pending.isNotEmpty() && pending.peekFirst()!!.ptsUs <= info.presentationTimeUs) {
+                val p = pending.removeFirst()
+                if (p.ptsUs == info.presentationTimeUs) found = p
             }
             found
         } ?: return
+        val tag = frame.tag
+        val now = SystemClock.elapsedRealtimeNanos()
+        delay.add(now, (now - frame.handedNs) / 1e6f)
         val keyframe = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
         val start = headers.size
         if (out.size < start + info.size) out = ByteArray(start + info.size + 16 * 1024)

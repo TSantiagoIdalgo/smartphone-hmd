@@ -182,11 +182,13 @@ valores.
 
 Primer paso del body tracking: cada móvil que hace de cámara corre la app **HMD Cámara**, que manda
 a la PC el video de su cámara (H.264, unos 2 Mb/s). En la PC, `tools/body_tracker.py` encuentra tu
-pose en cada cuadro con MediaPipe y le devuelve los puntos al móvil, que los dibuja sobre la imagen.
+pose en cada cuadro con el modelo de pose de MediaPipe, repartido en varios núcleos, y le devuelve
+los puntos al móvil, que los dibuja sobre la imagen.
 Así un móvil viejo solo filma, y el trabajo pesado lo hace la PC. El driver todavía no usa la pose;
 por ahora sirve para medir cuántos cuadros por segundo llegan, el retraso y si la pose es estable.
 
-En la PC, con Python 3 instalado, una sola vez:
+En la PC, con Python 3.10 o más nuevo, una sola vez (y otra vez al actualizar, porque cambian las
+librerías):
 
 ```
 pip install -r tools\requirements-body.txt
@@ -196,13 +198,18 @@ Y cada vez:
 
 ```
 python tools\body_tracker.py
+python tools\body_tracker.py --model heavy --threads 8
 python tools\body_tracker.py --record prueba.jsonl
 ```
 
 La primera vez descarga el modelo de pose a `tools\models` y Windows pregunta si Python puede usar
 la red: permítelo en redes privadas (puerto UDP 9946). `--model lite` usa un modelo más rápido y
-menos exacto, y `--model heavy` uno más exacto y lento; el normal (`full`) tarda unos 20 ms por
-cuadro. `--record` guarda cada pose en un archivo para reproducirla después.
+menos exacto, y `--model heavy` uno más exacto y unas tres veces más lento que el normal (`full`).
+`--threads` dice cuántos núcleos usa cada cámara (4 si no se dice): con 4, el modelo tarda menos de
+la mitad que en uno solo, y con `heavy` se acerca a lo que tardaba `full` en un núcleo. `--record`
+guarda cada pose en un archivo para reproducirla después. `--engine mediapipe` corre el mismo
+modelo con la librería de MediaPipe, que usa un solo núcleo (`pip install mediapipe` aparte), para
+comparar.
 
 1. Instala `smartphone-hmd-camera-apk` en el móvil que hará de cámara y dale permiso de cámara. Si
    tenías la versión anterior, desinstálala primero.
@@ -211,14 +218,18 @@ cuadro. `--record` guarda cada pose en un archivo para reproducirla después.
 3. Ponlo fijo, a la altura de la cadera o algo más, de modo que te vea entero de pie donde juegas.
    La imagen se endereza sola esté el móvil vertical u horizontal.
 4. En la pantalla: los puntos verdes son seguros, los amarillos dudosos y los rojos adivinados. Las
-   líneas de arriba dicen los cuadros por segundo de la cámara y del video, las poses por segundo
-   que vuelven de la PC, el tiempo de ida y vuelta (desde que la cámara toma el cuadro hasta que su
-   pose vuelve al móvil) y qué tan seguros están la cadera, las rodillas y los tobillos. Un toque
-   en la imagen oculta los controles.
+   líneas de arriba dicen los cuadros por segundo de la cámara y del video (con el modo del
+   codificador: CBR es un bitrate parejo, lo mejor para el Wi-Fi), la demora de cada tramo dentro
+   del móvil (de la cámara a la app, el codificador y el envío de los paquetes), las poses por
+   segundo que vuelven de la PC, el tiempo de ida y vuelta (desde que la cámara toma el cuadro
+   hasta que su pose vuelve al móvil) y qué tan seguros están la cadera, las rodillas y los
+   tobillos. Lo que falta del "llega a los … ms" de la PC después de esos tramos es el Wi-Fi. Un
+   toque en la imagen oculta los controles.
 5. Con los puntos en verde, pulsa **Fijar exposición** para que la imagen deje de cambiar de brillo
    y de foco. Los botones cambian también los fps de la cámara y la cámara trasera o frontal.
 
 Cada 2 segundos `body_tracker.py` muestra por móvil los cuadros por segundo y los Mb/s que llegan,
 las poses por segundo, cuánto tarda el modelo, a los cuántos ms de tomado el cuadro llega a la PC y
-está lista su pose, los cuadros perdidos y la seguridad de cada punto. "saltados" quiere decir que
-la CPU no da abasto y la pose se calcula solo en el cuadro más nuevo.
+está lista su pose, los cuadros perdidos y la seguridad de cada punto. "saltados" son cuadros que
+llegaron mientras el modelo seguía con el anterior: la pose se calcula solo en el más nuevo, para
+que el retraso no crezca. Si son muchos, prueba más `--threads` o un modelo más rápido.
