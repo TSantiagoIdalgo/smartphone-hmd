@@ -1,15 +1,17 @@
 #pragma once
 
 #include <atomic>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "math3d.h"
+#include "move_hand.h"
 
-// Reads the head light's position, and the PS Moves' for calibrating the body cameras, from
-// PSMoveServiceEx, the service that tracks PS Move controllers with the PS Eye. It loads the
+// Reads the head light's position, and the PS Moves' for calibrating the body cameras and for
+// the hands, from PSMoveServiceEx, the service that tracks PS Move controllers with the PS Eye. It loads the
 // PSMoveClient_CAPI.dll that ships with PSMoveServiceEx at runtime, so the driver still starts
 // without it. Every call into the DLL happens on this class's own thread, because the DLL keeps a
 // single global client. Windows only.
@@ -20,7 +22,7 @@ struct PsmsConfig {
     bool follow_head = true;    // the head light (head_position_enabled)
     int hmd_id = -1;            // -1: the first virtual HMD
     int controller_id = -1;     // 0 or more: follow this controller (a Move on the visor) instead
-    bool stream_controllers = false;  // every other controller's position (body tracking)
+    bool stream_controllers = false;  // every other Move (body calibration, the hands)
 };
 
 struct LightSample {
@@ -51,6 +53,14 @@ public:
     bool Drain(std::vector<LightSample>* samples, bool* camera_valid, Vec3* camera, int* cameras);
     // The same for the controllers, with stream_controllers. Returns whether any is streamed.
     bool DrainControllers(std::vector<ControllerSample>* samples);
+    // Each streamed Move as it is now.
+    void LatestMoves(std::vector<MoveState>* moves);
+    // Sets a Move's rumble, 0 to 1, until changed.
+    void SetRumble(int id, float fraction);
+    // Tells PSMoveServiceEx the rotation a Move is in now, undoing its drift.
+    void ResetOrientation(int id, Quat orientation);
+    // Where the first PS Eye is, if known.
+    bool Camera(Vec3* position);
 
 private:
     struct Api;  // the DLL's functions
@@ -61,6 +71,9 @@ private:
     void PushController(const ControllerSample& sample);
     void SetStreaming(bool streaming);
     void SetControllersStreaming(bool streaming);
+    void SetMoves(const std::vector<MoveState>& moves);
+    float Rumble(int id);
+    bool TakeOrientationReset(int id, Quat* orientation);
     void SetCameras(bool valid, Vec3 camera, int cameras);
     void LogOnce(const std::string& message);
     void SleepWhileRunning(int milliseconds);
@@ -74,6 +87,9 @@ private:
     std::mutex mutex_;
     std::vector<LightSample> samples_;
     std::vector<ControllerSample> controller_samples_;
+    std::vector<MoveState> moves_;
+    std::map<int, float> rumble_;
+    std::map<int, Quat> orientation_resets_;
     bool streaming_ = false;
     bool controllers_streaming_ = false;
     bool camera_valid_ = false;

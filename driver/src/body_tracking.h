@@ -8,6 +8,7 @@
 
 class HeadSightingQueue;
 class PsmsClient;
+class SharedWrists;
 class TrackerDevice;
 
 // The body tracking in SteamVR: takes the pose program's frames on their own UDP port, the PS
@@ -16,9 +17,10 @@ class TrackerDevice;
 class BodyTracking {
 public:
     // `psms` may be null (no calibrating then); the trackers stay ours. Where the cameras see the
-    // head goes to `head` (may be null), for the headset.
+    // head goes to `head`, for the headset, and the wrists to `wrists`, for the controllers (either
+    // may be null).
     BodyTracking(PsmsClient* psms, TrackerDevice* waist, TrackerDevice* left_foot, TrackerDevice* right_foot,
-                 HeadSightingQueue* head);
+                 HeadSightingQueue* head, SharedWrists* wrists);
     ~BodyTracking();
 
     void Start();
@@ -40,6 +42,7 @@ private:
     PsmsClient* psms_;
     TrackerDevice* trackers_[3];
     HeadSightingQueue* head_;
+    SharedWrists* wrists_;
     BodySession session_;  // only touched by the thread
     // Since the last report: each tracker's poses, and how many times all three were published.
     PoseSpread spreads_[3];

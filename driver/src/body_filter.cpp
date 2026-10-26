@@ -29,8 +29,8 @@ constexpr double kMaxAgility = 20.0;
 constexpr double kAgilityRate = 0.3;
 
 // How quickly each joint changes speed, m^2/s^3: the hips and shoulders move the whole body,
-// the feet swing.
-constexpr double kAgility[kJointCount] = {2, 2, 2, 2, 6, 6, 10, 10, 10, 10, 10, 10};
+// the feet swing, the hands more.
+constexpr double kAgility[kJointCount] = {2, 2, 2, 2, 6, 6, 10, 10, 10, 10, 10, 10, 20, 20};
 
 int Partner(int joint)
 {
@@ -385,6 +385,17 @@ TrackerPose BodyFilter::Foot(bool left, double now) const
         y = Unit(Vec3{0.0, 1.0, 0.0} - z * z.y);
     }
     pose.orientation = FromAxes(Cross(y, z), y, z);
+    return pose;
+}
+
+TrackerPose BodyFilter::Wrist(bool left, double now) const
+{
+    TrackerPose pose;
+    const int joint = left ? kLeftWrist : kRightWrist;
+    if (Joint(joint, now, &pose.position, &pose.holding)) {
+        pose.valid = true;
+        pose.velocity = joints_[joint].velocity;
+    }
     return pose;
 }
 

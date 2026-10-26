@@ -2,6 +2,7 @@
 
 #include "body_tracking.h"
 #include "driver_log.h"
+#include "move_controllers.h"
 #include "psms_client.h"
 #include "settings.h"
 #include "tracker_device.h"
@@ -16,15 +17,16 @@ vr::EVRInitError DeviceProvider::Init(vr::IVRDriverContext* driver_context)
 
     const bool head = GetBoolSetting("head_position_enabled", false);
     const bool body = GetBoolSetting("body_tracking_enabled", false);
+    const bool controllers = GetBoolSetting("controllers_enabled", false);
     PsmsConfig psms;
-    if (head || body) {
+    if (head || body || controllers) {
         psms.dll_path = GetStringSetting("psms_client_dll");
         psms.host = GetStringSetting("psms_host", "127.0.0.1");
         psms.port = GetStringSetting("psms_port", "9512");
         psms.follow_head = head;
         psms.hmd_id = GetIntSetting("psms_hmd_id", -1);
         psms.controller_id = GetIntSetting("psms_controller_id", -1);
-        psms.stream_controllers = body;
+        psms.stream_controllers = body || controllers;
         psms_ = std::make_unique<PsmsClient>();
     }
 
@@ -56,14 +58,25 @@ vr::EVRInitError DeviceProvider::Init(vr::IVRDriverContext* driver_context)
                 DriverLog("Body tracking: could not add the %s tracker", t.serial);
             }
         }
+        if (controllers) {
+            wrists_ = std::make_unique<SharedWrists>();
+        }
         body_ = std::make_unique<BodyTracking>(psms_.get(), trackers_[0].get(), trackers_[1].get(), trackers_[2].get(),
-                                               head_sightings_.get());
+                                               head_sightings_.get(), wrists_.get());
         body_->Start();
         DriverLog("Body tracking: on, with hip and foot trackers");
         if (!head) {
             DriverLog("Body tracking: head_position_enabled is off, so the head stays put while the hips and feet "
                       "move: turn it on for the body to line up with the head");
         }
+    }
+    if (controllers) {
+        controllers_ = std::make_unique<MoveControllers>(psms_.get(), wrists_.get(),
+                                                         GetDoubleSetting("controller_pitch_degrees", 0.0));
+        controllers_->Start();
+        DriverLog(body ? "Hands: the PS Moves are controllers here, falling back on the wrists when the PS Eye loses "
+                         "them; turn off VDM's controllers in SteamVR"
+                       : "Hands: the PS Moves are controllers here; turn off VDM's controllers in SteamVR");
     }
     if (psms_) {
         psms_->Start(psms);
@@ -74,10 +87,12 @@ vr::EVRInitError DeviceProvider::Init(vr::IVRDriverContext* driver_context)
 void DeviceProvider::Cleanup()
 {
     // The threads go first, then what they use.
+    controllers_ = nullptr;
     body_ = nullptr;
     hmd_ = nullptr;
     psms_ = nullptr;
     head_sightings_ = nullptr;
+    wrists_ = nullptr;
     trackers_.clear();
 }
 
@@ -90,6 +105,9 @@ void DeviceProvider::RunFrame()
 {
     vr::VREvent_t event{};
     while (vr::VRServerDriverHost()->PollNextEvent(&event, sizeof(event))) {
+        if (controllers_) {
+            controllers_->OnEvent(event);
+        }
     }
 }
 

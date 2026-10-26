@@ -2,6 +2,8 @@
 
 #include <chrono>
 #include <cstring>
+#include <memory>
+#include <utility>
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -47,7 +49,7 @@ void PsmsClient::Start(const PsmsConfig& config)
         return;
     }
     config_ = config;
-    prefix_ = config.follow_head ? "Head position: " : "Body tracking: ";
+    prefix_ = config.follow_head ? "Head position: " : "PSMoveServiceEx: ";
     running_ = true;
     thread_ = std::thread(&PsmsClient::Run, this);
 }
@@ -77,6 +79,56 @@ bool PsmsClient::DrainControllers(std::vector<ControllerSample>* samples)
     samples->swap(controller_samples_);
     controller_samples_.clear();
     return controllers_streaming_;
+}
+
+void PsmsClient::LatestMoves(std::vector<MoveState>* moves)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    *moves = moves_;
+}
+
+void PsmsClient::SetMoves(const std::vector<MoveState>& moves)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    moves_ = moves;
+}
+
+void PsmsClient::SetRumble(int id, float fraction)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    rumble_[id] = fraction;
+}
+
+float PsmsClient::Rumble(int id)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = rumble_.find(id);
+    return found != rumble_.end() ? found->second : 0.0f;
+}
+
+void PsmsClient::ResetOrientation(int id, Quat orientation)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    orientation_resets_[id] = orientation;
+}
+
+bool PsmsClient::TakeOrientationReset(int id, Quat* orientation)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = orientation_resets_.find(id);
+    if (found == orientation_resets_.end()) {
+        return false;
+    }
+    *orientation = found->second;
+    orientation_resets_.erase(found);
+    return true;
+}
+
+bool PsmsClient::Camera(Vec3* position)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    *position = camera_;
+    return camera_valid_;
 }
 
 void PsmsClient::PushController(const ControllerSample& sample)
@@ -161,6 +213,9 @@ struct PsmsClient::Api {
     decltype(&PSM_StopControllerDataStream) StopControllerDataStream;
     decltype(&PSM_GetIsControllerTracking) GetIsControllerTracking;
     decltype(&PSM_GetControllerPosition) GetControllerPosition;
+    decltype(&PSM_GetControllerPSMoveState) GetControllerPSMoveState;
+    decltype(&PSM_SetControllerRumble) SetControllerRumble;
+    decltype(&PSM_ResetControllerOrientation) ResetControllerOrientation;
 };
 
 namespace {
@@ -281,6 +336,9 @@ std::string ResolveAll(HMODULE module, Api* api)
     Resolve(module, "PSM_StopControllerDataStream", &api->StopControllerDataStream, &missing);
     Resolve(module, "PSM_GetIsControllerTracking", &api->GetIsControllerTracking, &missing);
     Resolve(module, "PSM_GetControllerPosition", &api->GetControllerPosition, &missing);
+    Resolve(module, "PSM_GetControllerPSMoveState", &api->GetControllerPSMoveState, &missing);
+    Resolve(module, "PSM_SetControllerRumble", &api->SetControllerRumble, &missing);
+    Resolve(module, "PSM_ResetControllerOrientation", &api->ResetControllerOrientation, &missing);
     return missing;
 }
 
@@ -301,6 +359,40 @@ bool IsAddressValid(const PsmsConfig& config)
         }
     }
     return true;
+}
+
+bool Pressed(PSMButtonState state)
+{
+    return (state & PSMButtonState_PRESSED) != 0;  // pressed now or held
+}
+
+MoveState ToMoveState(const PSMPSMove& m, int id, int hand, double now)
+{
+    MoveState move;
+    move.id = id;
+    move.hand = hand;
+    move.time = now;
+    move.tracking = m.bIsCurrentlyTracking;
+    move.position = Vec3{m.Pose.Position.x * 0.01, m.Pose.Position.y * 0.01, m.Pose.Position.z * 0.01};
+    move.orientation = Normalize(Quat{m.Pose.Orientation.w, m.Pose.Orientation.x, m.Pose.Orientation.y,
+                                      m.Pose.Orientation.z});
+    const PSMPhysicsData& physics = m.PhysicsData;
+    move.velocity = Vec3{physics.LinearVelocityCmPerSec.x * 0.01, physics.LinearVelocityCmPerSec.y * 0.01,
+                         physics.LinearVelocityCmPerSec.z * 0.01};
+    move.angular_velocity = Vec3{physics.AngularVelocityRadPerSec.x, physics.AngularVelocityRadPerSec.y,
+                                 physics.AngularVelocityRadPerSec.z};
+    const std::pair<PSMButtonState, MoveButton> buttons[] = {
+        {m.SquareButton, kMoveSquare}, {m.TriangleButton, kMoveTriangle}, {m.CrossButton, kMoveCross},
+        {m.CircleButton, kMoveCircle}, {m.MoveButton, kMoveMove},         {m.PSButton, kMovePS},
+        {m.StartButton, kMoveStart},   {m.SelectButton, kMoveSelect},     {m.TriggerButton, kMoveTrigger},
+    };
+    for (const auto& button : buttons) {
+        if (Pressed(button.first)) {
+            move.buttons |= button.second;
+        }
+    }
+    move.trigger = m.TriggerValue / 255.0f;
+    return move;
 }
 
 }  // namespace
@@ -388,25 +480,33 @@ void PsmsClient::Stream(const Api& api)
     bool last_tracking = false;
     PSMVector3f last_position{};
 
-    // Every other PS Move, for calibrating the body cameras.
+    // Every other PS Move, for calibrating the body cameras and for the hands.
     struct Followed {
         int id;
+        int hand;
         bool tracking;
         PSMVector3f position;
         double sent;
+        float rumble;
     };
     std::vector<Followed> followed;
+    std::vector<MoveState> moves;
+    const auto move_state = std::make_unique<PSMPSMove>();  // large
     bool list_controllers = config_.stream_controllers;
     double next_controllers_check = 0.0;
     const auto stop_controllers = [&]() {
         const bool connected = api.GetIsConnected();
         for (const Followed& f : followed) {
             if (connected) {
+                if (f.rumble > 0.0f) {
+                    api.SetControllerRumble(f.id, PSMControllerRumbleChannel_All, 0.0f);
+                }
                 api.StopControllerDataStream(f.id, kRequestTimeoutMs);
             }
             api.FreeControllerListener(f.id);
         }
         followed.clear();
+        SetMoves({});
         SetControllersStreaming(false);
     };
 
@@ -554,9 +654,11 @@ void PsmsClient::Stream(const Api& api)
                         continue;  // only Moves have a bulb; the one on the visor is the head's
                     }
                     if (api.AllocateControllerListener(id) == PSMResult_Success &&
-                        api.StartControllerDataStream(id, PSMStreamFlags_includePositionData, kRequestTimeoutMs) ==
-                            PSMResult_Success) {
-                        followed.push_back({id, false, PSMVector3f{}, 0.0});
+                        api.StartControllerDataStream(
+                            id, PSMStreamFlags_includePositionData | PSMStreamFlags_includePhysicsData,
+                            kRequestTimeoutMs) == PSMResult_Success) {
+                        followed.push_back({id, static_cast<int>(list.controller_hand[i]), false, PSMVector3f{}, 0.0,
+                                            0.0f});
                     } else {
                         api.FreeControllerListener(id);
                     }
@@ -564,16 +666,17 @@ void PsmsClient::Stream(const Api& api)
                 // Until one is connected, look again now and then.
                 list_controllers = followed.empty();
                 SetControllersStreaming(!followed.empty());
-                LogOnce("Body tracking: following " + std::to_string(followed.size()) +
-                        " PS Move(s), for calibrating the cameras");
+                LogOnce("PSMoveServiceEx: following " + std::to_string(followed.size()) + " PS Move(s)");
             }
         }
+        moves.clear();
         for (Followed& f : followed) {
-            bool tracking = false;
-            PSMVector3f position{};
-            const bool tracked = api.GetIsControllerTracking(f.id, &tracking) == PSMResult_Success;
-            const bool valid = api.GetControllerPosition(f.id, &position) == PSMResult_Success;
-            tracking = tracked && tracking && valid;
+            PSMPSMove& state = *move_state;
+            if (api.GetControllerPSMoveState(f.id, &state) != PSMResult_Success) {
+                continue;
+            }
+            const bool tracking = state.bIsCurrentlyTracking;
+            const PSMVector3f position = state.Pose.Position;
             // An untracked Move is still lit for the phones to see: say now and then that it is on.
             const double now = MonoSeconds();
             if (tracking != f.tracking || (tracking && std::memcmp(&position, &f.position, sizeof(position)) != 0) ||
@@ -583,7 +686,22 @@ void PsmsClient::Stream(const Api& api)
                 f.position = position;
                 f.sent = now;
             }
+            moves.push_back(ToMoveState(state, f.id, f.hand, now));
+            const float rumble = Rumble(f.id);
+            if (rumble != f.rumble &&
+                api.SetControllerRumble(f.id, PSMControllerRumbleChannel_All, rumble) == PSMResult_Success) {
+                f.rumble = rumble;
+            }
+            Quat reset;
+            if (TakeOrientationReset(f.id, &reset)) {
+                PSMQuatf pose{static_cast<float>(reset.w), static_cast<float>(reset.x), static_cast<float>(reset.y),
+                              static_cast<float>(reset.z)};
+                if (api.ResetControllerOrientation(f.id, &pose, kRequestTimeoutMs) != PSMResult_Success) {
+                    DriverLog("Hands: PSMoveServiceEx did not reset Move %d's rotation", f.id);
+                }
+            }
         }
+        SetMoves(moves);
         Sleep(1);
     }
     stop_device();

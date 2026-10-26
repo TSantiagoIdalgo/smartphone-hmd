@@ -177,6 +177,8 @@ valores.
   la altura de los ojos y cuánto tiembla la medida.
 - `psms_controller_id` (por defecto -1) hace que siga un PS Move en vez del visor virtual: sirve
   para probar con un Move pegado al visor.
+- Con el body tracking, los móviles también ayudan a la cabeza: ver "La cabeza con las cámaras del
+  cuerpo".
 
 ## Body tracking: cámaras y pose en la PC (en pruebas)
 
@@ -339,3 +341,70 @@ Ajustes de `default.vrsettings`, que normalmente no hace falta tocar:
 - `body_calibration_controller_id` (-1): qué Move usar al calibrar y comprobar, si no quieres
   apagar el otro; ese otro no debe estar donde lo vean los móviles.
 - `body_calibration_seconds` (60) y `body_port` (9947).
+
+### La cabeza con las cámaras del cuerpo
+
+Con el body tracking y la luz del visor encendidos, los móviles también ven tu cabeza (el punto
+entre las orejas) y el driver la usa junto con la luz:
+
+- **Quieta de verdad.** La PS Eye sola ve muy bien hacia los lados pero mal en profundidad (la saca
+  del tamaño de la luz), y eso hace que la cabeza se mueva adelante y atrás sin que te muevas. Los
+  móviles, desde los costados, fijan esa profundidad. Además, cuando estás quieto el driver suaviza
+  más (aprende cuánto te mueves), con o sin móviles.
+- **De espaldas a la PS Eye.** Si la cámara deja de ver la luz (giras 180°, la tapas), la cabeza
+  sigue a donde la ven los móviles en vez de quedarse clavada; al volver a ver la luz pasa a ella
+  suavemente. Sin la luz, la posición llega unos 0,15 s más tarde y algo menos fina, pero no salta.
+
+Viene activado cuando están las dos cosas. **Ctrl+Alt+B** lo apaga y lo vuelve a encender en el
+momento, para comparar. En `vrserver.txt`:
+
+- `Head light: out of sight; the body cameras follow the head` cuando la siguen solo los móviles.
+- Cada 10 segundos, `Head from the body cameras:` cuántas vistas de los móviles usó, cuántas
+  descartó y cuántas llegaron tarde, y dónde aprendió que están tus orejas respecto del cuello; y
+  la línea de estadísticas de `Head light:` termina con `agility`: baja (0,01-0,1) quieto, sube al
+  moverte.
+
+Ajustes de `default.vrsettings`:
+
+- `head_position_depth_noise_with_body_cm` (9): cuánto se cree en la profundidad de la PS Eye
+  mientras los móviles ven la cabeza. Más alto, la profundidad sale más de los móviles: más quieta,
+  pero algo más lenta al acercarte o alejarte de la PS Eye. Más bajo, más de la PS Eye.
+- `head_body_cameras` (true): `false` no usa los móviles para la cabeza.
+
+## Mandos: los PS Move desde este driver (opcional)
+
+El driver puede publicar los dos PS Move como mandos en vez del Virtual Device Manager. Lo que se
+gana: con el body tracking, cuando la PS Eye deja de ver la bola de un Move (detrás del cuerpo,
+fuera de su vista, tapada por la otra mano) la mano sigue a tu muñeca, que ven los móviles, en vez de
+quedarse clavada. El driver aprende dónde queda la bola respecto de tu muñeca mientras ve las dos
+cosas, y también cuál muñeca sostiene cada Move.
+
+Viene desactivado. Para activarlo:
+
+1. Con SteamVR cerrado, pon en `default.vrsettings`: `"controllers_enabled" : true,`
+2. Apaga los mandos de VDM en SteamVR, o tendrás cada mando dos veces: en SteamVR, Ajustes →
+   Inicio/apagado → Administrar complementos, desactiva `psmsex` (el driver de VDM para SteamVR;
+   PSMoveServiceEx y el resto de VDM siguen funcionando igual).
+3. Abre SteamVR: aparecen dos mandos, que los juegos ven como mandos Vive.
+
+Los Moves van a la mano que tengan asignada en PSMoveServiceEx; si no tienen ninguna, el primero es
+la derecha y el segundo la izquierda.
+
+| Move | Mando Vive |
+|------|------------|
+| Gatillo | Gatillo |
+| Botón Move (el grande) | Grip |
+| Triángulo / Equis / Cuadrado / Círculo | Trackpad arriba / abajo / izquierda / derecha (tocado y pulsado) |
+| Select o Start | Menú |
+| PS | Sistema (el menú de SteamVR) |
+
+Las vibraciones de los juegos hacen vibrar el Move. Cada juego se puede reasignar en SteamVR →
+Mandos → Administrar asignaciones, como un mando Vive.
+
+- **Recentrar un Move**: apúntalo a la PS Eye y mantén **Select + Start** un segundo. Corrige el
+  giro que acumula.
+- Si en SteamVR el mando apunta hacia arriba o hacia abajo cuando el Move apunta al frente, pon
+  `controller_pitch_degrees` en 90 o -90.
+- En `vrserver.txt`, `Hands:` dice qué Move quedó en cada mano y, cada 10 segundos, qué parte del
+  tiempo lo vio la PS Eye, cuánto siguió a la muñeca y cuánto quedó quieto donde estaba (sin bola ni
+  muñeca), y a cuántos centímetros de la muñeca aprendió que está la bola (unos 15-20 cm).

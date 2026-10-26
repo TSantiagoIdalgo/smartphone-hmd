@@ -8,6 +8,7 @@
 
 #include "driver_log.h"
 #include "mono_clock.h"
+#include "move_hand.h"
 #include "psms_client.h"
 #include "settings.h"
 #include "tracker_device.h"
@@ -57,8 +58,12 @@ unsigned ShortId(uint32_t id)
 }  // namespace
 
 BodyTracking::BodyTracking(PsmsClient* psms, TrackerDevice* waist, TrackerDevice* left_foot, TrackerDevice* right_foot,
-                           HeadSightingQueue* head)
-    : psms_(psms), trackers_{waist, left_foot, right_foot}, head_(head), session_(ReadSessionConfig())
+                           HeadSightingQueue* head, SharedWrists* wrists)
+    : psms_(psms),
+      trackers_{waist, left_foot, right_foot},
+      head_(head),
+      wrists_(wrists),
+      session_(ReadSessionConfig())
 {
     port_ = GetIntSetting("body_port", body_protocol::kPort);
     calibration_seconds_ = std::clamp(GetDoubleSetting("body_calibration_seconds", 60.0), 10.0, 600.0);
@@ -257,6 +262,16 @@ void BodyTracking::Publish(double now)
         pose.qRotation.y = q.y;
         pose.qRotation.z = q.z;
         trackers_[i]->Update(pose);
+    }
+    if (wrists_) {
+        Wrists wrists;
+        for (int side = 0; side < 2; ++side) {
+            const TrackerPose wrist = session_.Wrist(side == 0, now);
+            wrists.valid[side] = wrist.valid && !wrist.holding;
+            wrists.position[side] = wrist.position;
+            wrists.velocity[side] = wrist.velocity;
+        }
+        wrists_->Set(wrists);
     }
 }
 

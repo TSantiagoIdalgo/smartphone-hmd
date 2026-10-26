@@ -42,6 +42,8 @@
 		"body_calibration_seconds": 60.0,
 		"body_pixel_noise": 3.0,
 		"body_agility": 1.0,
-		"body_prediction": 0.3
+		"body_prediction": 0.3,
+		"controllers_enabled": false,
+		"controller_pitch_degrees": 0.0
 	}
 }

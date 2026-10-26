@@ -12,6 +12,7 @@
 #include "body_protocol.h"
 #include "body_session.h"
 #include "camera_model.h"
+#include "move_hand.h"
 
 namespace {
 
@@ -225,7 +226,7 @@ struct Person {
         static const double offsets[kJointCount][3] = {
             {-0.18, 1.45, 0.0}, {0.18, 1.45, 0.0}, {-0.1, 0.95, 0.0}, {0.1, 0.95, 0.0},   {-0.1, 0.5, 0.03},
             {0.1, 0.5, 0.03},   {-0.1, 0.08, 0.0}, {0.1, 0.08, 0.0}, {-0.1, 0.03, -0.05}, {0.1, 0.03, -0.05},
-            {-0.1, 0.03, 0.15}, {0.1, 0.03, 0.15},
+            {-0.1, 0.03, 0.15}, {0.1, 0.03, 0.15},  {-0.25, 0.85, 0.05}, {0.25, 0.85, 0.05},
         };
         const Vec3 forward{-std::sin(facing), 0.0, -std::cos(facing)};
         const Vec3 right = Cross(forward, Vec3{0, 1, 0});
@@ -758,6 +759,115 @@ void TestSessionPairsFramesWhicheverArrivesFirst()
 
 }  // namespace
 
+// A Move held in the right hand, the hand turning: the bulb 18 cm from the wrist along the Move.
+struct HandSimulation {
+    MoveHand hand{false};
+    Vec3 bulb_from_wrist{0.0, 0.02, -0.18};  // controller axes
+    double time = 100.0;
+
+    // The Move pointing forward and a little up, swinging left and right.
+    static Quat Controller(double t) { return AxisAngle(Vec3{0, 1, 0}, 0.6 * std::sin(1.7 * t)) * AxisAngle(Vec3{1, 0, 0}, 0.2); }
+    static Vec3 WristAt(double t) { return Vec3{0.25 + 0.05 * std::sin(0.9 * t), 1.0, -0.3}; }
+
+    // Runs `seconds`; `seen(t)` whether the PS Eye sees the bulb. Returns the largest error and step.
+    void Run(double seconds, const std::function<bool(double)>& seen, bool wrists, double* max_error, double* max_step,
+             int held_wrist = 1)
+    {
+        Vec3 previous;
+        bool have_previous = false;
+        const double start = time;
+        for (; time < start + seconds; time += 0.004) {
+            const double t = time - start;
+            const Quat controller = Controller(time);
+            const Vec3 bulb = WristAt(time) + Rotate(controller, bulb_from_wrist);
+            MoveState move;
+            move.time = time;
+            move.tracking = seen(t);
+            move.position = bulb;
+            move.orientation = controller;
+            Wrists w;
+            w.valid[held_wrist] = wrists;
+            w.position[held_wrist] = WristAt(time);
+            w.valid[1 - held_wrist] = wrists;
+            w.position[1 - held_wrist] = WristAt(time) + Vec3{-0.45, 0.0, 0.0};
+            hand.Update(move, w, time);
+            const HandPose pose = hand.Pose(time);
+            CHECK(pose.valid);
+            if (max_error) {
+                *max_error = std::max(*max_error, Length(pose.position - bulb));
+            }
+            if (have_previous && max_step) {
+                *max_step = std::max(*max_step, Length(pose.position - previous));
+            }
+            previous = pose.position;
+            have_previous = true;
+        }
+    }
+};
+
+void TestMoveHandAxes()
+{
+    // PSMoveServiceEx's identity is the Move pointing along -z, buttons up: SteamVR's too.
+    MoveHand hand(true);
+    MoveState move;
+    move.tracking = true;
+    move.orientation = AxisAngle(Vec3{0, 1, 0}, 0.7);
+    hand.Update(move, Wrists{}, 1.0);
+    CHECK(Length(Rotate(hand.Pose(1.0).orientation, Vec3{0, 0, -1}) - Rotate(move.orientation, Vec3{0, 0, -1})) < 1e-9);
+    // Tilted by the setting: a Move whose identity were upright points forward lying flat.
+    MoveHand tilted(true, 90.0);
+    move.orientation = AxisAngle(Vec3{1, 0, 0}, -kPi / 2);
+    tilted.Update(move, Wrists{}, 1.0);
+    const HandPose pose = tilted.Pose(1.0);
+    CHECK(Length(Rotate(pose.orientation, Vec3{0, 0, -1}) - Vec3{0, 0, -1}) < 1e-9);
+    CHECK(Length(Rotate(pose.orientation, Vec3{0, 1, 0}) - Vec3{0, 1, 0}) < 1e-9);
+    // And back: the rotation PSMoveServiceEx would give for a controller's.
+    const Quat back = tilted.MoveOrientation(pose.orientation);
+    CHECK(Length(Rotate(back, Vec3{0, 1, 0}) - Rotate(move.orientation, Vec3{0, 1, 0})) < 1e-9);
+}
+
+void TestMoveHandFallsBackOnWrist()
+{
+    // Seen for 3 s, then hidden for 2 s while turning: the bulb stays on the wrist where it was
+    // learned to sit, gliding over rather than jumping; seen again, back on the bulb.
+    HandSimulation sim;
+    double error = 0.0, step = 0.0;
+    sim.Run(3.0, [](double) { return true; }, true, nullptr, nullptr);
+    CHECK(Length(sim.hand.BulbFromWrist() - sim.bulb_from_wrist) < 0.005);
+    sim.Run(2.0, [](double) { return false; }, true, &error, &step);
+    CHECK(error < 0.005);
+    CHECK(step < 0.01);
+    CHECK(sim.hand.TakeStats().from_wrist > 400);
+    error = step = 0.0;
+    sim.Run(1.0, [](double) { return true; }, true, &error, &step);
+    CHECK(error < 0.005);
+}
+
+void TestMoveHandFindsItsWrist()
+{
+    // Started as the left hand, but held in the right: the right wrist, closer, takes over.
+    HandSimulation sim;
+    sim.hand = MoveHand(true);
+    sim.Run(2.0, [](double) { return true; }, true, nullptr, nullptr);
+    CHECK(sim.hand.wrist() == 1);
+    double error = 0.0;
+    sim.Run(1.0, [](double) { return false; }, true, &error, nullptr);
+    CHECK(error < 0.005);
+}
+
+void TestMoveHandHoldsWithoutWrist()
+{
+    // Neither the bulb nor the wrist: it stays where it was, still turning, without jumping.
+    HandSimulation sim;
+    sim.Run(1.0, [](double) { return true; }, true, nullptr, nullptr);
+    const Vec3 last = sim.hand.Pose(sim.time).position;
+    double step = 0.0;
+    sim.Run(1.0, [](double) { return false; }, false, nullptr, &step);
+    CHECK(Length(sim.hand.Pose(sim.time).position - last) < 1e-9);
+    CHECK(step < 0.01);
+    CHECK(sim.hand.TakeStats().held > 200);
+}
+
 int main()
 {
     TestBodyPacket();
@@ -781,6 +891,10 @@ int main()
     TestSessionCalibratesWithAJitteryMove();
     TestSessionForgetsACalibrationThatNoLongerFits();
     TestSessionPairsFramesWhicheverArrivesFirst();
+    TestMoveHandAxes();
+    TestMoveHandFallsBackOnWrist();
+    TestMoveHandFindsItsWrist();
+    TestMoveHandHoldsWithoutWrist();
     if (g_failures == 0) {
         std::printf("All body tests passed\n");
         return 0;

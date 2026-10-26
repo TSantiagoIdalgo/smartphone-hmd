@@ -7,7 +7,7 @@
 #include "math3d.h"
 
 // Turns the 2D pose points of two or more calibrated cameras into the body in 3D, and the body
-// into the poses of the hip and foot trackers.
+// into the poses of the hip and foot trackers, and the wrists the PS Moves fall back on.
 //
 // The cameras are not synchronized, so frames are not paired: each joint has its own Kalman
 // filter (position and velocity), and every camera frame updates it with the pixel where that
@@ -24,7 +24,7 @@
 // World: the same space as the cameras' calibration, SteamVR raw space in metres. Times are
 // seconds on one clock (MonoSeconds()).
 
-// The joints the trackers need. Even ones are the person's left.
+// The joints the trackers and the hands need. Even ones are the person's left.
 enum BodyJoint {
     kLeftShoulder,
     kRightShoulder,
@@ -38,11 +38,13 @@ enum BodyJoint {
     kRightHeel,
     kLeftToe,
     kRightToe,
+    kLeftWrist,
+    kRightWrist,
     kJointCount
 };
 
 // Each joint's number among MediaPipe's 33 pose points.
-constexpr int kJointLandmark[kJointCount] = {11, 12, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32};
+constexpr int kJointLandmark[kJointCount] = {11, 12, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 15, 16};
 
 // One camera frame: where the camera saw each joint, in pixels, and how sure the pose model was
 // that the joint is in view (0 to 1).
@@ -88,6 +90,8 @@ public:
     bool Joint(int joint, double now, Vec3* position, bool* holding = nullptr) const;
     TrackerPose Waist(double now) const;
     TrackerPose Foot(bool left, double now) const;
+    // Position and velocity only.
+    TrackerPose Wrist(bool left, double now) const;
 
     // Counters since the last call.
     Stats TakeStats();

@@ -119,6 +119,7 @@ public:
 
     TrackerPose Waist(double now) const { return filter_.Waist(now); }
     TrackerPose Foot(bool left, double now) const { return filter_.Foot(left, now); }
+    TrackerPose Wrist(bool left, double now) const { return filter_.Wrist(left, now); }
     // Where the calibrated cameras saw the head (midway between the ears) since the last call.
     void TakeHeadSightings(std::vector<HeadSighting>* out);
 
