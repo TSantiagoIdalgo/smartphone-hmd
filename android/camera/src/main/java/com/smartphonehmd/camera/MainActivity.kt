@@ -500,7 +500,8 @@ class MainActivity : ComponentActivity() {
                 }
             }.also {
                 encoder = it
-                videoStatus = "Video H.264 (${it.name}${if (it.bitrateMode.isEmpty()) "" else ", ${it.bitrateMode}"})"
+                val mode = if (it.bitrateMode.isEmpty()) "" else ", ${it.bitrateMode}"
+                videoStatus = "Video H.264 (${it.name}$mode${if (it.askedToHoldNoFrames) ", sin retener" else ""})"
                 Log.i(TAG, "Video encoder ${it.name} ${width}x$height at $fps fps")
             }
         } catch (e: Exception) {

@@ -1,6 +1,7 @@
 package com.smartphonehmd.camera
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -55,8 +56,11 @@ object EncoderSelfTest {
         }
         val bytes = synchronized(stream) { stream.toByteArray() }
         File(context.filesDir, FILE).writeBytes(bytes)
+        val delay = encoder.delay.average(SystemClock.elapsedRealtimeNanos())
         Log.i(TAG, "Encoder self-test: $frames frames, $keyframes keyframes, ${bytes.size} bytes from ${encoder.name}, " +
-            "bitrate mode ${encoder.bitrateMode.ifEmpty { "left to the encoder" }}")
+            "bitrate mode ${encoder.bitrateMode.ifEmpty { "left to the encoder" }}, " +
+            "${if (encoder.askedToHoldNoFrames) "asked" else "not asked"} to hold no frames, " +
+            "delay ${delay?.let { "%.0f ms".format(it) } ?: "unknown"}")
     }
 
     // Planes Y, U, V: grey, with a red square of 160x120 at the top left.

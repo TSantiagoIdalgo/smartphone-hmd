@@ -35,6 +35,10 @@ class VideoEncoder(
     /** How the encoder keeps to the bitrate: "CBR" (steady), "VBR", or "" if it was left to choose. */
     val bitrateMode: String
 
+    /** Whether it took, without failing, being asked not to hold frames back ([MediaFormat.KEY_LOW_LATENCY]). */
+    var askedToHoldNoFrames = false
+        private set
+
     /** How long frames take from [encode] until they come out encoded, in ms. */
     val delay = AverageMeter()
 
@@ -75,12 +79,14 @@ class VideoEncoder(
             MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR,
             MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR,
         ).filter { capabilities?.isBitrateModeSupported(it) == true } + listOf(null)
-        val tries = listOf(true to modes.first()) + modes.map { false to it }
+        // Hints: 2 real time and holding no frame, 1 real time, 0 none.
+        val tries = listOf(2 to modes.first(), 1 to modes.first()) + modes.map { 0 to it }
         for ((i, attempt) in tries.withIndex()) {
-            val (lowLatency, mode) = attempt
+            val (hints, mode) = attempt
             try {
-                codec.configure(format(bitrate, lowLatency, mode), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                codec.configure(format(bitrate, hints, mode), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
                 codec.start()
+                askedToHoldNoFrames = hints == 2 && Build.VERSION.SDK_INT >= 30
                 return when (mode) {
                     MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR -> "CBR"
                     MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR -> "VBR"
@@ -94,18 +100,21 @@ class VideoEncoder(
         error("unreachable")
     }
 
-    private fun format(bitrate: Int, lowLatency: Boolean, bitrateMode: Int?) =
+    private fun format(bitrate: Int, hints: Int, bitrateMode: Int?) =
         MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, KEYFRAME_INTERVAL_S)
             if (bitrateMode != null) setInteger(MediaFormat.KEY_BITRATE_MODE, bitrateMode)
-            if (lowLatency) {
+            if (hints >= 1) {
                 setInteger(MediaFormat.KEY_PRIORITY, 0) // real time
                 if (Build.VERSION.SDK_INT >= 29) setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
                 if (Build.VERSION.SDK_INT >= 30) setInteger(MediaFormat.KEY_LATENCY, 1)
             }
+            // Meant for decoders, but some Codec2 encoders take it too: without it, many hold each
+            // frame until the next one comes in, a whole frame of delay.
+            if (hints >= 2 && Build.VERSION.SDK_INT >= 30) setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
         }
 
     /**

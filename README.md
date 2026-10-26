@@ -223,7 +223,8 @@ comparar.
    La imagen se endereza sola esté el móvil vertical u horizontal.
 4. En la pantalla: los puntos verdes son seguros, los amarillos dudosos y los rojos adivinados. Las
    líneas de arriba dicen los cuadros por segundo de la cámara y del video (con el modo del
-   codificador: CBR es un bitrate parejo, lo mejor para el Wi-Fi), la demora de cada tramo dentro
+   codificador: CBR es un bitrate parejo, lo mejor para el Wi-Fi; y «sin retener» si aceptó que se
+   le pida no guardarse cada cuadro hasta que llega el siguiente), la demora de cada tramo dentro
    del móvil (de la cámara a la app, el codificador y el envío de los paquetes), las poses por
    segundo que vuelven de la PC, el tiempo de ida y vuelta (desde que la cámara toma el cuadro
    hasta que su pose vuelve al móvil) y qué tan seguros están la cadera, las rodillas y los
