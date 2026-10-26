@@ -102,3 +102,17 @@ jobs:
         with:
           name: smartphone_hmd-driver
           path: driver/build/smartphone_hmd
+
+  esp32-camera:
+    name: ESP32-CAM camera
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/compile-sketches@v1
+        with:
+          fqbn: esp32:esp32:esp32cam
+          platforms: |
+            - name: esp32:esp32
+              source-url: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          sketch-paths: |
+            - esp32/hmd_camera

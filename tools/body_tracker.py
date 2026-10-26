@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Body tracking on the PC: finds the pose of the person the body camera phones see.
 
-The phones (the "HMD Cámara" app) send their camera's video here. For each phone this decodes it,
+The phones (the "HMD Cámara" app) send their camera's video here, as H.264; ESP32-CAM boards
+(esp32/hmd_camera) send it the same way, each frame a JPEG picture. For each phone this decodes it,
 finds the person's 33 pose points with MediaPipe's pose model, run on several CPU cores with
 LiteRT, and sends them back to the phone, which draws them on its screen. It also finds a lit PS
 Move's bulb near the hands, for calibrating the cameras, and hands each frame's points to the
@@ -66,6 +67,7 @@ FLAG_POSE = 1
 FLAG_EXPOSURE_LOCKED = 2
 FLAG_BALL = 4
 FLAG_KEYFRAME = 8
+FLAG_JPEG = 16  # video packets: the frame is a JPEG picture (an ESP32-CAM), not H.264
 MAX_PAYLOAD = 1400
 
 # Little-endian, laid out as in android/camera/.../BodyProtocol.kt.
@@ -343,10 +345,11 @@ class Camera:
         self.next_snapshot_ns = 0
         self.snapshots = 0
 
-    def decode(self, data):
+    def decode(self, data, jpeg=False):
         """(worked, the decoded frame or None)."""
-        if self.decoder is None:
-            self.decoder = av.CodecContext.create("h264", "r")
+        codec = "mjpeg" if jpeg else "h264"
+        if self.decoder is None or self.decoder.name != codec:
+            self.decoder = av.CodecContext.create(codec, "r")
             self.decoder.thread_type = "SLICE"  # frame threads would hold each frame back
         try:
             frames = self.decoder.decode(av.Packet(data))
@@ -460,7 +463,7 @@ class Tracker:
         if camera.waiting_keyframe:
             self.discard(camera, arrived_ns)
             return
-        worked, image = camera.decode(frame["data"])
+        worked, image = camera.decode(frame["data"], bool(frame["flags"] & FLAG_JPEG))
         if not worked:
             camera.waiting_keyframe = True
             self.discard(camera, arrived_ns)

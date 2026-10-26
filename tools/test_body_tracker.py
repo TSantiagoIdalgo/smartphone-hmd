@@ -63,6 +63,20 @@ def encode(images, gop=30):
     return packets
 
 
+def encode_jpeg(images):
+    """Each picture as a JPEG, as an ESP32-CAM sends it: (bytes, keyframe) pairs."""
+    encoder = bt.av.CodecContext.create("mjpeg", "w")
+    encoder.height, encoder.width = images[0].shape[:2]
+    encoder.pix_fmt = "yuvj420p"
+    encoder.time_base = Fraction(1, 1000)
+    packets = []
+    for i, image in enumerate(images):
+        frame = bt.av.VideoFrame.from_ndarray(image, format="rgb24")
+        frame.pts = i
+        packets += [(bytes(p), True) for p in encoder.encode(frame)]
+    return packets
+
+
 def marked_picture(height=640, width=480):
     """An upright grey picture with a red square at its top left."""
     image = bt.np.full((height, width, 3), 128, dtype=bt.np.uint8)
@@ -379,6 +393,25 @@ class TrackerTest(unittest.TestCase):
         self.assertEqual(shape, (640, 480, 3))
         self.assertGreater(top_left[0], 150, f"the red corner should be at the top left, got {top_left}")
         self.assertLess(top_left[2], 100)
+        self.assertEqual(self.sent_of_type(bt.TYPE_KEYFRAME_REQUEST), [])
+
+    @needs_video
+    def test_takes_an_esp32_cams_jpeg_pictures(self):
+        # Sideways like a phone, each frame a whole JPEG: no waiting for keyframes after a loss.
+        sensor = bt.np.ascontiguousarray(bt.np.rot90(marked_picture(), 1))
+        encoded = encode_jpeg([sensor] * 4)
+        for i, frame in enumerate(encoded):
+            capture = 10 * SECOND + i * FRAME_NS
+            self.pc_now = capture + 30_000_000
+            packets = self.phone.packets(i + 1, capture, frame, flags=bt.FLAG_JPEG)
+            for chunk, packet in enumerate(packets):
+                if not (i == 1 and chunk == 0):
+                    self.tracker.handle(packet, PHONE, capture + 25_000_000)
+        bodies = [bt.parse_body(data) for data in self.sent_of_type(bt.TYPE_BODY)]
+        self.assertEqual([b["seq"] for b in bodies], [1, 3, 4])
+        shape, top_left, _ = self.poses[0].seen[0]
+        self.assertEqual(shape, (640, 480, 3))
+        self.assertGreater(top_left[0], 150, f"the red corner should be at the top left, got {top_left}")
         self.assertEqual(self.sent_of_type(bt.TYPE_KEYFRAME_REQUEST), [])
 
     @needs_video
