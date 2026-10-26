@@ -243,6 +243,12 @@ está lista su pose, los cuadros perdidos y la seguridad de cada punto. "saltado
 llegaron mientras el modelo seguía con el anterior: la pose se calcula solo en el más nuevo, para
 que el retraso no crezca. Si son muchos, prueba más `--threads` o un modelo más rápido.
 
+`--show` muestra en la PC lo que ve cada cámara, en vivo y con sus puntos y el anillo de la bola
+del Move: abre en el navegador una página (`http://localhost:8080`, u otro puerto con
+`--show 8081`) con un video de cada móvil, de unos 15 cuadros por segundo. Así se puede filmar con
+la cámara trasera, que es mejor, y ver igual cómo encuadra cada móvil sin mirar su pantalla. La
+página se arma aparte de la pose y no la atrasa.
+
 `--snapshots carpeta` guarda cada 2 segundos una foto de lo que ve cada cámara, con los puntos en
 verde y la bola del Move en un anillo: sirve para ver por qué no se detecta algo. Van numeradas
 (`camara_19BB_0001.jpg`, …), y las que tienen una bola terminan en `_bola`.

@@ -16,6 +16,7 @@ ankles.
     python tools/body_tracker.py --threads 8       # more cores per camera
     python tools/body_tracker.py --record a.jsonl  # also save every pose, to replay later
     python tools/body_tracker.py --snapshots fotos # a picture of each camera every 2 s
+    python tools/body_tracker.py --show            # the cameras live in the browser
     python tools/body_tracker.py --ball-color magenta  # only a bulb of the Move's colour
 
 The first run downloads the pose model next to this script. On Windows, allow Python through the
@@ -365,10 +366,12 @@ class Tracker:
     """
 
     def __init__(self, send, make_pose, out=print, record=None, now=time.perf_counter_ns,
-                 threaded=True, report_every_ns=2_000_000_000, send_driver=None, snapshots=None, ball_hue=None):
+                 threaded=True, report_every_ns=2_000_000_000, send_driver=None, snapshots=None, ball_hue=None,
+                 viewer=None):
         self.send = send
         self.send_driver = send_driver
         self.snapshots = snapshots  # a folder for a picture of each camera every few seconds
+        self.viewer = viewer  # a Viewer, to see the cameras on the PC
         self.ball_hue = ball_hue  # of the Move's bulb, in degrees; None: any colour
         self.make_pose = make_pose
         self.out = out
@@ -518,6 +521,8 @@ class Tracker:
             found = flags & FLAG_BALL
             name = f"camara_{camera.device & 0xFFFF:04X}_{camera.snapshots:04d}{'_bola' if found else ''}.jpg"
             save_snapshot(Path(self.snapshots) / name, rgb, points, ball if found else None)
+        if self.viewer:
+            self.viewer.update(f"{camera.device & 0xFFFF:04X}", rgb, points, ball if flags & FLAG_BALL else None)
         stats = camera.stats
         with stats.lock:
             stats.poses += 1
@@ -848,10 +853,9 @@ def bright_blob(patch, radius=None, hue=None):
     return best
 
 
-def save_snapshot(path, rgb, points, ball):
-    """A JPEG of what the pose and ball finders saw: the points in green and the ball in a ring."""
-    if cv2 is None:
-        return
+def draw_view(rgb, points, ball):
+    """What the pose and ball finders saw, in BGR for OpenCV: the points in green and the ball in a
+    ring."""
     picture = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
     height, width = picture.shape[:2]
     for x, y, _, visibility, _ in points:
@@ -859,8 +863,140 @@ def save_snapshot(path, rgb, points, ball):
             cv2.circle(picture, (int(x * width), int(y * height)), 3, (0, 255, 0), -1)
     if ball:
         cv2.circle(picture, (int(ball[0] * width), int(ball[1] * height)), int(ball[2] * width) + 6, (255, 255, 0), 2)
+    return picture
+
+
+def save_snapshot(path, rgb, points, ball):
+    """A JPEG of draw_view."""
+    if cv2 is None:
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(path), picture)
+    cv2.imwrite(str(path), draw_view(rgb, points, ball))
+
+
+VIEW_PAGE = """<!doctype html>
+<html lang="es"><meta charset="utf-8"><title>Cámaras del cuerpo</title>
+<style>
+body { background: #111; color: #ddd; font-family: sans-serif; margin: 16px; }
+.cams { display: flex; flex-wrap: wrap; gap: 16px; }
+figure { margin: 0; }
+img { max-height: 85vh; max-width: 100%; background: #000; }
+</style>
+<p id="waiting">Esperando las cámaras…</p>
+<div class="cams" id="cams"></div>
+<script>
+const shown = new Set();
+async function refresh() {
+  try {
+    const names = await (await fetch("/cameras")).json();
+    for (const name of names) {
+      if (shown.has(name)) continue;
+      shown.add(name);
+      const figure = document.createElement("figure");
+      figure.innerHTML = `<figcaption>Cámara ${name}</figcaption><img src="/video/${name}">`;
+      document.getElementById("cams").appendChild(figure);
+    }
+    document.getElementById("waiting").hidden = names.length > 0;
+  } catch (e) {}
+}
+refresh();
+setInterval(refresh, 2000);
+</script>
+</html>
+"""
+
+
+class Viewer:
+    """What each camera sees, with its pose points and the Move's ball, on a web page of this PC
+    (http://localhost:PORT), so the phones can film with the back camera and still be checked.
+    Each camera is a live picture (MJPEG) of up to `fps` frames a second, drawn and compressed on
+    the page's own threads: the pose only leaves its newest frame here."""
+
+    def __init__(self, port=8080, fps=15):
+        import http.server
+
+        self.cond = threading.Condition()
+        self.latest = {}  # camera name -> (count, rgb, points, ball)
+        self.count = 0
+        self.period = 1 / fps
+        self.closed = False
+        viewer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                viewer.serve(self)
+
+            def log_message(self, *args):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        self.server.daemon_threads = True
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, name="viewer", daemon=True)
+        self.thread.start()
+
+    @property
+    def url(self):
+        return f"http://localhost:{self.port}/"
+
+    def update(self, name, rgb, points, ball):
+        """A camera's newest frame and what was found in it. Any thread."""
+        with self.cond:
+            self.count += 1
+            self.latest[name] = (self.count, rgb, points, ball)
+            self.cond.notify_all()
+
+    def close(self):
+        with self.cond:
+            self.closed = True
+            self.cond.notify_all()
+        self.server.shutdown()
+        self.server.server_close()
+
+    def serve(self, request):
+        if request.path == "/":
+            self.reply(request, "text/html; charset=utf-8", VIEW_PAGE.encode())
+        elif request.path == "/cameras":
+            with self.cond:
+                names = sorted(self.latest)
+            self.reply(request, "application/json", json.dumps(names).encode())
+        elif request.path.startswith("/video/"):
+            self.stream(request, request.path[len("/video/"):])
+        else:
+            request.send_error(404)
+
+    @staticmethod
+    def reply(request, kind, body):
+        request.send_response(200)
+        request.send_header("Content-Type", kind)
+        request.send_header("Content-Length", str(len(body)))
+        request.send_header("Cache-Control", "no-store")
+        request.end_headers()
+        request.wfile.write(body)
+
+    def stream(self, request, name):
+        request.send_response(200)
+        request.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+        request.send_header("Cache-Control", "no-store")
+        request.end_headers()
+        shown = 0
+        try:
+            while True:
+                with self.cond:
+                    self.cond.wait_for(lambda: self.closed or self.latest.get(name, (0,))[0] > shown, timeout=1.0)
+                    if self.closed:
+                        return
+                    entry = self.latest.get(name)
+                if entry is None or entry[0] <= shown:
+                    continue
+                shown, rgb, points, ball = entry
+                jpeg = cv2.imencode(".jpg", draw_view(rgb, points, ball), [cv2.IMWRITE_JPEG_QUALITY, 75])[1].tobytes()
+                request.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n" % len(jpeg))
+                request.wfile.write(jpeg + b"\r\n")
+                request.wfile.flush()
+                time.sleep(self.period)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return  # the page was closed
 
 
 class MediaPipePose:
@@ -914,7 +1050,7 @@ def default_threads():
     return max(2, min(8, (os.cpu_count() or 8) // 4))
 
 
-def run(port, record_path, model, threads, engine, driver_port, snapshots, ball_color):
+def run(port, record_path, model, threads, engine, driver_port, snapshots, ball_color, show_port=None):
     model_path = ensure_model(model)
     if engine == "mediapipe":
         make_pose, cores = (lambda: MediaPipePose(model_path)), "1 núcleo, con MediaPipe"
@@ -937,11 +1073,22 @@ def run(port, record_path, model, threads, engine, driver_port, snapshots, ball_
         except OSError:
             pass
 
+    viewer = None
+    if show_port is not None:
+        try:
+            viewer = Viewer(show_port)
+        except OSError as e:
+            print(f"No se pudo mostrar las cámaras en el puerto {show_port} ({e}); prueba otro: --show 8081")
     tracker = Tracker(sock.sendto, make_pose, record=record, send_driver=send_driver, snapshots=snapshots,
-                      ball_hue=BALL_HUES.get(ball_color))
+                      ball_hue=BALL_HUES.get(ball_color), viewer=viewer)
     ball = f"; bola del Move {ball_color}" if ball_color in BALL_HUES else ""
     print(f"Modelo «{model}» listo ({cores}{ball}). Esperando las cámaras en el puerto UDP {port}… "
           "(Ctrl+C para salir)")
+    if viewer:
+        print(f"Las cámaras se ven en {viewer.url} (se abre en el navegador)")
+        import webbrowser
+
+        webbrowser.open(viewer.url)
     try:
         while True:
             tracker.tick(time.perf_counter_ns())
@@ -956,6 +1103,8 @@ def run(port, record_path, model, threads, engine, driver_port, snapshots, ball_
         pass
     finally:
         tracker.close()
+        if viewer:
+            viewer.close()
         if record:
             record.close()
         sock.close()
@@ -979,6 +1128,9 @@ def main():
                         help="save what each camera sees, with the points and the Move's ball, every 2 s")
     parser.add_argument("--ball-color", choices=sorted(BALL_HUES) + ["any"], default="any",
                         help="the colour of the lit Move's bulb, so nothing else is taken for it (default any)")
+    parser.add_argument("--show", type=int, nargs="?", const=8080, metavar="PORT",
+                        help="show what each camera sees, with its points, on a web page of this PC "
+                             "(http://localhost:8080 unless another port is given), opened in the browser")
     args = parser.parse_args()
     if args.threads < 1:
         parser.error("--threads must be 1 or more")
@@ -995,7 +1147,7 @@ def main():
               + ("  y  pip install mediapipe" if args.engine == "mediapipe" else ""))
         return 1
     run(args.port, args.record, args.model, args.threads, args.engine, args.driver_port, args.snapshots,
-        args.ball_color)
+        args.ball_color, args.show)
     return 0
 
 

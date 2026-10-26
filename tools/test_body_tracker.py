@@ -276,6 +276,36 @@ class BallTest(unittest.TestCase):
         self.assertIsNone(bt.find_ball(self.picture, self.points, magenta))
 
 
+@unittest.skipIf(cv2 is None or bt.np is None, "needs OpenCV and NumPy")
+class ViewerTest(unittest.TestCase):
+    """The page that shows the cameras on the PC."""
+
+    def setUp(self):
+        self.viewer = bt.Viewer(port=0)  # any free port
+        self.addCleanup(self.viewer.close)
+
+    def get(self, path):
+        return urllib.request.urlopen(self.viewer.url.rstrip("/") + path, timeout=5)
+
+    def test_lists_the_cameras_on_its_page(self):
+        self.assertIn("Cámaras del cuerpo", self.get("/").read().decode())
+        self.assertEqual(json.loads(self.get("/cameras").read()), [])
+        self.viewer.update("19BB", marked_picture(), standing_pose(), None)
+        self.assertEqual(json.loads(self.get("/cameras").read()), ["19BB"])
+
+    def test_streams_each_camera_live(self):
+        self.viewer.update("19BB", marked_picture(), standing_pose(), (0.5, 0.5, 0.02))
+        with self.get("/video/19BB") as stream:
+            self.assertTrue(stream.headers["Content-Type"].startswith("multipart/x-mixed-replace"))
+            self.assertEqual(stream.readline(), b"--frame\r\n")
+            self.assertEqual(stream.readline(), b"Content-Type: image/jpeg\r\n")
+            length = int(stream.readline().split(b":")[1])
+            stream.readline()
+            picture = cv2.imdecode(bt.np.frombuffer(stream.read(length), bt.np.uint8), cv2.IMREAD_COLOR)
+        self.assertEqual(picture.shape, (640, 480, 3))
+        self.assertGreater(picture[60, 60, 2], 150, "the red corner, in BGR")
+
+
 class TrackerTest(unittest.TestCase):
     def setUp(self):
         self.sent = []
@@ -309,6 +339,20 @@ class TrackerTest(unittest.TestCase):
     def test_answers_the_search_for_the_pc(self):
         self.tracker.handle(bt.header(bt.TYPE_DISCOVER), PHONE, 0)
         self.assertEqual(self.sent, [(bt.header(bt.TYPE_PC_HERE), PHONE)])
+
+    @needs_video
+    def test_shows_each_camera_on_the_pc(self):
+        shown = []
+
+        class FakeViewer:
+            def update(self, name, rgb, points, ball):
+                shown.append((name, rgb.shape, len(points), ball))
+
+        self.tracker.viewer = FakeViewer()
+        sensor = bt.np.ascontiguousarray(bt.np.rot90(marked_picture(), 1))  # as the phone sends it
+        self.stream(encode([sensor] * 3), 10 * SECOND)
+        self.assertEqual(shown, [(f"{DEVICE & 0xFFFF:04X}", (640, 480, 3), 33, None)] * 3,
+                         "upright, as the pose saw it")
 
     @needs_video
     def test_keeps_a_numbered_picture_every_two_seconds(self):
