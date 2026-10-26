@@ -488,6 +488,7 @@ void PsmsClient::Stream(const Api& api)
         PSMVector3f position;
         double sent;
         float rumble;
+        MoveState last;  // kept, untracked, when a read fails, so the Move keeps its hand
     };
     std::vector<Followed> followed;
     std::vector<MoveState> moves;
@@ -658,7 +659,7 @@ void PsmsClient::Stream(const Api& api)
                             id, PSMStreamFlags_includePositionData | PSMStreamFlags_includePhysicsData,
                             kRequestTimeoutMs) == PSMResult_Success) {
                         followed.push_back({id, static_cast<int>(list.controller_hand[i]), false, PSMVector3f{}, 0.0,
-                                            0.0f});
+                                            0.0f, MoveState{}});
                     } else {
                         api.FreeControllerListener(id);
                     }
@@ -673,6 +674,10 @@ void PsmsClient::Stream(const Api& api)
         for (Followed& f : followed) {
             PSMPSMove& state = *move_state;
             if (api.GetControllerPSMoveState(f.id, &state) != PSMResult_Success) {
+                if (f.last.id >= 0) {
+                    f.last.tracking = false;
+                    moves.push_back(f.last);
+                }
                 continue;
             }
             const bool tracking = state.bIsCurrentlyTracking;
@@ -686,7 +691,8 @@ void PsmsClient::Stream(const Api& api)
                 f.position = position;
                 f.sent = now;
             }
-            moves.push_back(ToMoveState(state, f.id, f.hand, now));
+            f.last = ToMoveState(state, f.id, f.hand, now);
+            moves.push_back(f.last);
             const float rumble = Rumble(f.id);
             if (rumble != f.rumble &&
                 api.SetControllerRumble(f.id, PSMControllerRumbleChannel_All, rumble) == PSMResult_Success) {
