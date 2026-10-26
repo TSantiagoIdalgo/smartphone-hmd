@@ -261,6 +261,32 @@ algo de ese color. Úsalo al calibrar con el color con que PSMoveServiceEx encie
 primero sale magenta, el segundo cian): así una lámpara o una prenda de otro color junto a la mano
 no se confunde con ella.
 
+### Una ESP32-CAM como cámara
+
+Una placa ESP32-CAM (AI Thinker, con cámara OV3660 u OV2640) sirve de cámara igual que un móvil, y
+se mezcla con ellos: `body_tracker.py` y el driver la tratan como una cámara más, que se calibra con
+Ctrl+Alt+C como las otras. Solo necesita 5 V (un cargador o un powerbank de al menos 1 A: con menos
+se reinicia sola al conectar el Wi-Fi), así que la puedes poner donde quieras.
+
+1. En el Arduino IDE, instala las placas "esp32" de Espressif (Preferencias → URLs adicionales:
+   `https://espressif.github.io/arduino-esp32/package_esp32_index.json`) y elige la placa
+   **AI Thinker ESP32-CAM**.
+2. Abre `esp32/hmd_camera/hmd_camera.ino`, pon tu red en `WIFI_SSID` y `WIFI_PASSWORD` y súbelo
+   (con el adaptador USB-serie, GPIO0 a GND al subir).
+3. En el monitor serie (115200) ves su número (`HMD Cámara ESP32 XXXX`), cuando encuentra la PC y
+   sus cuadros por segundo. La PC la muestra como cualquier cámara: `Cámara XXXX`.
+
+Ajustes, arriba en el programa:
+
+- `QUARTER_TURNS`: cuartos de vuelta a la derecha para que la imagen quede derecha según cómo
+  montaste la placa; míralo con `--show`. En vertical (placa parada) entras más entero.
+- `MIRROR`: la imagen no debe salir espejada (un texto se lee al revés), o no se puede calibrar.
+- `EXPOSURE` (0, automática): un valor fijo corto, 150-400, para que brazos y pies no salgan
+  movidos; necesita buena luz. `GAIN` aclara a cambio de ruido.
+- `FRAME_SIZE` (640x480) y `JPEG_QUALITY` (12): más resolución o calidad, menos cuadros por segundo.
+
+Solo tiene Wi-Fi de 2,4 GHz y una antena chica: cerca del router anda mejor.
+
 ### Cuerpo completo en SteamVR
 
 Necesita dos cámaras, la posición de la cabeza con la luz del visor (ver "Posición de la cabeza con
