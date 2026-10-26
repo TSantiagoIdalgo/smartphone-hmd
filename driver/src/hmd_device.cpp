@@ -58,9 +58,13 @@ bool LightDistanceHotkeyDown()
     return HotkeyDown('L');
 }
 
+constexpr double kLightMeasureWaitSeconds = 60.0;  // to walk back and hold the Move to the light
 constexpr double kLightMeasureSeconds = 3.0;
 constexpr double kLightMeasureMaxDegrees = 4.0;  // the Move's bulb and the light, seen from the PS Eye
 constexpr size_t kLightMeasureMinSamples = 30;
+constexpr double kLightMeasureMinShare = 0.6;  // of the light's samples meanwhile: held there, not passing by
+constexpr double kRumbleStartSeconds = 0.15;   // the Move says: measuring, keep still
+constexpr double kRumbleDoneSeconds = 0.6;     // and: done
 
 const char* HeadStateText(HeadPositionEstimator::State state, bool light_followed)
 {
@@ -549,44 +553,84 @@ void HmdDevice::UpdateHeadPosition(std::vector<LightSample>* samples, std::vecto
 // A Move's bulb is the size PSMoveServiceEx expects, so its distance from the PS Eye is right. Held
 // against the visor's light, both lie along nearly the same line from the camera, and how far
 // apart PSMoveServiceEx puts them along it is how far off the light's distance is.
+//
+// Ctrl+Alt+L only arms it, so there is time to go back to where you play: it measures for 3 s from
+// when a Move's bulb is first against the light, within a minute. Passing by does not count: the
+// bulb must stay there most of those 3 s, or it waits again. The Move rumbles briefly when it
+// starts, and longer when it is done.
 void HmdDevice::MeasureLightDistance(double now, const std::vector<LightSample>& samples)
 {
+    if (rumble_move_ >= 0 && now >= rumble_off_at_) {
+        psms_->SetRumble(rumble_move_, 0.0f);
+        rumble_move_ = -1;
+    }
+    const auto rumble = [&](int move, double seconds) {
+        psms_->SetRumble(move, 1.0f);
+        rumble_move_ = move;
+        rumble_off_at_ = now + seconds;
+    };
     const bool down = LightDistanceHotkeyDown();
     if (down && !light_hotkey_was_down_) {
-        light_measure_until_ = now + kLightMeasureSeconds;
-        light_ratios_.clear();
-        DriverLog("Head light: measuring its distance for %.0f s; hold a Move's bulb against the light, both where "
-                  "the PS Eye sees them",
-                  kLightMeasureSeconds);
+        light_measure_deadline_ = now + kLightMeasureWaitSeconds;
+        light_measure_until_ = 0.0;
+        DriverLog("Head light: go to where you play and hold a Move's bulb against the light, both where the PS Eye "
+                  "sees them, within %.0f s; it measures for %.0f s from then, keep still until the Move rumbles "
+                  "again",
+                  kLightMeasureWaitSeconds, kLightMeasureSeconds);
     }
     light_hotkey_was_down_ = down;
-    if (light_measure_until_ == 0.0) {
+    if (light_measure_deadline_ == 0.0) {
         return;
     }
     if (head_camera_valid_ && !samples.empty()) {
         psms_->LatestMoves(&moves_);
         for (const LightSample& sample : samples) {
             const Vec3 light = sample.position - head_camera_;
+            if (!sample.tracking || Length(light) < 0.1) {
+                continue;
+            }
             for (const MoveState& move : moves_) {
                 const Vec3 bulb = move.position - head_camera_;
-                const double cosine = Dot(Unit(light), Unit(bulb));
-                if (sample.tracking && move.tracking &&
-                    cosine > std::cos(kLightMeasureMaxDegrees * 3.14159265358979 / 180.0) && Length(light) > 0.1) {
+                if (!move.tracking || Dot(Unit(light), Unit(bulb)) <
+                                          std::cos(kLightMeasureMaxDegrees * 3.14159265358979 / 180.0)) {
+                    continue;
+                }
+                if (light_measure_until_ == 0.0) {
+                    light_measure_until_ = now + kLightMeasureSeconds;
+                    light_measure_move_ = move.id;
+                    light_ratios_.clear();
+                    light_window_samples_ = 0;
+                    rumble(move.id, kRumbleStartSeconds);
+                }
+                if (move.id == light_measure_move_) {
                     light_ratios_.push_back(Length(bulb) / Length(light));
                 }
             }
+            light_window_samples_ += light_measure_until_ > 0.0;
         }
     }
-    if (now < light_measure_until_) {
+    if (light_measure_until_ == 0.0 || now < light_measure_until_) {
+        if (light_measure_until_ == 0.0 && now >= light_measure_deadline_) {
+            light_measure_deadline_ = 0.0;
+            DriverLog("Head light: no Move's bulb against the light in %.0f s, nothing measured; is a Move on (with "
+                      "body tracking or controllers_enabled), and both seen by the PS Eye?",
+                      kLightMeasureWaitSeconds);
+        }
         return;
     }
     light_measure_until_ = 0.0;
-    if (light_ratios_.size() < kLightMeasureMinSamples) {
-        DriverLog("Head light: measured %zu times only; is a Move on (with body tracking or controllers_enabled) and "
-                  "its bulb against the light, both seen by the PS Eye?",
-                  light_ratios_.size());
-        return;
+    if (light_ratios_.size() < kLightMeasureMinSamples ||
+        light_ratios_.size() < kLightMeasureMinShare * light_window_samples_) {
+        if (now >= light_measure_deadline_) {
+            light_measure_deadline_ = 0.0;
+            DriverLog("Head light: the bulb was against the light only %zu of %d times, nothing measured; hold it "
+                      "there, still, for %.0f s",
+                      light_ratios_.size(), light_window_samples_, kLightMeasureSeconds);
+        }
+        return;  // passing by: wait for it again
     }
+    light_measure_deadline_ = 0.0;
+    rumble(light_measure_move_, kRumbleDoneSeconds);
     std::nth_element(light_ratios_.begin(), light_ratios_.begin() + light_ratios_.size() / 2, light_ratios_.end());
     const double ratio = light_ratios_[light_ratios_.size() / 2];
     light_distance_scale_ = std::clamp(ratio, 0.2, 5.0);

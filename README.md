@@ -181,10 +181,17 @@ valores.
   `Head light: the eyes come out … m high` lo avisa: PSMoveServiceEx calcula la distancia por el
   tamaño aparente de la bola, y si el tamaño que tiene configurado no es el de tu bola (o la ve
   tapada a medias) la pone más lejos. Para corregirlo, con PSMoveServiceEx siguiendo un Move
-  (body tracking o `controllers_enabled`): apoya la bola del Move contra la luz del visor, donde la
-  PS Eye vea las dos, pulsa **Ctrl+Alt+L** y quédate quieto 3 segundos. Como la distancia del Move
-  sí es correcta, el driver mide cuánto se equivoca con la luz y lo guarda en
-  `head_light_distance_scale` (la línea `Head light: PSMoveServiceEx had it … times as far`).
+  (body tracking o `controllers_enabled`):
+  1. Pulsa **Ctrl+Alt+L** en la PC. No mide todavía: espera hasta un minuto, para que vuelvas a
+     donde juegas con el visor puesto.
+  2. Ahí, apoya la bola del Move contra la luz del visor, donde la PS Eye vea las dos. Cuando las ve
+     juntas, el Move vibra un instante: quédate quieto.
+  3. A los 3 segundos vibra otra vez, más largo: listo. Si la bola se apartó de la luz en ese rato,
+     no cuenta y vuelve a esperar (sin vibrar al final).
+
+  Como la distancia del Move sí es correcta, el driver mide cuánto se equivoca con la luz y lo
+  guarda en `head_light_distance_scale` (la línea `Head light: PSMoveServiceEx had it … times as
+  far`; si no pudo, `vrserver.txt` dice por qué).
   También puedes corregir el tamaño de la bola en la configuración del visor virtual de
   PSMoveServiceEx, y entonces dejar `head_light_distance_scale` en 1.
 - Con el body tracking, los móviles también ayudan a la cabeza: ver "La cabeza con las cámaras del

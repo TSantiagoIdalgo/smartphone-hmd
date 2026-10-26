@@ -111,8 +111,13 @@ private:
     double light_distance_scale_ = 1.0;
     // Ctrl+Alt+L: measuring it against a Move's bulb held to the light, whose distance is right.
     bool light_hotkey_was_down_ = false;
-    double light_measure_until_ = 0.0;  // 0: not measuring
+    double light_measure_deadline_ = 0.0;  // 0: not armed
+    double light_measure_until_ = 0.0;     // 0: waiting for the bulb against the light
+    int light_measure_move_ = -1;
+    int light_window_samples_ = 0;         // the light's, while measuring
     std::vector<double> light_ratios_;
+    int rumble_move_ = -1;                 // rumbling until rumble_off_at_
+    double rumble_off_at_ = 0.0;
     std::vector<MoveState> moves_;
     bool freeze_hotkey_was_down_ = false;
     HeadPositionEstimator::State logged_head_state_ = HeadPositionEstimator::State::NeverSeen;
