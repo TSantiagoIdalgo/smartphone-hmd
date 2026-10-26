@@ -22,6 +22,11 @@ constexpr double kReportSeconds = 10.0;
 constexpr double kPublishSeconds = 1.0 / 120.0;
 constexpr double kRadiansToDegrees = 180.0 / 3.14159265358979;
 constexpr double kFewDegreesApart = 40.0;  // between two cameras' views, for depth
+constexpr double kHeadCheckSeconds = 1.0;
+// VRChat gives each tracker to the avatar's bone nearest it when calibrating, the avatar standing
+// under the headset and facing where it looks: farther off than this, it can mix up the legs.
+constexpr double kMaxHeadOffsetM = 0.3;
+constexpr double kMaxHeadTurnDegrees = 60.0;
 // A tracker with no pose this long shows as disconnected: VRChat then does not count it, instead
 // of waiting in T-pose for full body trackers that have nowhere to be.
 constexpr double kConnectedSeconds = 10.0;
@@ -61,11 +66,12 @@ unsigned ShortId(uint32_t id)
 }  // namespace
 
 BodyTracking::BodyTracking(PsmsClient* psms, TrackerDevice* waist, TrackerDevice* left_foot, TrackerDevice* right_foot,
-                           HeadSightingQueue* head, SharedWrists* wrists)
+                           HeadSightingQueue* head, SharedWrists* wrists, HeadSightingQueue* bulbs)
     : psms_(psms),
       trackers_{waist, left_foot, right_foot},
       head_(head),
       wrists_(wrists),
+      bulbs_(bulbs),
       session_(ReadSessionConfig())
 {
     port_ = GetIntSetting("body_port", body_protocol::kPort);
@@ -119,6 +125,12 @@ void BodyTracking::Run()
         for (const HeadSighting& sighting : sightings) {
             if (head_) {
                 head_->Push(sighting);
+            }
+        }
+        session_.TakeBulbSightings(&sightings);
+        for (const HeadSighting& sighting : sightings) {
+            if (bulbs_) {
+                bulbs_->Push(sighting);
             }
         }
         if (psms_) {
@@ -267,6 +279,10 @@ void BodyTracking::Publish(double now)
         pose.qRotation.z = q.z;
         trackers_[i]->Update(pose);
     }
+    if (poses[0].valid && now >= next_head_check_) {
+        next_head_check_ = now + kHeadCheckSeconds;
+        CheckHead(poses[0]);
+    }
     if (wrists_) {
         Wrists wrists;
         for (int side = 0; side < 2; ++side) {
@@ -277,6 +293,23 @@ void BodyTracking::Publish(double now)
         }
         wrists_->Set(wrists);
     }
+}
+
+void BodyTracking::CheckHead(const TrackerPose& hips)
+{
+    vr::TrackedDevicePose_t head{};
+    vr::VRServerDriverHost()->GetRawTrackedDevicePoses(0.0f, &head, 1);
+    if (!head.bPoseIsValid) {
+        return;
+    }
+    const vr::HmdMatrix34_t& m = head.mDeviceToAbsoluteTracking;
+    const Vec3 offset{m.m[0][3] - hips.position.x, 0.0, m.m[2][3] - hips.position.z};
+    const Vec3 looks{-m.m[0][2], 0.0, -m.m[2][2]};
+    const Vec3 faces = Rotate(hips.orientation, Vec3{0.0, 0.0, -1.0});
+    const double turn = std::atan2(looks.x * faces.z - looks.z * faces.x, looks.x * faces.x + looks.z * faces.z);
+    head_offset_sum_ += Length(offset);
+    head_turn_sum_ += std::fabs(turn) * kRadiansToDegrees;
+    ++head_checks_;
 }
 
 void BodyTracking::LogReport(double now)
@@ -321,6 +354,19 @@ void BodyTracking::LogReport(double now)
         s = PoseSpread{};
     }
     published_ = 0;
+    if (head_checks_ > 0) {
+        const double offset = head_offset_sum_ / head_checks_, turn = head_turn_sum_ / head_checks_;
+        DriverLog("Body and head: the headset %.0f cm from above the hips, looking %.0f degrees away from where they "
+                  "face, on average%s",
+                  offset * 100.0, turn,
+                  offset > kMaxHeadOffsetM || turn > kMaxHeadTurnDegrees
+                      ? ". VRChat would put the trackers on the wrong legs: before calibrating it, look ahead with the "
+                        "phones seeing you and recenter facing the PS Eye (the volume key); with the head away from "
+                        "the body, see head_light_distance_scale"
+                      : "");
+        head_offset_sum_ = head_turn_sum_ = 0.0;
+        head_checks_ = 0;
+    }
     if (report.checks > 0) {
         // Two cameras close together see a point from nearly the same side: across their view they
         // place it well, but in depth several times worse.

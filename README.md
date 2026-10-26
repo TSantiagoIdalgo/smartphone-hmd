@@ -351,6 +351,8 @@ cuerpo completo y te deje en pose de T sin poder calibrar.
    final, si quedó calibrada, cuánto se aparta (en píxeles y centímetros), dónde está y hacia dónde
    mira. La calibración se guarda en SteamVR y se usa sola la próxima vez, por número de cámara: si
    desinstalas la app o borras sus datos, el móvil sale con otro número y hay que calibrar de nuevo.
+5. Para jugar, vuelve a abrir `body_tracker.py` sin `--ball-color`: así los móviles ven las bolas
+   de los dos Moves, de cualquier color (ver "Mandos").
 
 **Comprobarla:** con un solo Move encendido, como al calibrar, déjalo quieto en varios lugares
 donde lo vean los dos móviles. Cada 10 segundos, la línea `Body check:` dice a cuántos centímetros
@@ -367,6 +369,14 @@ altura del piso estuvo en promedio, la más baja y la más alta, cuánto se apar
 promedio y qué parte del tiempo tuvo posición. Quieto, lo que se aparta es su temblor: debe quedar
 en menos de 1 cm, y si no, baja `body_agility`. Al caminar, la altura más baja de cada pie es la del
 tobillo apoyado, unos 0,07-0,10 m.
+
+**Antes de calibrar el cuerpo en VRChat:** VRChat da cada tracker al hueso del avatar más cercano,
+con el avatar parado debajo del visor y mirando hacia donde mira el visor. Si la cabeza queda lejos
+de tu cuerpo (la distancia de la luz mal) o mirando hacia otro lado, te cruza las piernas: la
+izquierda mueve la derecha y al revés. Así que párate donde te vean los dos móviles, mira a la PS
+Eye, recentra (tecla de volumen) y recién entonces calibra en VRChat. La línea `Body and head:` de
+`vrserver.txt` dice cada 10 s a cuántos cm de estar sobre la cadera está el visor y cuántos grados
+mira desde donde mira la cadera; con más de 30 cm o 60° avisa que VRChat cruzaría las piernas.
 
 Ajustes de `default.vrsettings`, que normalmente no hace falta tocar:
 
@@ -385,10 +395,12 @@ Ajustes de `default.vrsettings`, que normalmente no hace falta tocar:
 Con el body tracking y la luz del visor encendidos, los móviles también ven tu cabeza (el punto
 entre las orejas) y el driver la usa junto con la luz:
 
-- **Quieta de verdad.** La PS Eye sola ve muy bien hacia los lados pero mal en profundidad (la saca
-  del tamaño de la luz), y eso hace que la cabeza se mueva adelante y atrás sin que te muevas. Los
-  móviles, desde los costados, fijan esa profundidad. Además, cuando estás quieto el driver suaviza
-  más (aprende cuánto te mueves), con o sin móviles.
+- **Quieta de verdad, y sobre tu cuerpo.** La PS Eye sola ve muy bien hacia los lados pero mal en
+  profundidad (la saca del tamaño de la luz): la cabeza se mueve adelante y atrás sin que te muevas,
+  y puede quedar hasta un metro más lejos de lo que estás. Mientras los móviles te ven, de la luz se
+  toma solo la dirección desde la PS Eye y la profundidad sale de los móviles; si al empezar la luz
+  dice otra distancia, la cabeza pasa a donde la ven los móviles, sobre la línea de la luz. Además,
+  cuando estás quieto el driver suaviza más (aprende cuánto te mueves), con o sin móviles.
 - **De espaldas a la PS Eye.** Si la cámara deja de ver la luz (giras 180°, la tapas), la cabeza
   sigue a donde la ven los móviles en vez de quedarse clavada; al volver a ver la luz pasa a ella
   suavemente. Sin la luz, la posición llega unos 0,15 s más tarde y algo menos fina, pero no salta.
@@ -398,24 +410,34 @@ y lo vuelve a encender, para comparar; `vrserver.txt` dice cuál quedó. En `vrs
 
 - `Head light: out of sight; the body cameras follow the head` cuando la siguen solo los móviles.
 - Cada 10 segundos, `Head from the body cameras:` cuántas vistas de los móviles usó, cuántas
-  descartó y cuántas llegaron tarde, y dónde aprendió que están tus orejas respecto del cuello; y
-  la línea de estadísticas de `Head light:` termina con `agility`: baja (0,01-0,1) quieto, sube al
-  moverte.
+  descartó y cuántas llegaron tarde; cuántas veces puso la cabeza donde la ven los móviles (sin la
+  luz, o a otra distancia que la de la luz); a cuántos cm de donde la ven pone la luz la cabeza (si
+  son decenas, la distancia de PSMoveServiceEx está mal: ver `head_light_distance_scale`); y dónde
+  aprendió que están tus orejas respecto del cuello. La línea de estadísticas de `Head light:`
+  termina con `agility`: baja (0,01-0,1) quieto, sube al moverte.
 
 Ajustes de `default.vrsettings`:
 
-- `head_position_depth_noise_with_body_cm` (9): cuánto se cree en la profundidad de la PS Eye
-  mientras los móviles ven la cabeza. Más alto, la profundidad sale más de los móviles: más quieta,
-  pero algo más lenta al acercarte o alejarte de la PS Eye. Más bajo, más de la PS Eye.
+- `head_position_depth_noise_with_body_cm` (50): cuánto se cree en la profundidad de la PS Eye
+  mientras los móviles ven la cabeza. Alto, la profundidad sale de los móviles: más quieta y sobre
+  tu cuerpo, pero unos 0,15 s más lenta al acercarte o alejarte de la PS Eye. Más bajo (9, como
+  antes), más de la PS Eye: solo si su distancia es buena.
 - `head_body_cameras` (true): `false` no usa los móviles para la cabeza.
 
 ## Mandos: los PS Move desde este driver (opcional)
 
 El driver puede publicar los dos PS Move como mandos en vez del Virtual Device Manager. Lo que se
-gana: con el body tracking, cuando la PS Eye deja de ver la bola de un Move (detrás del cuerpo,
-fuera de su vista, tapada por la otra mano) la mano sigue a tu muñeca, que ven los móviles, en vez de
-quedarse clavada. El driver aprende dónde queda la bola respecto de tu muñeca mientras ve las dos
-cosas, y también cuál muñeca sostiene cada Move.
+gana, con el body tracking:
+
+- **Los móviles también ven las bolas.** Con las cámaras calibradas, cada móvil busca la bola
+  encendida junto a cada mano y el driver la suma a la de la PS Eye, como con la cabeza: la
+  profundidad sale de los móviles (la de la PS Eye es la que tiembla) y, cuando la PS Eye deja de ver
+  la bola (detrás del cuerpo, fuera de su vista, tapada por la otra mano), la siguen los móviles,
+  unos 0,2 s más tarde. Cada vista va a la mano cuya bola pasa más cerca de esa línea de visión, si
+  la otra mano está claramente más lejos.
+- **Y si nadie ve la bola**, la mano sigue a tu muñeca, que ven los móviles, en vez de quedarse
+  clavada. El driver aprende dónde queda la bola respecto de tu muñeca mientras ve las dos cosas, y
+  también cuál muñeca sostiene cada Move.
 
 Viene desactivado. Para activarlo:
 
@@ -447,11 +469,15 @@ Mandos → Administrar asignaciones, como un mando Vive.
   `controller_pitch_degrees` en 90 o -90.
 - **Temblor**: la posición de cada bola pasa por el mismo filtro que la luz del visor. La PS Eye ve
   bien de costado y mal en profundidad, peor cuanto más lejos; el filtro suaviza más con la mano
-  quieta, sigue de cerca al moverla y deja afuera los saltos de una bola tapada a medias. Si aún
-  tiembla quieto, sube `controller_depth_noise_cm` (2) o baja `controller_agility` (10); si va
-  atrasado al moverlo, al revés. `controller_prediction` (1) adelanta la mano según su velocidad
-  para compensar el retraso de PSMoveServiceEx.
+  quieta, sigue de cerca al moverla y deja afuera los saltos de una bola tapada a medias. Mientras
+  los móviles la ven, la profundidad es la suya: `controller_depth_noise_with_body_cm` (30) es
+  cuánto se cree entonces en la de la PS Eye. Si aún tiembla quieto, sube
+  `controller_depth_noise_cm` (2, sin los móviles) o baja `controller_agility` (10); si va atrasado
+  al moverlo, al revés. `controller_prediction` (1) adelanta la mano según su velocidad para
+  compensar el retraso de PSMoveServiceEx.
 - En `vrserver.txt`, `Hands:` dice qué Move quedó en cada mano y, cada 10 segundos, qué parte del
-  tiempo lo vio la PS Eye, cuánto siguió a la muñeca y cuánto quedó quieto donde estaba (sin bola ni
-  muñeca), cuántas lecturas de la bola dejó afuera, cuánto tiembla en profundidad y de costado, y a
-  cuántos centímetros de la muñeca aprendió que está la bola (unos 15-20 cm).
+  tiempo lo vieron la PS Eye o los móviles, cuánto siguió a la muñeca y cuánto quedó quieto donde
+  estaba (sin bola ni muñeca), cuántas lecturas de la bola dejó afuera, cuánto tiembla en
+  profundidad y de costado, cuántas vistas de los móviles usó y cuántas descartó, y a cuántos
+  centímetros de la muñeca aprendió que está la bola (unos 15-20 cm). En `body_tracker.py`, "bola
+  del Move en N%" dice en qué parte de los cuadros encontró alguna.

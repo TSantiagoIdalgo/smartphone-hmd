@@ -19,6 +19,11 @@ constexpr double kReportSeconds = 10.0;
 constexpr int kLoopMilliseconds = 2;
 constexpr double kRecenterHoldSeconds = 1.0;
 constexpr double kFullTiltRadians = 25.0 * 3.14159265358979 / 180.0;  // the trackpad's edge
+// A camera's view of a bulb is a hand's when its line of sight passes this close to where the hand
+// is (the view is a few frames old), and the other hand's this much farther.
+constexpr double kOwnerMaxGapM = 0.25;
+constexpr double kOwnerMarginM = 0.1;
+constexpr double kMinViewDistanceM = 0.3;
 
 const char* const kHandNames[2] = {"left", "right"};
 
@@ -195,9 +200,9 @@ float MoveController::Rumble(double now)
 // MoveControllers
 // ---------------------------------------------------------------------------
 
-MoveControllers::MoveControllers(PsmsClient* psms, SharedWrists* wrists, double pitch_degrees,
-                                 const HeadPositionConfig& bulb)
-    : psms_(psms), wrists_(wrists), pitch_degrees_(pitch_degrees), bulb_config_(bulb),
+MoveControllers::MoveControllers(PsmsClient* psms, SharedWrists* wrists, HeadSightingQueue* sightings,
+                                 double pitch_degrees, const HeadPositionConfig& bulb)
+    : psms_(psms), wrists_(wrists), sightings_(sightings), pitch_degrees_(pitch_degrees), bulb_config_(bulb),
       bulbs_{HeadPositionEstimator(bulb), HeadPositionEstimator(bulb)}
 {
     devices_[0] = std::make_unique<MoveController>("SMARTPHONE-HMD-MOVE-LEFT", true);
@@ -246,10 +251,20 @@ void MoveControllers::OnEvent(const vr::VREvent_t& event)
 void MoveControllers::Run()
 {
     std::vector<MoveState> moves;
+    std::vector<HeadSighting> sightings;
+    std::vector<int> owners;
     double next_report = MonoSeconds() + kReportSeconds;
     while (running_) {
         const double now = MonoSeconds();
         psms_->LatestMoves(&moves);
+        sightings.clear();
+        if (sightings_) {
+            sightings_->Drain(&sightings);
+        }
+        owners.clear();
+        for (const HeadSighting& sighting : sightings) {
+            owners.push_back(Owner(sighting, now));
+        }
         std::sort(moves.begin(), moves.end(), [](const MoveState& a, const MoveState& b) { return a.id < b.id; });
         // Which Move in which hand.
         int ids[2] = {-1, -1};
@@ -290,13 +305,18 @@ void MoveControllers::Run()
                 devices_[h]->Update(false, HandPose{}, 0, 0.0f);
                 continue;
             }
-            // The bulb, filtered; seen while the filter follows it.
+            // The bulb, filtered; seen while the filter follows it, from the PS Eye or the phones.
             HeadPositionEstimator& bulb = bulbs_[h];
             bulb.SetCamera(camera_valid, camera, cameras);
             bulb.AddLight(move->time, move->position, move->tracking, Vec3{});
+            for (size_t i = 0; i < sightings.size(); ++i) {
+                if (owners[i] == h) {
+                    bulb.AddSighting(now, sightings[i]);
+                }
+            }
             bulb.Tick(now, true);
             MoveState filtered = *move;
-            filtered.tracking = bulb.LightFollowed(now);
+            filtered.tracking = bulb.state() == HeadPositionEstimator::State::Live;
             if (filtered.tracking) {
                 const HeadPoseOut out = bulb.Output(now, Quat{}, Vec3{});
                 filtered.position = out.position;
@@ -318,6 +338,24 @@ void MoveControllers::Run()
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(kLoopMilliseconds));
     }
+}
+
+int MoveControllers::Owner(const HeadSighting& sighting, double now) const
+{
+    const Vec3 ray = sighting.model.Ray(sighting.u, sighting.v);
+    double gaps[2] = {1e9, 1e9};
+    for (int h = 0; h < 2; ++h) {
+        const HandPose pose = hands_[h].Pose(now);
+        const Vec3 to = pose.position - sighting.model.position;
+        if (ids_[h] >= 0 && pose.valid && Dot(to, ray) > kMinViewDistanceM) {
+            gaps[h] = Length(to - ray * Dot(to, ray));
+        }
+    }
+    const int nearest = gaps[0] <= gaps[1] ? 0 : 1;
+    if (gaps[nearest] > kOwnerMaxGapM || gaps[1 - nearest] < gaps[nearest] + kOwnerMarginM) {
+        return -1;
+    }
+    return nearest;
 }
 
 void MoveControllers::CheckRecenter(int hand, const MoveState& move, double now)
@@ -352,19 +390,21 @@ void MoveControllers::LogReport()
         const MoveHand::Stats stats = hands_[h].TakeStats();
         const HeadPositionEstimator::Stats bulb = bulbs_[h].TakeStats();
         const int total = stats.tracking + stats.from_wrist + stats.held;
-        char part[256];
+        char part[512];
         if (ids_[h] < 0 || total == 0) {
             std::snprintf(part, sizeof(part), "%s %s no Move", h > 0 ? ";" : "", kHandNames[h]);
         } else {
             const Vec3 offset = hands_[h].BulbFromWrist();
             std::snprintf(part, sizeof(part),
-                          "%s %s Move %d, %.0f%% of the time seen by the PS Eye, %.0f%% on the %s wrist, %.0f%% "
-                          "held where it was (%d jumps not believed, %d bulb readings left out); its depth "
-                          "shakes %.0f mm and sideways %.0f, agility %.2f; the bulb %.0f cm from the wrist",
+                          "%s %s Move %d, %.0f%% of the time seen by the PS Eye or the phones, %.0f%% on the %s "
+                          "wrist, %.0f%% held where it was (%d jumps not believed, %d bulb readings left out); its "
+                          "depth shakes %.0f mm and sideways %.0f, agility %.2f; the phones' views of it: %d used, %d "
+                          "left out, %d too late, found %d times without the PS Eye; the bulb %.0f cm from the wrist",
                           h > 0 ? ";" : "", kHandNames[h], ids_[h], 100.0 * stats.tracking / total,
                           100.0 * stats.from_wrist / total, kHandNames[hands_[h].wrist()], 100.0 * stats.held / total,
                           stats.jumps, bulb.rejected + bulb.implausible, bulb.depth_innovation_rms_m * 1000.0,
-                          bulb.lateral_innovation_rms_m * 1000.0, bulb.agility, Length(offset) * 100.0);
+                          bulb.lateral_innovation_rms_m * 1000.0, bulb.agility, bulb.sightings,
+                          bulb.sightings_rejected, bulb.sightings_late, bulb.sighting_starts, Length(offset) * 100.0);
         }
         text += part;
     }

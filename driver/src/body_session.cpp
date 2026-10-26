@@ -23,6 +23,11 @@ constexpr double kDegreesPerRadian = 180.0 / 3.14159265358979;
 constexpr int kLeftEar = 7;  // among MediaPipe's pose points
 constexpr int kRightEar = 8;
 constexpr size_t kMaxHeadSightings = 64;
+constexpr size_t kMaxBulbSightings = 64;
+// A bulb's middle is found to a pixel or two in a picture 640 across; partly hidden, it is off by a
+// share of its size.
+constexpr double kBulbPixelNoise = 1.5;
+constexpr double kBulbNoisePerRadius = 0.25;
 
 double Median(std::vector<double> values)
 {
@@ -141,6 +146,20 @@ bool BodySession::AddFrame(const body_protocol::Frame& frame, double arrived)
             }
         }
     }
+    // Every bulb by a hand, for the controllers; not while calibrating, as above.
+    if (camera.calibrated && !calibrating_) {
+        const double scale = std::max(frame.width, frame.height) / 640.0;
+        for (int b = 0; b < frame.bulbs && bulb_sightings_.size() < kMaxBulbSightings; ++b) {
+            HeadSighting sighting;
+            sighting.camera = frame.camera;
+            sighting.time = time;
+            sighting.model = camera.model;
+            sighting.u = frame.bulb[b][0] * frame.width;
+            sighting.v = frame.bulb[b][1] * frame.height;
+            sighting.noise = std::max(kBulbPixelNoise * scale, kBulbNoisePerRadius * frame.bulb[b][2] * frame.width);
+            bulb_sightings_.push_back(sighting);
+        }
+    }
     return fresh;
 }
 
@@ -148,6 +167,12 @@ void BodySession::TakeHeadSightings(std::vector<HeadSighting>* out)
 {
     out->swap(head_sightings_);
     head_sightings_.clear();
+}
+
+void BodySession::TakeBulbSightings(std::vector<HeadSighting>* out)
+{
+    out->swap(bulb_sightings_);
+    bulb_sightings_.clear();
 }
 
 void BodySession::AddMove(const ControllerSample& sample)

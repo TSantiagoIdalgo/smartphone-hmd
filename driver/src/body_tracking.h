@@ -17,10 +17,10 @@ class TrackerDevice;
 class BodyTracking {
 public:
     // `psms` may be null (no calibrating then); the trackers stay ours. Where the cameras see the
-    // head goes to `head`, for the headset, and the wrists to `wrists`, for the controllers (either
-    // may be null).
+    // head goes to `head`, for the headset, and the wrists and the Moves' bulbs to `wrists` and
+    // `bulbs`, for the controllers (any may be null).
     BodyTracking(PsmsClient* psms, TrackerDevice* waist, TrackerDevice* left_foot, TrackerDevice* right_foot,
-                 HeadSightingQueue* head, SharedWrists* wrists);
+                 HeadSightingQueue* head, SharedWrists* wrists, HeadSightingQueue* bulbs);
     ~BodyTracking();
 
     void Start();
@@ -34,6 +34,7 @@ private:
     void ToggleCalibration(double now);
     void FinishCalibration();
     void Publish(double now);
+    void CheckHead(const TrackerPose& hips);
     void LogReport(double now);
     void LogProgress();
 
@@ -43,12 +44,18 @@ private:
     TrackerDevice* trackers_[3];
     HeadSightingQueue* head_;
     SharedWrists* wrists_;
+    HeadSightingQueue* bulbs_;
     BodySession session_;  // only touched by the thread
     // Since the last report: each tracker's poses, and how many times all three were published.
     PoseSpread spreads_[3];
     int published_ = 0;
     // When each tracker last had a pose: until then, and a while after, it shows as disconnected.
     double last_valid_[3] = {-1e9, -1e9, -1e9};
+    // Once a second, where the headset is from the hips and where it looks from where they face.
+    double next_head_check_ = 0.0;
+    double head_offset_sum_ = 0.0;
+    double head_turn_sum_ = 0.0;
+    int head_checks_ = 0;
 
     Calibration calibration_ = Calibration::Off;
     double calibration_at_ = 0.0;  // when the countdown ends, or the collecting started

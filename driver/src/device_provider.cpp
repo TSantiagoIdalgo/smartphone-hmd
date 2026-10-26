@@ -62,9 +62,10 @@ vr::EVRInitError DeviceProvider::Init(vr::IVRDriverContext* driver_context)
         }
         if (controllers) {
             wrists_ = std::make_unique<SharedWrists>();
+            bulb_sightings_ = std::make_unique<HeadSightingQueue>();
         }
         body_ = std::make_unique<BodyTracking>(psms_.get(), trackers_[0].get(), trackers_[1].get(), trackers_[2].get(),
-                                               head_sightings_.get(), wrists_.get());
+                                               head_sightings_.get(), wrists_.get(), bulb_sightings_.get());
         body_->Start();
         DriverLog("Body tracking: on, with hip and foot trackers");
         if (!head) {
@@ -79,17 +80,19 @@ vr::EVRInitError DeviceProvider::Init(vr::IVRDriverContext* driver_context)
         bulb.latency_seconds = std::clamp(GetDoubleSetting("head_light_latency_ms", 40.0), 0.0, 200.0) / 1000.0;
         bulb.lateral_noise_m = std::max(GetDoubleSetting("controller_lateral_noise_mm", 2.0), 0.1) / 1000.0;
         bulb.depth_noise_m = std::max(GetDoubleSetting("controller_depth_noise_cm", 2.0), 0.01) / 100.0;
-        bulb.depth_noise_with_sightings_m = bulb.depth_noise_m;
+        // While the phones see it too, the depth is theirs, as for the head.
+        bulb.depth_noise_with_sightings_m =
+            std::max(GetDoubleSetting("controller_depth_noise_with_body_cm", 30.0), 0.01) / 100.0;
         bulb.agility = std::max(GetDoubleSetting("controller_agility", 10.0), 0.01);
         bulb.prediction_gain = std::clamp(GetDoubleSetting("controller_prediction", 1.0), 0.0, 1.0);
         bulb.max_speed = 10.0;
         bulb.min_eye_height = -1.0;
         bulb.max_eye_height = 3.5;
-        controllers_ = std::make_unique<MoveControllers>(psms_.get(), wrists_.get(),
+        controllers_ = std::make_unique<MoveControllers>(psms_.get(), wrists_.get(), bulb_sightings_.get(),
                                                          GetDoubleSetting("controller_pitch_degrees", 0.0), bulb);
         controllers_->Start();
-        DriverLog(body ? "Hands: the PS Moves are controllers here, falling back on the wrists when the PS Eye loses "
-                         "them; turn off VDM's controllers in SteamVR"
+        DriverLog(body ? "Hands: the PS Moves are controllers here, their bulbs also followed by the phones, falling "
+                         "back on the wrists when neither sees them; turn off VDM's controllers in SteamVR"
                        : "Hands: the PS Moves are controllers here; turn off VDM's controllers in SteamVR");
     }
     if (psms_) {
@@ -107,6 +110,7 @@ void DeviceProvider::Cleanup()
     psms_ = nullptr;
     head_sightings_ = nullptr;
     wrists_ = nullptr;
+    bulb_sightings_ = nullptr;
     trackers_.clear();
 }
 

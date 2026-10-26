@@ -13,12 +13,16 @@
 //   32 u8 flags (1 a person, 4 a Move's bulb)   33 u8 point count   34 u16 padding
 //   36 f32 bulb x, 40 y (0-1 across the picture), 44 radius (over its width), when flagged
 //   48 per point: x, y (0-1), z, visibility, presence (f32), MediaPipe's 33 pose points
+//   then, flagged 32: u8 bulb count, 3 bytes padding, per bulb x, y, radius (f32) as the bulb
+//      above: every lit bulb by a hand, for the controllers
 namespace body_protocol {
 
 constexpr uint16_t kPort = 9947;
 constexpr uint8_t kTypeBodyFrame = 12;
 constexpr uint8_t kFlagPose = 1;
 constexpr uint8_t kFlagBall = 4;
+constexpr uint8_t kFlagBulbs = 32;
+constexpr int kMaxBulbs = 2;
 constexpr int kPoints = 33;
 constexpr size_t kHeaderSize = 48;
 constexpr size_t kPointSize = 20;
@@ -33,6 +37,8 @@ struct Frame {
     int points = 0;  // 0 when no one is in view
     float ball[3] = {};
     float point[kPoints][5] = {};
+    int bulbs = 0;
+    float bulb[kMaxBulbs][3] = {};
 };
 
 // False if the bytes are not a whole body frame.

@@ -36,10 +36,10 @@ struct HeadPositionConfig {
     double camera_period_seconds = 1.0 / 60.0;
     double lateral_noise_m = 0.002;           // per camera frame at 2 m, across the camera ray
     double depth_noise_m = 0.03;              // per camera frame at 2 m, along the ray
-    // The same while the body cameras see the head. The PS Eye's depth wanders slowly (it is
-    // PSMoveServiceEx's own smoothing of a noisy guess from the light's size), so its frames are
-    // not as independent as they look; the cameras' views are.
-    double depth_noise_with_sightings_m = 0.09;
+    // The same while the body cameras see the head. The PS Eye's depth wanders, a guess from the
+    // light's size that PSMoveServiceEx smooths, so its frames are not as independent as they
+    // look, and it can be off by tens of cm; the cameras' views are steady: they give the depth.
+    double depth_noise_with_sightings_m = 0.5;
     double agility = 1.0;                     // process noise, m^2/s^3, at its usual scale
     double prediction_gain = 0.8;             // share of the pivot velocity extrapolated
     double max_speed = 3.0;                   // m/s
@@ -50,7 +50,8 @@ struct HeadPositionConfig {
     Vec3 ears_from_neck{0.0, 0.06, 0.01};
 };
 
-// A body camera's view of the head: where it saw the point midway between the ears.
+// A body camera's view of the head: where it saw the point midway between the ears. Or, for a
+// Move's bulb through the same filter, of the bulb.
 struct HeadSighting {
     uint32_t camera = 0;  // which camera
     double time = 0.0;    // when it took the frame
@@ -60,7 +61,7 @@ struct HeadSighting {
     double noise = 3.0;   // pixels, standard deviation
 };
 
-// Hands the views from the body tracking's thread to the headset's.
+// Hands the views from the body tracking's thread to the headset's (or the controllers').
 class HeadSightingQueue {
 public:
     void Push(const HeadSighting& sighting)
@@ -116,6 +117,9 @@ public:
         int sightings_late = 0;  // older than the measurements kept
         int sighting_starts = 0;  // the head found by two cameras, without the light
         Vec3 ears_from_neck;     // as learned
+        double light_offset_m = 0.0;  // how far apart the light and the views put the head, RMS
+        int light_depth_resets = 0;  // views left out until the head was put where they see it,
+                                     // on the light's line of sight
         double agility = 0.0;    // its scale on average: below 1 the head is smoothed more
     };
 
@@ -255,4 +259,6 @@ private:
     double depth_innovation_sum_ = 0.0;
     double lateral_innovation_sum_ = 0.0;
     double agility_sum_ = 0.0;
+    double light_offset_sum_ = 0.0;
+    int light_offset_count_ = 0;
 };

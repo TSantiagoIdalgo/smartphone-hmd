@@ -78,11 +78,15 @@ private:
 //
 // Each bulb goes through the head's light filter first: like the visor's light, the PS Eye sees it
 // well sideways and poorly in depth, worse the farther it is, so it shakes; the filter smooths it
-// more while the hand keeps still, and leaves out the jumps of a bulb half hidden.
+// more while the hand keeps still, and leaves out the jumps of a bulb half hidden. The body
+// cameras' views of the bulbs (`sightings`, may be null) go into it as they do the head's: they
+// give its depth, and follow it while the PS Eye does not see it. A view is the bulb of the hand
+// nearest its line of sight, when the other hand is clearly farther.
 class MoveControllers {
 public:
     // `pitch_degrees`: see MoveHand. `bulb`: the filter's settings for a bulb.
-    MoveControllers(PsmsClient* psms, SharedWrists* wrists, double pitch_degrees, const HeadPositionConfig& bulb);
+    MoveControllers(PsmsClient* psms, SharedWrists* wrists, HeadSightingQueue* sightings, double pitch_degrees,
+                    const HeadPositionConfig& bulb);
     ~MoveControllers();
 
     // Adds the controllers to SteamVR and starts following the Moves.
@@ -93,12 +97,15 @@ public:
 
 private:
     void Run();
+    // The hand whose bulb a camera saw, or -1.
+    int Owner(const HeadSighting& sighting, double now) const;
     // Select and Start held: tells PSMoveServiceEx the Move points at the PS Eye.
     void CheckRecenter(int hand, const MoveState& move, double now);
     void LogReport();
 
     PsmsClient* psms_;
     SharedWrists* wrists_;
+    HeadSightingQueue* sightings_;
     double pitch_degrees_;
     std::unique_ptr<MoveController> devices_[2];  // left, right
     bool added_[2] = {false, false};

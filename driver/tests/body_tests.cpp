@@ -107,6 +107,19 @@ void TestBodyPacket()
     std::vector<uint8_t> other = data;
     other[4] = 7;  // the phone's pose packet
     CHECK(!body_protocol::Parse(other.data(), other.size(), &frame));
+    CHECK(frame.bulbs == 0);
+
+    // With every bulb by a hand (see its test_driver_packet_with_bulbs).
+    const std::vector<uint8_t> bulbs = FromHex(
+        "484d44310c00000003000000d2040000000000000d0c0b0ae00180020000f342250100000000003f0000803e0ad7a33c"
+        "0000803e0000003fcdccccbd6666663f3333733f020000000000003f0000803e0ad7a33c0000403f0000003f0000003d");
+    CHECK(body_protocol::Parse(bulbs.data(), bulbs.size(), &frame));
+    CHECK(frame.bulbs == 2);
+    CHECK_NEAR(frame.bulb[1][0], 0.75, 1e-6);
+    CHECK_NEAR(frame.bulb[1][1], 0.5, 1e-6);
+    CHECK_NEAR(frame.bulb[1][2], 0.03125, 1e-6);
+    CHECK_NEAR(frame.point[0][0], 0.25, 1e-6);
+    CHECK(!body_protocol::Parse(bulbs.data(), bulbs.size() - 1, &frame));
 }
 
 void TestCameraProjectsAndCastsRays()
@@ -741,6 +754,47 @@ void TestSessionForgetsACalibrationThatNoLongerFits()
 }
 
 
+void TestSessionSeesTheBulbs()
+{
+    // The bulbs by both hands, from a calibrated camera: a view of each, for the controllers.
+    SessionSimulation sim;
+    sim.session.SetCamera(sim.ids[0], sim.truth[0]);
+    const Vec3 bulbs[2] = {{-0.3, 1.2, 0.2}, {0.25, 0.9, 0.1}};
+    const auto frame_with_bulbs = [&](int camera) {
+        body_protocol::Frame frame = sim.MakeFrame(camera, sim.time, nullptr, false);
+        frame.flags |= body_protocol::kFlagBulbs;
+        frame.bulbs = 2;
+        for (int b = 0; b < 2; ++b) {
+            double u = 0.0, v = 0.0;
+            sim.truth[camera].Project(bulbs[b], &u, &v);
+            frame.bulb[b][0] = static_cast<float>(u / frame.width);
+            frame.bulb[b][1] = static_cast<float>(v / frame.height);
+            frame.bulb[b][2] = 0.02f;
+        }
+        return frame;
+    };
+    sim.session.AddFrame(frame_with_bulbs(0), sim.time + sim.frame_age);
+    std::vector<HeadSighting> sightings;
+    sim.session.TakeBulbSightings(&sightings);
+    CHECK(sightings.size() == 2);
+    for (size_t b = 0; b < sightings.size() && b < 2; ++b) {
+        const HeadSighting& s = sightings[b];
+        CHECK(s.camera == sim.ids[0]);
+        CHECK_NEAR(s.time, sim.time, 1e-6);
+        const Vec3 ray = s.model.Ray(s.u, s.v), to = bulbs[b] - s.model.position;
+        CHECK(Length(to - ray * Dot(to, ray)) < 0.002);
+        CHECK(s.noise >= 1.5);
+    }
+    sim.session.TakeBulbSightings(&sightings);
+    CHECK(sightings.empty());
+    // Not from a camera that is not calibrated, nor while calibrating.
+    sim.session.AddFrame(frame_with_bulbs(1), sim.time + sim.frame_age);
+    sim.session.StartCalibration();
+    sim.session.AddFrame(frame_with_bulbs(0), sim.time + sim.frame_age);
+    sim.session.TakeBulbSightings(&sightings);
+    CHECK(sightings.empty());
+}
+
 void TestSessionPairsFramesWhicheverArrivesFirst()
 {
     // As the two phones of the first test: one's frames arrive 20 ms older than the other's.
@@ -919,6 +973,7 @@ int main()
     TestSessionNeedsTheOtherMoveOff();
     TestSessionCalibratesWithAJitteryMove();
     TestSessionForgetsACalibrationThatNoLongerFits();
+    TestSessionSeesTheBulbs();
     TestSessionPairsFramesWhicheverArrivesFirst();
     TestMoveHandAxes();
     TestMoveHandFallsBackOnWrist();

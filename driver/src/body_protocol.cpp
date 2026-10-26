@@ -50,6 +50,15 @@ bool Parse(const uint8_t* data, size_t size, Frame* out)
     }
     for (int p = 0; p < frame.points; ++p)
         for (int i = 0; i < 5; ++i) frame.point[p][i] = ReadF32(data + kHeaderSize + kPointSize * p + 4 * i);
+    if (frame.flags & kFlagBulbs) {
+        const size_t start = kHeaderSize + kPointSize * static_cast<size_t>(frame.points);
+        if (size < start + 4 || data[start] > kMaxBulbs || size < start + 4 + 12 * static_cast<size_t>(data[start])) {
+            return false;
+        }
+        frame.bulbs = data[start];
+        for (int b = 0; b < frame.bulbs; ++b)
+            for (int i = 0; i < 3; ++i) frame.bulb[b][i] = ReadF32(data + start + 4 + 12 * b + 4 * i);
+    }
     *out = frame;
     return true;
 }

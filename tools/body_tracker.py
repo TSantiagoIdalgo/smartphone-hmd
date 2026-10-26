@@ -68,12 +68,15 @@ FLAG_EXPOSURE_LOCKED = 2
 FLAG_BALL = 4
 FLAG_KEYFRAME = 8
 FLAG_JPEG = 16  # video packets: the frame is a JPEG picture (an ESP32-CAM), not H.264
+FLAG_BULBS = 32  # driver packets: every bulb by a hand follows the points, for the controllers
 MAX_PAYLOAD = 1400
 
 # Little-endian, laid out as in android/camera/.../BodyProtocol.kt.
 HEADER = struct.Struct("<4sB3xIq")  # magic, type, seq, timestamp ns
 BODY = struct.Struct("<IHHfBBxxfff")  # device, width, height, inference ms, flags, count, ball x/y/r
 LANDMARK = struct.Struct("<5f")  # x, y, z, visibility, presence
+BULBS = struct.Struct("<Bxxx")  # how many bulbs follow
+BULB = struct.Struct("<3f")  # x, y, radius, as the ball
 PONG = struct.Struct("<qI")  # PC time echoed back, device id
 VIDEO = struct.Struct("<IHHHHBBxx")  # device, width, height, chunk, chunk count, quarter turns, flags
 HIPS, KNEES, ANKLES = (23, 24), (25, 26), (27, 28)
@@ -107,12 +110,18 @@ def parse_header(data):
 
 
 def pack_body(seq, capture_ns, device, width, height, inference_ms, flags, landmarks, ball=(0.0, 0.0, 0.0),
-              kind=TYPE_BODY):
-    """A body packet: one frame's pose, from here to the phone (or, as TYPE_BODY_FRAME, the driver)."""
+              kind=TYPE_BODY, bulbs=None):
+    """A body packet: one frame's pose, from here to the phone (or, as TYPE_BODY_FRAME, the driver,
+    with every bulb by a hand when `bulbs` is given)."""
     data = header(kind, seq, capture_ns)
+    flags |= FLAG_BULBS if bulbs is not None else 0
     data += BODY.pack(device, width, height, inference_ms, flags, len(landmarks), *ball)
     for point in landmarks:
         data += LANDMARK.pack(*point)
+    if bulbs is not None:
+        data += BULBS.pack(len(bulbs))
+        for bulb in bulbs:
+            data += BULB.pack(*bulb)
     return data
 
 
@@ -127,9 +136,20 @@ def parse_body(data, kind=TYPE_BODY):
     if len(data) < start + count * LANDMARK.size:
         return None
     landmarks = [LANDMARK.unpack_from(data, start + i * LANDMARK.size) for i in range(count)]
+    bulbs = []
+    if flags & FLAG_BULBS:
+        start += count * LANDMARK.size
+        if len(data) < start + BULBS.size:
+            return None
+        (bulb_count,) = BULBS.unpack_from(data, start)
+        start += BULBS.size
+        if len(data) < start + bulb_count * BULB.size:
+            return None
+        bulbs = [BULB.unpack_from(data, start + i * BULB.size) for i in range(bulb_count)]
     return {
         "seq": seq, "capture_ns": capture_ns, "device": device, "width": width, "height": height,
         "inference_ms": inference_ms, "flags": flags, "ball": (ball_x, ball_y, ball_r), "landmarks": landmarks,
+        "bulbs": bulbs,
     }
 
 
@@ -504,7 +524,8 @@ class Tracker:
         points = pose.detect(rgb, ms)
         done = self.now()
         inference_ms = (done - start) / 1e6
-        ball = find_ball(rgb, points, self.ball_hue)
+        bulbs = find_balls(rgb, points, self.ball_hue)
+        ball = bulbs[0] if bulbs else None
         flags = (FLAG_POSE if points else 0) | (FLAG_BALL if ball else 0) | (frame["flags"] & FLAG_EXPOSURE_LOCKED)
         ball = ball or (0.0, 0.0, 0.0)
         packet = pack_body(frame["seq"], frame["capture_ns"], camera.device, width, height, inference_ms, flags, points,
@@ -516,7 +537,7 @@ class Tracker:
             captured = frame["capture_ns"] + sync[0]
             age_ms = (self.now() - captured) / 1e6
             self.send_driver(pack_body(frame["seq"], captured, camera.device, width, height, age_ms, flags, points,
-                                       ball, kind=TYPE_BODY_FRAME))
+                                       ball, kind=TYPE_BODY_FRAME, bulbs=bulbs))
         if self.snapshots and done >= camera.next_snapshot_ns:
             # Numbered, and marked when a bulb was found, to look for the ones it got wrong.
             camera.next_snapshot_ns = done + SNAPSHOT_EVERY_NS
@@ -784,12 +805,19 @@ def find_ball(rgb, points, hue=None):
     near each wrist, within a forearm and a bit: the bulb glows brighter than anything else there,
     is coloured, of the bulb's size next to the body, and of its colour, the hue in degrees, if
     given."""
+    balls = find_balls(rgb, points, hue)
+    return balls[0] if balls else None
+
+
+def find_balls(rgb, points, hue=None):
+    """As find_ball, every bulb by a hand: the one by each wrist, the clearest first, once when both
+    hands are by the same one. The driver follows the controllers with them."""
     if not points or cv2 is None:
-        return None
+        return []
     height, width = rgb.shape[:2]
     trunk = trunk_length(points, width, height)
     radius = (BALL_RADIUS_PER_TRUNK[0] * trunk, BALL_RADIUS_PER_TRUNK[1] * trunk) if trunk else None
-    best = None
+    found = []
     for wrist, elbow in WRISTS_AND_ELBOWS:
         if points[wrist][3] < 0.3:
             continue
@@ -801,11 +829,14 @@ def find_ball(rgb, points, hue=None):
         if x1 - x0 < 4 or y1 - y0 < 4:
             continue
         blob = bright_blob(rgb[y0:y1, x0:x1], radius, hue)
-        if blob and (best is None or blob[3] > best[3]):
-            best = (blob[0] + x0, blob[1] + y0, blob[2], blob[3])
-    if best is None:
-        return None
-    return best[0] / width, best[1] / height, best[2] / width
+        if blob is None:
+            continue
+        x, y = blob[0] + x0, blob[1] + y0
+        if any(math.hypot(x - other[0], y - other[1]) < other[2] + blob[2] for other in found):
+            continue  # the same bulb, by both hands
+        found.append((x, y, blob[2], blob[3]))
+    found.sort(key=lambda ball: -ball[3])
+    return [(x / width, y / height, size / width) for x, y, size, _ in found]
 
 
 def trunk_length(points, width, height):

@@ -33,6 +33,7 @@ private:
     std::unique_ptr<HmdDevice> hmd_;
     std::vector<std::unique_ptr<TrackerDevice>> trackers_;
     std::unique_ptr<SharedWrists> wrists_;  // from the body tracking to the controllers
+    std::unique_ptr<HeadSightingQueue> bulb_sightings_;  // the same
     std::unique_ptr<BodyTracking> body_;
     std::unique_ptr<MoveControllers> controllers_;
 };

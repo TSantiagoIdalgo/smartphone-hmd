@@ -122,6 +122,8 @@ public:
     TrackerPose Wrist(bool left, double now) const { return filter_.Wrist(left, now); }
     // Where the calibrated cameras saw the head (midway between the ears) since the last call.
     void TakeHeadSightings(std::vector<HeadSighting>* out);
+    // Where they saw the lit bulbs by the hands since the last call, whichever Moves they are.
+    void TakeBulbSightings(std::vector<HeadSighting>* out);
 
     // Numbers since the last call.
     Report TakeReport(double now);
@@ -160,6 +162,7 @@ private:
     std::map<int, std::deque<ControllerSample>> moves_;
     BodyFilter filter_;
     std::vector<HeadSighting> head_sightings_;
+    std::vector<HeadSighting> bulb_sightings_;
     bool calibrating_ = false;
     int ambiguous_ = 0;
     double report_start_ = -1.0;

@@ -31,6 +31,7 @@ constexpr double kStartVariance = 0.03 * 0.03;
 constexpr double kMaxLightGapSeconds = 0.05;   // to compare a view with the light between two samples
 constexpr double kEarsLearningRate = 0.005;    // per view: some seconds
 constexpr double kMaxEarsCorrectionM = 0.12;
+constexpr double kMinRaysSine = 0.25;           // a view this close to the PS Eye's line of sight teaches nothing
 // The agility scale follows the normalized innovations (1 per dimension on average when the model
 // fits), as the body filter's does: it shrinks while the head keeps still and grows quickly when
 // it starts moving.
@@ -289,15 +290,17 @@ void HeadPositionEstimator::AddLight(double time, Vec3 light, bool tracking, Vec
     const Quat orientation = OrientationAt(measured_at);
     const double eye_height = (light + Rotate(orientation, config_.eyes_from_light)).y;
     const double distance = camera_valid_ ? Length(light - camera_) : 0.0;
-    if (eye_height < config_.min_eye_height || eye_height > config_.max_eye_height ||
-        (camera_valid_ && (distance < kMinCameraDistance || distance > kMaxCameraDistance))) {
+    // While the body cameras see the head, the light gives its direction from the PS Eye and they
+    // its depth: a depth that puts the eyes where none are does not make the direction wrong.
+    const bool sightings = time - last_sighting_time_ <= kSightingsLostSeconds;
+    if (!sightings && (eye_height < config_.min_eye_height || eye_height > config_.max_eye_height ||
+                       (camera_valid_ && (distance < kMinCameraDistance || distance > kMaxCameraDistance)))) {
         ++stats_.implausible;
         return;
     }
     Measurement m;
     m.pivot = light - Rotate(orientation, light_from_neck_);
-    m.noise = MeasurementNoise(light, world_angular_velocity, since_previous,
-                               time - last_sighting_time_ <= kSightingsLostSeconds);
+    m.noise = MeasurementNoise(light, world_angular_velocity, since_previous, sightings);
     if (cameras_ == 1 && distance > 1e-6) {
         m.blind = (light - camera_) * (1.0 / distance);
     }
@@ -516,9 +519,10 @@ void HeadPositionEstimator::AddSighting(double now, const HeadSighting& sighting
         while (rejected_sightings_.front() < now - kResetWindowSeconds) {
             rejected_sightings_.pop_front();
         }
-        // Without the light the head may have gone where the filter no longer looks.
-        if (rejected_sightings_.size() >= kResetCount && !LightFollowed(now)) {
-            StartFromSightings(now);
+        // Without the light the head may have gone where the filter no longer looks; with it, the
+        // light's depth may be off from where the cameras see the head.
+        if (rejected_sightings_.size() >= kResetCount && StartFromSightings(now)) {
+            rejected_sightings_.clear();
         }
         return;
     }
@@ -570,12 +574,26 @@ bool HeadPositionEstimator::StartFromSightings(double now)
         if (gap > kStartMaxGapM || eye_height < config_.min_eye_height || eye_height > config_.max_eye_height) {
             continue;
         }
+        // With the light followed, only its depth may be given up: the head must be on its line
+        // of sight.
+        const bool light = LightFollowed(now);
+        if (light) {
+            Vec3 light_pivot;
+            if (!camera_valid_ || !LightAt(newest->time, &light_pivot)) {
+                continue;
+            }
+            const Vec3 along = Unit(light_pivot + Rotate(orientation, light_from_neck_) - camera_);
+            const Vec3 to = pivot + Rotate(orientation, light_from_neck_) - camera_;
+            if (Length(to - along * Dot(to, along)) > kStartMaxGapM) {
+                continue;
+            }
+        }
         const Vec3 before = Pivot(now, nullptr);
         Reset(newest->time, pivot, Mat3::Identity(kStartVariance));
         last_sighting_time_ = now;
         StartBlend(now, before);
         blend_event_time_ = now;
-        ++stats_.sighting_starts;
+        ++(light ? stats_.light_depth_resets : stats_.sighting_starts);
         return true;
     }
     return false;
@@ -612,7 +630,20 @@ void HeadPositionEstimator::LearnEars(const HeadSighting& sighting, Quat orienta
     }
     const Vec3 ray = sighting.model.Ray(sighting.u, sighting.v);
     const Vec3 to_ears = light_pivot + Rotate(orientation, ears_from_neck_) - sighting.model.position;
-    const Vec3 across = ray * Dot(to_ears, ray) - to_ears;
+    Vec3 across = ray * Dot(to_ears, ray) - to_ears;
+    light_offset_sum_ += Dot(across, across);
+    ++light_offset_count_;
+    // Only where the light is sure: its depth, along the PS Eye's line of sight, may be off. What
+    // neither line of sight can tell is the one direction across both.
+    if (camera_valid_) {
+        const Vec3 light = light_pivot + Rotate(orientation, light_from_neck_);
+        const Vec3 both = Cross(ray, Unit(light - camera_));
+        if (Length(both) < kMinRaysSine) {
+            return;
+        }
+        const Vec3 unseen = Unit(both);
+        across = unseen * Dot(across, unseen);
+    }
     Vec3 learned = ears_from_neck_ + Rotate(Conjugate(orientation), across) * kEarsLearningRate;
     const Vec3 correction = learned - config_.ears_from_neck;
     if (Length(correction) > kMaxEarsCorrectionM) {
@@ -688,6 +719,11 @@ HeadPositionEstimator::Stats HeadPositionEstimator::TakeStats()
         stats.agility = agility_sum_ / (stats.accepted + stats.sightings);
     }
     stats.ears_from_neck = ears_from_neck_;
+    if (light_offset_count_ > 0) {
+        stats.light_offset_m = std::sqrt(light_offset_sum_ / light_offset_count_);
+    }
+    light_offset_sum_ = 0.0;
+    light_offset_count_ = 0;
     stats_ = Stats{};
     stats_.eye_height_m = stats.eye_height_m;
     stats_.camera_distance_m = stats.camera_distance_m;

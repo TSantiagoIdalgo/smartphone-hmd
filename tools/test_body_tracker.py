@@ -151,6 +151,21 @@ class PacketTest(unittest.TestCase):
             "0000803e0000003fcdccccbd6666663f3333733f",
         )
 
+    def test_driver_packet_with_bulbs(self):
+        # The same bytes are expected by the driver in driver/tests/body_tests.cpp.
+        bulbs = [(0.5, 0.25, 0.02), (0.75, 0.5, 0.03125)]
+        data = bt.pack_body(3, 1234, 0x0A0B0C0D, 480, 640, 121.5, bt.FLAG_POSE | bt.FLAG_BALL,
+                            [(0.25, 0.5, -0.1, 0.9, 0.95)], (0.5, 0.25, 0.02), kind=bt.TYPE_BODY_FRAME, bulbs=bulbs)
+        self.assertEqual(
+            data.hex(),
+            "484d44310c00000003000000d2040000000000000d0c0b0ae00180020000f342250100000000003f0000803e0ad7a33c"
+            "0000803e0000003fcdccccbd6666663f3333733f020000000000003f0000803e0ad7a33c0000403f0000003f0000003d",
+        )
+        frame = bt.parse_body(data, kind=bt.TYPE_BODY_FRAME)
+        self.assertEqual(frame["flags"], bt.FLAG_POSE | bt.FLAG_BALL | bt.FLAG_BULBS)
+        self.assertEqual([round(x, 6) for x in frame["bulbs"][1]], [0.75, 0.5, 0.03125])
+        self.assertIsNone(bt.parse_body(data[:-1], kind=bt.TYPE_BODY_FRAME))
+
     def test_frame_split_into_packets_and_joined_in_any_order(self):
         data = bytes(range(256)) * 12  # 3072 bytes: 1400 + 1400 + 272
         packets = bt.pack_video(9, 1, 2, 640, 480, 3, bt.FLAG_KEYFRAME, data)
@@ -274,6 +289,23 @@ class BallTest(unittest.TestCase):
         cv2.circle(self.picture, (250, 300), 2, (255, 255, 255), -1)
         cv2.circle(self.picture, (253, 300), 1, (255, 40, 230), -1)
         self.assertIsNone(bt.find_ball(self.picture, self.points))
+
+    def test_a_bulb_by_each_hand(self):
+        self.points[16] = (0.3, 0.5, 0.0, 0.9, 0.99)  # the right wrist to the side
+        self.points[14] = (0.3, 0.6, 0.0, 0.9, 0.99)
+        self.draw_bulb(255, 290)
+        self.draw_bulb(140, 285, colour=(40, 230, 255))
+        bulbs = sorted(bt.find_balls(self.picture, self.points))
+        self.assertEqual(len(bulbs), 2)
+        self.assertAlmostEqual(bulbs[0][0] * 480, 140.5, delta=1.0)
+        self.assertAlmostEqual(bulbs[1][0] * 480, 255.5, delta=1.0)
+        # Both hands by one bulb: it once.
+        self.setUp()
+        self.points[16] = (0.52, 0.5, 0.0, 0.9, 0.99)
+        self.points[14] = (0.52, 0.6, 0.0, 0.9, 0.99)
+        self.draw_bulb(255, 290)
+        self.assertEqual(len(bt.find_balls(self.picture, self.points)), 1)
+        self.assertEqual(bt.find_balls(self.picture, []), [])
 
     def test_only_the_moves_colour_when_given(self):
         magenta, cyan = bt.BALL_HUES["magenta"], bt.BALL_HUES["cyan"]
