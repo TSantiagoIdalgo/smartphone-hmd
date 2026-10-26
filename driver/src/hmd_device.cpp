@@ -165,6 +165,7 @@ HmdDevice::HmdDevice(PsmsClient* psms, HeadSightingQueue* sightings) : psms_(psm
         head.depth_noise_with_sightings_m =
             std::max(GetDoubleSetting("head_position_depth_noise_with_body_cm", 9.0), 0.01) / 100.0;
         head.agility = std::max(GetDoubleSetting("head_position_agility", 1.0), 0.001);
+        light_distance_scale_ = std::clamp(GetDoubleSetting("head_light_distance_scale", 1.0), 0.2, 5.0);
         head.prediction_gain = std::clamp(GetDoubleSetting("head_position_prediction", 0.8), 0.0, 1.0);
         head_position_ = HeadPositionEstimator(head);
         apply_head_model_ = vr::VRSettings()->GetBool(kSettingsSection, "head_position_apply_head_model");
@@ -471,7 +472,10 @@ void HmdDevice::UpdateHeadPosition(std::vector<LightSample>* samples, std::vecto
     const bool streaming = psms_->Drain(samples, &head_camera_valid_, &head_camera_, &head_cameras_);
     head_position_.SetCamera(head_camera_valid_, head_camera_, head_cameras_);
     const Vec3 angular_velocity = tracker_.AngularVelocity();
-    for (const LightSample& sample : *samples) {
+    for (LightSample& sample : *samples) {
+        if (light_distance_scale_ != 1.0 && head_camera_valid_) {
+            sample.position = head_camera_ + (sample.position - head_camera_) * light_distance_scale_;
+        }
         head_position_.AddLight(sample.time, sample.position, sample.tracking, angular_velocity);
         if (sample.tracking) {
             head_last_light_ = sample.position;
@@ -507,6 +511,17 @@ void HmdDevice::UpdateHeadPosition(std::vector<LightSample>* samples, std::vecto
             DriverLog("Head light: newest light at (%.2f, %.2f, %.2f) m, camera at (%.2f, %.2f, %.2f) m",
                       head_last_light_.x, head_last_light_.y, head_last_light_.z, head_camera_.x, head_camera_.y,
                       head_camera_.z);
+            // Eyes higher than anyone's: PSMoveServiceEx has the light farther from the PS Eye than it
+            // is, all along the camera's line of sight, which also puts the hands far in front.
+            const bool too_high = stats.implausible > stats.accepted || stats.eye_height_m > 2.1;
+            if (too_high && head_camera_valid_ && stats.eye_height_m > head_camera_.y + 0.1) {
+                DriverLog("Head light: the eyes come out %.2f m high: PSMoveServiceEx puts the light too far from the "
+                          "PS Eye. Check the ball's size in its virtual HMD settings, or try head_light_distance_scale "
+                          "%.2f (for eyes at head_height_meters, %.2f m)",
+                          stats.eye_height_m,
+                          light_distance_scale_ * (head_height_ - head_camera_.y) / (stats.eye_height_m - head_camera_.y),
+                          head_height_);
+            }
         }
         if (stats.sightings + stats.sightings_rejected + stats.sightings_late > 0) {
             DriverLog("Head from the body cameras: %d views used, %d left out, %d too late, found %d times without "

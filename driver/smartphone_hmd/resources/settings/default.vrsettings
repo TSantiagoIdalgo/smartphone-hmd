@@ -22,6 +22,7 @@
 		"head_neck_to_eyes_up_cm": 7.5,
 		"head_neck_to_eyes_forward_cm": 8.0,
 		"head_light_latency_ms": 40.0,
+		"head_light_distance_scale": 1.0,
 		"head_light_camera_fps": 60.0,
 		"head_position_lateral_noise_mm": 2.0,
 		"head_position_depth_noise_cm": 3.0,

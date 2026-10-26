@@ -855,6 +855,35 @@ void TestMoveHandFindsItsWrist()
     CHECK(error < 0.005);
 }
 
+void TestMoveHandIgnoresBulbJumps()
+{
+    // Half hidden for a tenth of a second, the bulb is reported 1.5 m farther, still "tracked":
+    // the hand stays put. Truly moved and staying there, it follows after a moment.
+    MoveHand hand(false);
+    MoveState move;
+    move.tracking = true;
+    move.position = Vec3{0.2, 1.0, 0.5};
+    double time = 10.0, max_jump = 0.0;
+    for (int i = 0; i < 120; ++i, time += 1.0 / 60.0) {
+        move.time = time;
+        const bool hidden = i >= 60 && i < 66;
+        MoveState reported = move;
+        if (hidden) {
+            reported.position = move.position + Vec3{0.0, 0.0, 1.5};
+        }
+        hand.Update(reported, Wrists{}, time);
+        max_jump = std::max(max_jump, Length(hand.Pose(time).position - move.position));
+    }
+    CHECK(max_jump < 0.01);
+    CHECK(hand.TakeStats().jumps == 6);
+    move.position = Vec3{0.2, 1.0, 1.2};  // moved 70 cm at once, and stays
+    for (int i = 0; i < 60; ++i, time += 1.0 / 60.0) {
+        move.time = time;
+        hand.Update(move, Wrists{}, time);
+    }
+    CHECK(Length(hand.Pose(time).position - move.position) < 0.01);
+}
+
 void TestMoveHandHoldsWithoutWrist()
 {
     // Neither the bulb nor the wrist: it stays where it was, still turning, without jumping.
@@ -895,6 +924,7 @@ int main()
     TestMoveHandFallsBackOnWrist();
     TestMoveHandFindsItsWrist();
     TestMoveHandHoldsWithoutWrist();
+    TestMoveHandIgnoresBulbJumps();
     if (g_failures == 0) {
         std::printf("All body tests passed\n");
         return 0;

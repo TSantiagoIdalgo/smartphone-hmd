@@ -106,10 +106,8 @@ void MoveController::Update(bool connected, const HandPose& hand, uint32_t butto
     pose.qDriverFromHeadRotation.w = 1.0;
     pose.deviceIsConnected = connected;
     pose.poseIsValid = hand.valid;
-    // Held in place, it still turns: SteamVR's word for that is rotation only.
-    pose.result = !hand.valid ? vr::TrackingResult_Running_OutOfRange
-                  : hand.tracking || hand.from_wrist ? vr::TrackingResult_Running_OK
-                                                     : vr::TrackingResult_Fallback_RotationOnly;
+    // Held where it was, it is still shown and still turns, as VDM's are.
+    pose.result = hand.valid ? vr::TrackingResult_Running_OK : vr::TrackingResult_Running_OutOfRange;
     pose.vecPosition[0] = hand.position.x;
     pose.vecPosition[1] = hand.position.y;
     pose.vecPosition[2] = hand.position.z;
@@ -330,10 +328,10 @@ void MoveControllers::LogReport()
             const Vec3 offset = hands_[h].BulbFromWrist();
             std::snprintf(part, sizeof(part),
                           "%s %s Move %d, %.0f%% of the time seen by the PS Eye, %.0f%% on the %s wrist, %.0f%% "
-                          "held where it was; the bulb %.0f cm from the wrist",
+                          "held where it was (%d jumps not believed); the bulb %.0f cm from the wrist",
                           h > 0 ? ";" : "", kHandNames[h], ids_[h], 100.0 * stats.tracking / total,
                           100.0 * stats.from_wrist / total, kHandNames[hands_[h].wrist()], 100.0 * stats.held / total,
-                          Length(offset) * 100.0);
+                          stats.jumps, Length(offset) * 100.0);
         }
         text += part;
     }

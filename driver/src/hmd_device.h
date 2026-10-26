@@ -105,6 +105,8 @@ private:
     Vec3 head_last_light_;  // newest light position as PSMoveServiceEx gave it, for the log
     int head_cameras_ = 0;
     bool head_frozen_ = false;
+    // Undoes PSMoveServiceEx putting the light too near or far from the PS Eye (a wrong ball size).
+    double light_distance_scale_ = 1.0;
     bool freeze_hotkey_was_down_ = false;
     HeadPositionEstimator::State logged_head_state_ = HeadPositionEstimator::State::NeverSeen;
     bool logged_light_followed_ = false;

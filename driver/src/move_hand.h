@@ -13,6 +13,10 @@
 // Which wrist holds it, and where the bulb sits from that wrist in the Move's own axes, are
 // learned while both are seen. Changing from one to the other glides over a moment.
 //
+// A bulb partly hidden (behind the other hand, at the edge of the picture) looks smaller to the
+// PS Eye, so PSMoveServiceEx puts it much farther away while still calling it tracked: a jump
+// faster than any hand is not believed until the bulb stays there a moment.
+//
 // World: the head's, SteamVR raw space in metres. Times: MonoSeconds().
 
 enum MoveButton : uint32_t {
@@ -83,6 +87,7 @@ public:
         int tracking = 0;  // updates from the bulb
         int from_wrist = 0;
         int held = 0;
+        int jumps = 0;     // bulb positions not believed: farther than a hand moves
     };
 
     // `left`: the hand it starts with, and the wrist it guesses holds it. `pitch_degrees` tilts
@@ -112,6 +117,13 @@ private:
     double distance_[2] = {0.0, 0.0};  // between the bulb and each wrist, on average
     int samples_[2] = {0, 0};
     double learned_at_ = -1.0;
+    // The bulb's last believed position, and when: a jump from it no hand makes is not believed.
+    bool have_bulb_ = false;
+    Vec3 bulb_;
+    double bulb_time_ = 0.0;
+    bool jumping_ = false;
+    Vec3 jump_last_;
+    double jump_since_ = 0.0;
     Vec3 blend_;
     double blend_time_ = 0.0;
     Stats stats_;

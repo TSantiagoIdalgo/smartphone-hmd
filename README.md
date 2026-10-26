@@ -177,6 +177,11 @@ valores.
   la altura de los ojos y cuánto tiembla la medida.
 - `psms_controller_id` (por defecto -1) hace que siga un PS Move en vez del visor virtual: sirve
   para probar con un Move pegado al visor.
+- Si la cabeza queda muy alta o lejos de la PS Eye (y los Moves se ven muy adelante tuyo), la línea
+  `Head light: the eyes come out … m high` lo avisa: PSMoveServiceEx calcula la distancia por el
+  tamaño aparente de la bola, y si el tamaño que tiene configurado no es el de tu bola (o la ve
+  tapada a medias) la pone más lejos. Corrígelo en la configuración del visor virtual de
+  PSMoveServiceEx, o pon en `head_light_distance_scale` el valor que sugiere esa línea.
 - Con el body tracking, los móviles también ayudan a la cabeza: ver "La cabeza con las cámaras del
   cuerpo".
 
@@ -338,7 +343,8 @@ sin posición.
    pulsa Ctrl+Alt+C otra vez para cancelar.
 4. En `vrserver.txt`, las líneas `Body calibration:` dicen cuántas muestras juntó cada cámara y, al
    final, si quedó calibrada, cuánto se aparta (en píxeles y centímetros), dónde está y hacia dónde
-   mira. La calibración se guarda en SteamVR y se usa sola la próxima vez.
+   mira. La calibración se guarda en SteamVR y se usa sola la próxima vez, por número de cámara: si
+   desinstalas la app o borras sus datos, el móvil sale con otro número y hay que calibrar de nuevo.
 
 **Comprobarla:** con un solo Move encendido, como al calibrar, déjalo quieto en varios lugares
 donde lo vean los dos móviles. Cada 10 segundos, la línea `Body check:` dice a cuántos centímetros
@@ -408,9 +414,10 @@ cosas, y también cuál muñeca sostiene cada Move.
 Viene desactivado. Para activarlo:
 
 1. Con SteamVR cerrado, pon en `default.vrsettings`: `"controllers_enabled" : true,`
-2. Apaga los mandos de VDM en SteamVR, o tendrás cada mando dos veces: en SteamVR, Ajustes →
-   Inicio/apagado → Administrar complementos, desactiva `psmsex` (el driver de VDM para SteamVR;
-   PSMoveServiceEx y el resto de VDM siguen funcionando igual).
+2. Haz que VDM deje de publicar los Moves, o tendrás cada mando dos veces (y SteamVR los confunde):
+   en VDM, en "Virtual Motion Tracker", quita o desactiva los dos PS Move. **No** desactives el
+   complemento `psmsex` de SteamVR: es el driver de ese Virtual Motion Tracker y el servidor OSC de
+   VDM depende de él. Si VDM no te deja quitarlos, deja `controllers_enabled` en `false`.
 3. Abre SteamVR: aparecen dos mandos, que los juegos ven como mandos Vive.
 
 Los Moves van a la mano que tengan asignada en PSMoveServiceEx; si no tienen ninguna, el primero es

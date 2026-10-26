@@ -12,6 +12,10 @@ constexpr double kMaxBulbFromWristM = 0.35;  // farther on average, that wrist i
 constexpr double kSwitchMarginM = 0.08;      // the other wrist must be this much closer to take over
 constexpr double kBlendSeconds = 0.15;
 constexpr double kHalfTurn = 3.14159265358979;
+constexpr double kMaxBulbSpeed = 12.0;      // m/s; a hand swung hard reaches about half that
+constexpr double kMinFrameSeconds = 1.0 / 30.0;  // PSMoveServiceEx's states repeat between camera frames
+constexpr double kJumpSpreadM = 0.15;       // positions after a jump this close together: one place
+constexpr double kJumpTrustSeconds = 0.3;   // staying there this long, it is believed
 
 // Along the Move from the wrist to the bulb, in the controller's axes, until learned.
 const Vec3 kDefaultBulbFromWrist{0.0, 0.0, -0.16};
@@ -33,7 +37,25 @@ void MoveHand::Update(const MoveState& move, const Wrists& wrists, double now)
     pose.orientation = orientation;
     pose.angular_velocity = move.angular_velocity;
 
-    if (move.tracking) {
+    bool seen = move.tracking;
+    if (seen && have_bulb_ &&
+        Length(move.position - bulb_) > kMaxBulbSpeed * std::max(move.time - bulb_time_, kMinFrameSeconds)) {
+        if (!jumping_ || Length(move.position - jump_last_) > kJumpSpreadM) {
+            jumping_ = true;
+            jump_since_ = now;
+        }
+        jump_last_ = move.position;
+        seen = now - jump_since_ >= kJumpTrustSeconds;
+        stats_.jumps += !seen;
+    }
+    if (seen) {
+        jumping_ = false;
+        bulb_ = move.position;
+        bulb_time_ = move.time;
+        have_bulb_ = true;
+    }
+
+    if (seen) {
         const double dt = learned_at_ >= 0.0 ? std::clamp(now - learned_at_, 0.0, 0.1) : 0.0;
         learned_at_ = now;
         if (Length(move.velocity) < kMaxLearnSpeed) {
