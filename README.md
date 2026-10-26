@@ -207,7 +207,8 @@ python tools\body_tracker.py --record prueba.jsonl
 La primera vez descarga el modelo de pose a `tools\models` y Windows pregunta si Python puede usar
 la red: permítelo en redes privadas (puerto UDP 9946). `--model lite` usa un modelo más rápido y
 menos exacto, y `--model heavy` uno más exacto y unas tres veces más lento que el normal (`full`).
-`--threads` dice cuántos núcleos usa cada cámara (4 si no se dice): con 4, el modelo tarda menos de
+`--threads` dice cuántos núcleos usa cada cámara; si no se dice, la cuarta parte de los de la PC,
+entre 2 y 8, para que con dos cámaras quede la mitad para el juego. Con 4, el modelo tarda menos de
 la mitad que en uno solo, y con `heavy` se acerca a lo que tardaba `full` en un núcleo. `--record`
 guarda cada pose en un archivo para reproducirla después. `--engine mediapipe` corre el mismo
 modelo con la librería de MediaPipe, que usa un solo núcleo (`pip install mediapipe` aparte), para
@@ -229,7 +230,12 @@ comparar.
    tobillos. Lo que falta del "llega a los … ms" de la PC después de esos tramos es el Wi-Fi. Un
    toque en la imagen oculta los controles.
 5. Con los puntos en verde, pulsa **Fijar exposición** para que la imagen deje de cambiar de brillo
-   y de foco. Los botones cambian también los fps de la cámara y la cámara trasera o frontal.
+   y de foco. Si el móvil deja manejar la cámara a mano, además acorta la exposición a 10 ms como
+   mucho y sube la ganancia (ISO) para que se vea igual de clara: cada cuadro sale antes (la cámara
+   no lo entrega hasta cerrar la exposición, que con luz de interior llega a 33 ms) y los pies y la
+   bola del Move salen menos movidos, a cambio de algo de grano. La línea de arriba dice la
+   exposición en uso. Los botones cambian también los fps de la cámara (con 60, si el móvil los
+   da, cada cuadro tarda menos en la cámara y en el codificador) y la cámara trasera o frontal.
 
 Cada 2 segundos `body_tracker.py` muestra por móvil los cuadros por segundo y los Mb/s que llegan,
 las poses por segundo, cuánto tarda el modelo, a los cuántos ms de tomado el cuadro llega a la PC y

@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
 import android.hardware.display.DisplayManager
 import android.os.Bundle
@@ -86,6 +87,12 @@ class MainActivity : ComponentActivity() {
     // Written on the UI thread or the camera's, read on the camera thread or for the screen.
     @Volatile private var exposureLocked = false
     @Volatile private var timestampIsRealtime = false
+    // The exposure the camera last used, and what it allows set by hand.
+    @Volatile private var exposureNs = 0L
+    @Volatile private var iso = 0
+    private var manualExposure = false
+    private var maxIso = 0
+    private var minExposureNs = 0L
     private val cameraRate = RateMeter()
     private val videoRate = RateMeter()
     private val bitRate = RateMeter()
@@ -256,6 +263,7 @@ class MainActivity : ComponentActivity() {
                 camera == null -> append(cameraStatus)
                 else -> append("${if (usingFront) "frontal" else "trasera"} $imageSize · ${"%.1f".format(cameraRate.perSecond(now))} cuadros/s")
             }
+            if (camera != null && exposureNs > 0) append(" · exposición ${"%.1f".format(exposureNs / 1e6f)} ms")
             append('\n')
             append(videoStatus)
             val frames = videoRate.perSecond(now)
@@ -335,6 +343,12 @@ class MainActivity : ComponentActivity() {
         // Realtime means the frame times are already on elapsedRealtime, the clock the PC syncs to.
         timestampIsRealtime = characteristics.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE) ==
             CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME
+        manualExposure = characteristics.getCameraCharacteristic(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
+            ?.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR) == true
+        maxIso = characteristics.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)?.upper ?: 0
+        minExposureNs = characteristics.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)?.lower ?: 0L
+        exposureNs = 0L
+        iso = 0
         fpsChoices = characteristics.getCameraCharacteristic(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
             ?.filter { it.lower == it.upper && it.upper in 15..60 }
             ?.map { it.upper }
@@ -364,6 +378,8 @@ class MainActivity : ComponentActivity() {
         Camera2Interop.Extender(analysisBuilder).setSessionCaptureCallback(object : CameraCaptureSession.CaptureCallback() {
             override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
                 cameraRate.tick(SystemClock.elapsedRealtimeNanos())
+                result.get(CaptureResult.SENSOR_EXPOSURE_TIME)?.let { exposureNs = it }
+                result.get(CaptureResult.SENSOR_SENSITIVITY)?.let { iso = it }
             }
         })
         if (currentFps > 0) {
@@ -402,12 +418,24 @@ class MainActivity : ComponentActivity() {
     private fun setExposureLocked(locked: Boolean) {
         val camera = camera ?: return
         exposureLocked = locked
-        Camera2CameraControl.from(camera.cameraControl).setCaptureRequestOptions(
-            CaptureRequestOptions.Builder()
+        val options = CaptureRequestOptions.Builder().setCaptureRequestOption(CaptureRequest.CONTROL_AWB_LOCK, locked)
+        val autoExposureNs = exposureNs
+        val autoIso = iso
+        if (locked && manualExposure && autoExposureNs > 0 && autoIso > 0) {
+            // By hand, and short: see ShortExposure.
+            val setting = ShortExposure.choose(autoExposureNs, autoIso, maxIso, minExposureNs)
+            options.setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                .setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, setting.exposureNs)
+                .setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, setting.iso)
+            if (currentFps > 0) {
+                options.setCaptureRequestOption(CaptureRequest.SENSOR_FRAME_DURATION, 1_000_000_000L / currentFps)
+            }
+            Log.i(TAG, "Exposure fixed at ${setting.exposureNs / 1000} µs, ISO ${setting.iso} (was ${autoExposureNs / 1000} µs, ISO $autoIso)")
+        } else {
+            options.setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
                 .setCaptureRequestOption(CaptureRequest.CONTROL_AE_LOCK, locked)
-                .setCaptureRequestOption(CaptureRequest.CONTROL_AWB_LOCK, locked)
-                .build(),
-        )
+        }
+        Camera2CameraControl.from(camera.cameraControl).setCaptureRequestOptions(options.build())
         if (locked) {
             // Focus once on the middle of the picture and stay there.
             val middle = SurfaceOrientedMeteringPointFactory(1f, 1f).createPoint(0.5f, 0.5f)

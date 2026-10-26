@@ -908,6 +908,12 @@ def ensure_model(name, folder=MODEL_DIR, out=print):
     return path
 
 
+def default_threads():
+    """A quarter of the PC's cores, from 2 to 8: with two cameras the model took 24 ms on 4 cores
+    each where one camera took 14, and more cores bring that back down."""
+    return max(2, min(8, (os.cpu_count() or 8) // 4))
+
+
 def run(port, record_path, model, threads, engine, driver_port, snapshots, ball_color):
     model_path = ensure_model(model)
     if engine == "mediapipe":
@@ -961,7 +967,9 @@ def main():
     parser.add_argument("--port", type=int, default=PORT)
     parser.add_argument("--model", choices=sorted(MODEL_SHA256), default="full",
                         help="lite is quicker, heavy more exact; full (default) is in between")
-    parser.add_argument("--threads", type=int, default=4, help="cores for each camera's pose model (default 4)")
+    parser.add_argument("--threads", type=int, default=default_threads(),
+                        help=f"cores for each camera's pose model (default {default_threads()}: a quarter of this "
+                             "PC's, so two cameras leave half for the game, from 2 to 8)")
     parser.add_argument("--engine", choices=("litert", "mediapipe"), default="litert",
                         help="mediapipe runs the same model on one core (needs pip install mediapipe)")
     parser.add_argument("--record", metavar="FILE", help="save every pose as one JSON line")
