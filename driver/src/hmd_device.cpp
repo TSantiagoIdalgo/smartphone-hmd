@@ -212,8 +212,12 @@ vr::EVRInitError HmdDevice::Activate(uint32_t object_id)
     const vr::PropertyContainerHandle_t container =
         vr::VRProperties()->TrackedDeviceToPropertyContainer(object_id);
     vr::VRProperties()->SetStringProperty(container, vr::Prop_ModelNumber_String, model_number_.c_str());
-    // As Valve's sample HMD: without an input profile, games that read the head through SteamVR
-    // Input (Unity's OpenVR plugin: VRChat, ChilloutVR) never see the head move.
+    // Valve's OpenVR plugin for Unity (VRChat, ChilloutVR) leaves out of the game any device
+    // without a serial number, manufacturer and controller type: without them the head never
+    // moves there, the camera staying on the floor.
+    vr::VRProperties()->SetStringProperty(container, vr::Prop_SerialNumber_String, serial_number_.c_str());
+    vr::VRProperties()->SetStringProperty(container, vr::Prop_ManufacturerName_String, "smartphone-hmd");
+    vr::VRProperties()->SetStringProperty(container, vr::Prop_ControllerType_String, "smartphone_hmd");
     vr::VRProperties()->SetStringProperty(container, vr::Prop_InputProfilePath_String,
                                           "{smartphone_hmd}/input/smartphone_hmd_profile.json");
 
