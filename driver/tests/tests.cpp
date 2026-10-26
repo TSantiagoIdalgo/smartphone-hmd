@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <functional>
 #include <limits>
 #include <random>
@@ -12,6 +13,7 @@
 
 #include "chaperone.h"
 #include "color_convert.h"
+#include "camera_model.h"
 #include "head_position.h"
 #include "head_tracker.h"
 #include "protocol.h"
@@ -537,6 +539,11 @@ struct HeadSimulation {
     // treats a light that repeats exactly as lost.
     double depth_noise = 0.0001;
     double lateral_noise = 0.0001;
+    // A slow wander along the ray too, as PSMoveServiceEx's own smoothing leaves: its size and
+    // how long it takes to change, s.
+    double depth_wander = 0.0;
+    double depth_wander_seconds = 0.5;
+    double wander = 0.0;
     bool interpolated = false;   // PSMoveServiceEx's 200 Hz stream between frames
     double time = 100.0;
     double last_frame = 100.0;
@@ -545,6 +552,30 @@ struct HeadSimulation {
     double frame_arrival = 0.0;
     bool have_frame = false;
     bool frame_seen = false;
+    // Two body cameras on either side, 30 frames a second each, arriving body_age late.
+    bool body = false;
+    std::vector<CameraModel> body_cameras{BodyCamera({-1.6, 1.1, -2.4}), BodyCamera({1.7, 1.0, -2.2})};
+    double body_age = 0.15;
+    double body_pixel_noise = 3.0;
+    Vec3 ears_from_neck{0.0, 0.06, 0.01};  // where the pose model really puts them
+    std::function<bool(double)> body_visible;
+    std::vector<double> last_body_frame{100.0, 100.0 + 1.0 / 60.0};
+    std::deque<HeadSighting> body_in_flight;
+
+    static CameraModel BodyCamera(Vec3 position)
+    {
+        const Vec3 target{0.1, 1.5, 0.2};
+        const Vec3 forward = (target - position) * (1.0 / Length(target - position));
+        Vec3 right = Cross(forward, Vec3{0, 1, 0});
+        right = right * (1.0 / Length(right));
+        CameraModel camera;
+        camera.width = 480;
+        camera.height = 640;
+        camera.focal = 520.0;
+        camera.rotation = Rows(right, Cross(forward, right), forward);
+        camera.position = position;
+        return camera;
+    }
 
     // Box-Muller on the raw generator, so every compiler draws the same numbers.
     double Gaussian()
@@ -564,7 +595,11 @@ struct HeadSimulation {
         Vec3 side = Cross(along, Vec3{0, 1, 0});
         side = side * (1.0 / Length(side));
         const Vec3 up = Cross(side, along);
-        return light + along * (depth_noise * Gaussian()) + side * (lateral_noise * Gaussian()) +
+        if (depth_wander > 0.0) {
+            const double a = std::exp(-1.0 / 60.0 / depth_wander_seconds);
+            wander = a * wander + std::sqrt(1.0 - a * a) * depth_wander * Gaussian();
+        }
+        return light + along * (depth_noise * Gaussian() + wander) + side * (lateral_noise * Gaussian()) +
                up * (lateral_noise * Gaussian());
     }
 
@@ -606,6 +641,32 @@ struct HeadSimulation {
                 const double f = std::min((time - frame_arrival) * 60.0, 1.0);
                 estimator.AddLight(time, previous_frame_light + (frame_light - previous_frame_light) * f, true,
                                    now.angular_velocity);
+            }
+            for (size_t c = 0; body && c < body_cameras.size(); ++c) {
+                if (last_body_frame[c] < time - 0.1) {
+                    last_body_frame[c] = time;
+                }
+                if (time < last_body_frame[c] + 1.0 / 30.0) {
+                    continue;
+                }
+                last_body_frame[c] += 1.0 / 30.0;
+                const double frame_t = last_body_frame[c] - start;
+                const HeadMotion then = motion(frame_t);
+                HeadSighting sighting;
+                sighting.camera = static_cast<uint32_t>(c);
+                sighting.time = last_body_frame[c];
+                sighting.model = body_cameras[c];
+                sighting.noise = body_pixel_noise;
+                if ((!body_visible || body_visible(frame_t)) &&
+                    body_cameras[c].Project(then.neck + Rotate(then.rotation, ears_from_neck), &sighting.u, &sighting.v)) {
+                    sighting.u += body_pixel_noise * Gaussian();
+                    sighting.v += body_pixel_noise * Gaussian();
+                    body_in_flight.push_back(sighting);
+                }
+            }
+            while (!body_in_flight.empty() && body_in_flight.front().time + body_age <= time) {
+                estimator.AddSighting(time, body_in_flight.front());
+                body_in_flight.pop_front();
             }
             estimator.Tick(time, true);
             if (each_step) {
@@ -967,6 +1028,198 @@ void TestHeadIgnoresNonFinite()
     CHECK(Length(eyes - sim.Eyes(StandStill(0))) < 0.005);
 }
 
+void TestHeadLateSightingReplayed()
+{
+    // A view that arrives after newer light samples ends up as if it had come in its place.
+    HeadSimulation sim;
+    HeadPositionConfig config = TestHeadConfig();
+    config.depth_noise_with_sightings_m = config.depth_noise_m;
+    const CameraModel camera = sim.body_cameras[0];
+    HeadSighting sighting;
+    sighting.time = 1.0 + 20 / 60.0 - 0.041;
+    sighting.model = camera;
+    camera.Project(Vec3{0.1, 1.61, 0.21}, &sighting.u, &sighting.v);
+    sighting.u += 4.0;
+    HeadPositionEstimator in_order(config), late(config);
+    for (HeadPositionEstimator* e : {&in_order, &late}) {
+        e->SetCamera(true, sim.camera, 1);
+        e->AddOrientation(0.0, Quat{});
+    }
+    for (int i = 0; i < 40; ++i) {
+        const double t = 1.0 + i / 60.0;
+        const Vec3 light = Vec3{0.1, 1.71, 0.18} + Vec3{0.0, 0.0, 0.01 * std::sin(i * 1.3)};
+        in_order.AddLight(t, light, true, Vec3{});
+        late.AddLight(t, light, true, Vec3{});
+        if (i == 20) {
+            in_order.AddSighting(t, sighting);
+        }
+        if (i == 26) {
+            late.AddSighting(t, sighting);
+        }
+    }
+    // Once the glide in of either is over.
+    const Vec3 a = in_order.Output(10.0, Quat{}, Vec3{}).position, b = late.Output(10.0, Quat{}, Vec3{}).position;
+    CHECK(Length(a - b) < 1e-9);
+    CHECK(in_order.TakeStats().sightings == 1 && late.TakeStats().sightings == 1);
+}
+
+// Along the PS Eye's ray and across it, the eyes' error while standing still, over several runs.
+struct DepthAcross {
+    double depth = 0.0;
+    double across = 0.0;
+};
+
+DepthAcross StillError(const std::function<void(HeadSimulation&)>& setup)
+{
+    double depth_sum = 0.0, across_sum = 0.0;
+    int count = 0;
+    for (int seed = 0; seed < 6; ++seed) {
+        HeadSimulation sim;
+        sim.random.seed(100 + seed);
+        sim.interpolated = true;
+        sim.depth_noise = 0.03;
+        sim.lateral_noise = 0.002;
+        setup(sim);
+        const Vec3 truth = sim.Eyes(StandStill(0));
+        const Vec3 along = Unit(truth - sim.camera);
+        sim.Run(20.0, StandStill, nullptr, 1.0, [&](double time) {
+            if (time < 102.0) {
+                return;
+            }
+            const Vec3 error = sim.estimator.Output(time, Quat{}, Vec3{}).position - truth;
+            const double depth = Dot(error, along);
+            depth_sum += depth * depth;
+            across_sum += Dot(error, error) - depth * depth;
+            ++count;
+        });
+    }
+    return {std::sqrt(depth_sum / count), std::sqrt(across_sum / count)};
+}
+
+void TestHeadBodySteadiesDepth()
+{
+    // PSMoveServiceEx's depth wanders slowly, 2 cm, on top of its frame-to-frame noise; the body
+    // cameras, 0.15 s late, hold it much steadier, without the sideways getting worse.
+    const auto wandering = [](bool body) {
+        return StillError([body](HeadSimulation& sim) {
+            sim.depth_wander = 0.02;
+            sim.body = body;
+        });
+    };
+    const DepthAcross light = wandering(false), both = wandering(true);
+    CHECK(both.depth < 0.6 * light.depth);
+    CHECK(both.across < 1.2 * light.across);
+    // Frame-to-frame noise alone is no worse with them.
+    const DepthAcross white = StillError([](HeadSimulation&) {});
+    const DepthAcross white_both = StillError([](HeadSimulation& sim) { sim.body = true; });
+    CHECK(white_both.depth < 1.2 * white.depth);
+    // Standing still is smoothed more than the settings say: the agility learns it.
+    HeadSimulation sim;
+    sim.depth_noise = 0.03;
+    sim.lateral_noise = 0.002;
+    sim.Run(3.0, StandStill);
+    sim.estimator.TakeStats();
+    sim.Run(2.0, StandStill);
+    CHECK(sim.estimator.TakeStats().agility < 0.1);
+}
+
+void TestHeadBodyFollowsWithoutLight()
+{
+    // Turned away from the PS Eye: the light is out of sight while turning 180 degrees and then
+    // stepping 30 cm to the side. The body cameras keep the head followed, coarser and later than
+    // the light, but without holding it still or jumping when the light goes or comes back.
+    HeadSimulation sim;
+    sim.body = true;
+    sim.depth_noise = 0.03;
+    sim.lateral_noise = 0.002;
+    sim.Run(2.0, StandStill);
+    const auto turn_and_step = [](double t) {
+        HeadMotion m = StandStill(t);
+        const double turn = std::clamp(t - 0.5, 0.0, 1.0);
+        m.rotation = AxisAngle(Vec3{0, 1, 0}, kPi * turn * turn * (3.0 - 2.0 * turn));
+        m.angular_velocity = Vec3{0, t > 0.5 && t < 1.5 ? kPi * 6.0 * turn * (1.0 - turn) : 0.0, 0};
+        m.neck = m.neck + Vec3{0.3 * std::clamp(t - 1.6, 0.0, 1.0), 0, 0};
+        return m;
+    };
+    sim.estimator.TakeStats();
+    bool alone = true;
+    const HeadRun run = sim.Run(4.0, turn_and_step, [](double t) { return t < 0.3 || t > 3.0; }, 0.0, [&](double time) {
+        const double t = time - 102.0;
+        if (t > 0.6 && t < 2.9) {
+            alone = alone && sim.estimator.state() == HeadPositionEstimator::State::Live &&
+                    !sim.estimator.LightFollowed(time);
+        }
+    });
+    const HeadPositionEstimator::Stats stats = sim.estimator.TakeStats();
+    CHECK(alone);
+    CHECK(stats.losses == 0);
+    CHECK(run.max_step < 0.01);
+    // The step at 0.3 m/s, about 0.4 s behind at worst: holding still would be the whole 30 cm.
+    CHECK(run.max_error < 0.15);
+    CHECK(Length(run.last_eyes - run.last_truth) < 0.03);
+}
+
+void TestHeadBodyStartsWithoutLight()
+{
+    // No light at all: two cameras find the head, and follow it.
+    HeadSimulation sim;
+    sim.body = true;
+    const HeadRun run = sim.Run(3.0, StandStill, [](double) { return false; }, 1.0);
+    const HeadPositionEstimator::Stats stats = sim.estimator.TakeStats();
+    CHECK(stats.sighting_starts == 1);
+    CHECK(sim.estimator.state() == HeadPositionEstimator::State::Live);
+    CHECK(run.rms < 0.02);
+    // The cameras lose the person too: the head holds.
+    sim.body_visible = [](double) { return false; };
+    sim.Run(1.0, StandStill, [](double) { return false; });
+    CHECK(sim.estimator.state() == HeadPositionEstimator::State::Holding);
+}
+
+void TestHeadLearnsEars()
+{
+    // The pose model puts the ears 4 cm lower and 3 cm further back than the first guess: the
+    // light teaches where, so the head does not move when the light is lost.
+    HeadSimulation sim;
+    sim.body = true;
+    sim.depth_noise = 0.03;
+    sim.lateral_noise = 0.002;
+    sim.ears_from_neck = sim.config.ears_from_neck + Vec3{0.0, -0.04, 0.03};
+    const auto sway = [](double t) {
+        HeadMotion m = StandStill(t);
+        const double yaw = 0.8 * std::sin(1.3 * t), pitch = 0.3 * std::sin(0.7 * t);
+        m.rotation = AxisAngle(Vec3{0, 1, 0}, yaw) * AxisAngle(Vec3{1, 0, 0}, pitch);
+        m.angular_velocity = Vec3{0, 0.8 * 1.3 * std::cos(1.3 * t), 0};
+        return m;
+    };
+    sim.Run(30.0, sway);
+    CHECK(Length(sim.estimator.TakeStats().ears_from_neck - sim.ears_from_neck) < 0.01);
+    const HeadRun run = sim.Run(1.5, [&](double t) { return sway(t + 30.0); }, [](double t) { return t < 0.5; }, 0.5);
+    CHECK(run.max_error < 0.03);
+}
+
+void TestHeadBodyMoving()
+{
+    // Crouching and shaking the head, with the PS Eye's usual noise: as close with the body
+    // cameras as with the light alone.
+    double crouch[2], settle[2], shake[2];
+    for (const bool body : {false, true}) {
+        HeadSimulation sim;
+        sim.body = body;
+        sim.depth_noise = 0.03;
+        sim.lateral_noise = 0.002;
+        crouch[body] = sim.Run(2.3, Crouch).max_error;
+        settle[body] = sim.Run(0.5, [](double t) { return Crouch(t + 2.3); }, nullptr, 0.3).max_error;
+        HeadSimulation shaking;
+        shaking.body = body;
+        shaking.depth_noise = 0.03;
+        shaking.lateral_noise = 0.002;
+        shake[body] = shaking.Run(4.0, ShakeHead).rms;
+    }
+    CHECK(crouch[1] < 1.2 * crouch[0]);
+    CHECK(settle[1] < settle[0] + 0.01);
+    CHECK(shake[1] < 1.3 * shake[0]);
+}
+
 int main()
 {
     TestParse();
@@ -1008,6 +1261,12 @@ int main()
     TestHeadUnfreezeWhileMoving();
     TestHeadRecenterFrozenBeforeSeen();
     TestHeadIgnoresNonFinite();
+    TestHeadLateSightingReplayed();
+    TestHeadBodySteadiesDepth();
+    TestHeadBodyFollowsWithoutLight();
+    TestHeadBodyStartsWithoutLight();
+    TestHeadLearnsEars();
+    TestHeadBodyMoving();
     if (g_failures == 0) {
         std::printf("All tests passed\n");
         return 0;

@@ -1,7 +1,11 @@
 #pragma once
 
+#include <cstdint>
 #include <deque>
+#include <mutex>
+#include <vector>
 
+#include "camera_model.h"
 #include "math3d.h"
 
 // Turns the position of a light on the headset, seen by the PS Eye through PSMoveServiceEx, into
@@ -14,6 +18,13 @@
 // rotation. Turning the head then has the phone's latency; only moving the whole head (crouching,
 // leaning, stepping) carries the camera's, partly hidden by extrapolating the pivot's velocity.
 //
+// The body tracking's cameras see the head too, as the point midway between the ears. Each view
+// pins it down across that camera's line of sight, which with the phones on either side covers the
+// PS Eye's poor direction, its depth: the head stops swimming back and forth. They also keep the
+// head followed when the light is out of sight, turning away from the PS Eye. Those views arrive
+// about 0.1 s after the light of the same moment, so the filter keeps its last measurements a
+// moment and puts a late view in its place among them, applying the newer ones again on top.
+//
 // World: SteamVR raw space in metres, which is PSMoveServiceEx tracking space / 100 once VDM's
 // playspace calibration is reset. Head axes: +x right, +y up, +z back, origin between the eyes.
 // Times are seconds on one steady clock, when samples arrived at the PC.
@@ -25,8 +36,47 @@ struct HeadPositionConfig {
     double camera_period_seconds = 1.0 / 60.0;
     double lateral_noise_m = 0.002;           // per camera frame at 2 m, across the camera ray
     double depth_noise_m = 0.03;              // per camera frame at 2 m, along the ray
-    double agility = 1.0;                     // process noise, m^2/s^3
+    // The same while the body cameras see the head. The PS Eye's depth wanders slowly (it is
+    // PSMoveServiceEx's own smoothing of a noisy guess from the light's size), so its frames are
+    // not as independent as they look; the cameras' views are.
+    double depth_noise_with_sightings_m = 0.09;
+    double agility = 1.0;                     // process noise, m^2/s^3, at its usual scale
     double prediction_gain = 0.8;             // share of the pivot velocity extrapolated
+    // Midway between the ears, where the body cameras see the head, from the neck: head axes, m. A
+    // first guess, learned against the light while both see the head.
+    Vec3 ears_from_neck{0.0, 0.06, 0.01};
+};
+
+// A body camera's view of the head: where it saw the point midway between the ears.
+struct HeadSighting {
+    uint32_t camera = 0;  // which camera
+    double time = 0.0;    // when it took the frame
+    CameraModel model;
+    double u = 0.0;       // pixels
+    double v = 0.0;
+    double noise = 3.0;   // pixels, standard deviation
+};
+
+// Hands the views from the body tracking's thread to the headset's.
+class HeadSightingQueue {
+public:
+    void Push(const HeadSighting& sighting)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (sightings_.size() < 256) {
+            sightings_.push_back(sighting);
+        }
+    }
+    void Drain(std::vector<HeadSighting>* out)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        out->swap(sightings_);
+        sightings_.clear();
+    }
+
+private:
+    std::mutex mutex_;
+    std::vector<HeadSighting> sightings_;
 };
 
 struct HeadPoseOut {
@@ -57,6 +107,13 @@ public:
         double lateral_innovation_rms_m = 0.0;
         double eye_height_m = 0.0;
         double camera_distance_m = 0.0;
+        // The body cameras' views of the head.
+        int sightings = 0;
+        int sightings_rejected = 0;
+        int sightings_late = 0;  // older than the measurements kept
+        int sighting_starts = 0;  // the head found by two cameras, without the light
+        Vec3 ears_from_neck;     // as learned
+        double agility = 0.0;    // its scale on average: below 1 the head is smoothed more
     };
 
     explicit HeadPositionEstimator(const HeadPositionConfig& config = HeadPositionConfig());
@@ -69,6 +126,8 @@ public:
     void SetHorizon(double seconds) { horizon_ = seconds; }
     // A light sample. `tracking` false means the camera lost it.
     void AddLight(double time, Vec3 position, bool tracking, Vec3 world_angular_velocity);
+    // A body camera's view of the head, arrived at `now`.
+    void AddSighting(double now, const HeadSighting& sighting);
     // Call often. `source_ok` is false while PSMoveServiceEx is not streaming.
     void Tick(double now, bool source_ok);
     void SetFrozen(bool frozen, double now);
@@ -77,6 +136,8 @@ public:
 
     HeadPoseOut Output(double now, Quat orientation, Vec3 world_angular_velocity) const;
     State state() const { return state_; }
+    // Live from the light, not only the body cameras.
+    bool LightFollowed(double now) const;
     // Counters since the last call.
     Stats TakeStats();
 
@@ -86,14 +147,57 @@ private:
         Vec3 pivot;
     };
 
+    // The filter as of one moment.
+    struct Snapshot {
+        Vec3 pivot;
+        Vec3 velocity;
+        Mat3 p_pp, p_pv, p_vv;
+        double time = 0.0;
+        double agility = 1.0;
+    };
+
+    // What the filter took in at one moment: a measurement of the neck pivot, or one it left out.
+    struct Measurement {
+        bool light = true;  // or a body camera's view
+        bool missed = false;  // left out as an outlier
+        Vec3 pivot;
+        Mat3 noise;
+        Vec3 blind;  // a direction it measures poorly (unit, or zero): left out of the agility
+        double weight = 1.0;  // how much it counts towards the agility
+    };
+
+    struct Step {
+        double time;  // when the head was there
+        Measurement measurement;
+        Snapshot after;  // the filter right after it
+    };
+
     Quat OrientationAt(double time) const;
-    Mat3 MeasurementNoise(Vec3 light, Vec3 world_angular_velocity, double since_previous) const;
+    Mat3 MeasurementNoise(Vec3 light, Vec3 world_angular_velocity, double since_previous, bool sightings) const;
     Vec3 Pivot(double now, Vec3* velocity) const;
     Vec3 BlendOffset(double now) const;
     void StartBlend(double now, Vec3 pivot_before);
-    void Reset(double time, double measured_at, Vec3 pivot, const Mat3& noise);
+    void Reset(double measured_at, Vec3 pivot, const Mat3& noise);
     void EnterHolding(double now);
     void Predict(double to);
+
+    Snapshot Save() const;
+    void Restore(const Snapshot& snapshot);
+    // Puts the filter at `time`, from the newest step before it; `index` is where a measurement
+    // at `time` goes among the steps. False if `time` is older than every step kept.
+    bool Rewind(double time, size_t* index);
+    // The squared Mahalanobis distance of a measurement of the pivot, and optionally applies it.
+    // Negative if it cannot be used.
+    double Correct(const Measurement& m, bool apply);
+    void Apply(const Measurement& m);
+    // Keeps a measurement just applied at `index`, and applies the newer ones again after it.
+    void Keep(size_t index, double time, const Measurement& m);
+    void ForgetSteps();
+    // The light's own neck pivot at `time`, between two of its steps.
+    bool LightAt(double time, Vec3* pivot) const;
+    void LearnEars(const HeadSighting& sighting, Quat orientation);
+    // Starts the head where two cameras' newest views meet.
+    bool StartFromSightings(double now);
 
     HeadPositionConfig config_;
     Vec3 light_from_neck_;  // eyes_from_neck - eyes_from_light
@@ -122,8 +226,17 @@ private:
     Vec3 velocity_;
     Mat3 p_pp_, p_pv_, p_vv_;
     double state_time_ = 0.0;
+    // Scales the process noise, learned from how well the head is being predicted.
+    double agility_ = 1.0;
 
     std::deque<Rejected> rejected_;
+
+    std::deque<Step> steps_;  // oldest first, within kReplaySeconds of the newest
+    Snapshot base_;           // the filter before the oldest step
+    Vec3 ears_from_neck_;
+    double last_sighting_time_ = -1e9;  // when the newest view used arrived
+    std::vector<HeadSighting> recent_;  // each camera's newest view
+    std::deque<double> rejected_sightings_;
 
     // Smooths jumps (first sighting, reacquiring, resets) out over a short time.
     Vec3 blend_;
@@ -134,4 +247,5 @@ private:
     Stats stats_;
     double depth_innovation_sum_ = 0.0;
     double lateral_innovation_sum_ = 0.0;
+    double agility_sum_ = 0.0;
 };

@@ -10,6 +10,7 @@
 #include "body_filter.h"
 #include "body_protocol.h"
 #include "camera_model.h"
+#include "head_position.h"
 #include "psms_client.h"
 
 // Everything the body tracking does with the cameras' frames, apart from SteamVR: puts each frame
@@ -118,6 +119,8 @@ public:
 
     TrackerPose Waist(double now) const { return filter_.Waist(now); }
     TrackerPose Foot(bool left, double now) const { return filter_.Foot(left, now); }
+    // Where the calibrated cameras saw the head (midway between the ears) since the last call.
+    void TakeHeadSightings(std::vector<HeadSighting>* out);
 
     // Numbers since the last call.
     Report TakeReport(double now);
@@ -155,6 +158,7 @@ private:
     std::map<uint32_t, Camera> cameras_;
     std::map<int, std::deque<ControllerSample>> moves_;
     BodyFilter filter_;
+    std::vector<HeadSighting> head_sightings_;
     bool calibrating_ = false;
     int ambiguous_ = 0;
     double report_start_ = -1.0;

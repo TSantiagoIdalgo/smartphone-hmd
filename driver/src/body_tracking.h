@@ -6,6 +6,7 @@
 
 #include "body_session.h"
 
+class HeadSightingQueue;
 class PsmsClient;
 class TrackerDevice;
 
@@ -14,8 +15,10 @@ class TrackerDevice;
 // trackers their poses. The calibrations are saved in SteamVR's settings, one per camera.
 class BodyTracking {
 public:
-    // `psms` may be null (no calibrating then); the trackers stay ours.
-    BodyTracking(PsmsClient* psms, TrackerDevice* waist, TrackerDevice* left_foot, TrackerDevice* right_foot);
+    // `psms` may be null (no calibrating then); the trackers stay ours. Where the cameras see the
+    // head goes to `head` (may be null), for the headset.
+    BodyTracking(PsmsClient* psms, TrackerDevice* waist, TrackerDevice* left_foot, TrackerDevice* right_foot,
+                 HeadSightingQueue* head);
     ~BodyTracking();
 
     void Start();
@@ -36,6 +39,7 @@ private:
     double calibration_seconds_ = 60.0;
     PsmsClient* psms_;
     TrackerDevice* trackers_[3];
+    HeadSightingQueue* head_;
     BodySession session_;  // only touched by the thread
     // Since the last report: each tracker's poses, and how many times all three were published.
     PoseSpread spreads_[3];

@@ -28,7 +28,10 @@ vr::EVRInitError DeviceProvider::Init(vr::IVRDriverContext* driver_context)
         psms_ = std::make_unique<PsmsClient>();
     }
 
-    hmd_ = std::make_unique<HmdDevice>(head ? psms_.get() : nullptr);
+    if (body) {
+        head_sightings_ = std::make_unique<HeadSightingQueue>();
+    }
+    hmd_ = std::make_unique<HmdDevice>(head ? psms_.get() : nullptr, head_sightings_.get());
     if (!vr::VRServerDriverHost()->TrackedDeviceAdded(
             hmd_->SerialNumber().c_str(), vr::TrackedDeviceClass_HMD, hmd_.get())) {
         DriverLog("Failed to add the HMD device");
@@ -53,7 +56,8 @@ vr::EVRInitError DeviceProvider::Init(vr::IVRDriverContext* driver_context)
                 DriverLog("Body tracking: could not add the %s tracker", t.serial);
             }
         }
-        body_ = std::make_unique<BodyTracking>(psms_.get(), trackers_[0].get(), trackers_[1].get(), trackers_[2].get());
+        body_ = std::make_unique<BodyTracking>(psms_.get(), trackers_[0].get(), trackers_[1].get(), trackers_[2].get(),
+                                               head_sightings_.get());
         body_->Start();
         DriverLog("Body tracking: on, with hip and foot trackers");
         if (!head) {
@@ -73,6 +77,7 @@ void DeviceProvider::Cleanup()
     body_ = nullptr;
     hmd_ = nullptr;
     psms_ = nullptr;
+    head_sightings_ = nullptr;
     trackers_.clear();
 }
 

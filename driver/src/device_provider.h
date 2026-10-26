@@ -27,6 +27,7 @@ public:
 
 private:
     std::unique_ptr<PsmsClient> psms_;  // shared by the head light and the body tracking
+    std::unique_ptr<HeadSightingQueue> head_sightings_;  // from the body tracking to the headset
     std::unique_ptr<HmdDevice> hmd_;
     std::vector<std::unique_ptr<TrackerDevice>> trackers_;
     std::unique_ptr<BodyTracking> body_;

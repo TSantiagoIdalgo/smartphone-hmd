@@ -20,6 +20,9 @@ constexpr double kPairWindowSeconds = 0.02;
 constexpr double kCheckWindowSeconds = 0.025;
 constexpr double kMaxCheckSpeed = 0.3;  // m/s
 constexpr double kDegreesPerRadian = 180.0 / 3.14159265358979;
+constexpr int kLeftEar = 7;  // among MediaPipe's pose points
+constexpr int kRightEar = 8;
+constexpr size_t kMaxHeadSightings = 64;
 
 double Median(std::vector<double> values)
 {
@@ -78,6 +81,20 @@ bool BodySession::AddFrame(const body_protocol::Frame& frame, double arrived)
             view.visibility[j] = p[3];
         }
         filter_.Add(view);
+
+        const float* left = frame.point[kLeftEar];
+        const float* right = frame.point[kRightEar];
+        const double visibility = std::min(left[3], right[3]);
+        if (visibility >= config_.filter.min_visibility && head_sightings_.size() < kMaxHeadSightings) {
+            HeadSighting sighting;
+            sighting.camera = frame.camera;
+            sighting.time = time;
+            sighting.model = camera.model;
+            sighting.u = 0.5 * (left[0] + right[0]) * frame.width;
+            sighting.v = 0.5 * (left[1] + right[1]) * frame.height;
+            sighting.noise = config_.filter.pixel_noise * std::max(frame.width, frame.height) / 640.0 / visibility;
+            head_sightings_.push_back(sighting);
+        }
     }
 
     if (frame.flags & body_protocol::kFlagBall) {
@@ -125,6 +142,12 @@ bool BodySession::AddFrame(const body_protocol::Frame& frame, double arrived)
         }
     }
     return fresh;
+}
+
+void BodySession::TakeHeadSightings(std::vector<HeadSighting>* out)
+{
+    out->swap(head_sightings_);
+    head_sightings_.clear();
 }
 
 void BodySession::AddMove(const ControllerSample& sample)

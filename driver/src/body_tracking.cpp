@@ -56,8 +56,9 @@ unsigned ShortId(uint32_t id)
 
 }  // namespace
 
-BodyTracking::BodyTracking(PsmsClient* psms, TrackerDevice* waist, TrackerDevice* left_foot, TrackerDevice* right_foot)
-    : psms_(psms), trackers_{waist, left_foot, right_foot}, session_(ReadSessionConfig())
+BodyTracking::BodyTracking(PsmsClient* psms, TrackerDevice* waist, TrackerDevice* left_foot, TrackerDevice* right_foot,
+                           HeadSightingQueue* head)
+    : psms_(psms), trackers_{waist, left_foot, right_foot}, head_(head), session_(ReadSessionConfig())
 {
     port_ = GetIntSetting("body_port", body_protocol::kPort);
     calibration_seconds_ = std::clamp(GetDoubleSetting("body_calibration_seconds", 60.0), 10.0, 600.0);
@@ -97,6 +98,7 @@ void BodyTracking::Run()
               port_);
     uint8_t buffer[2048];
     std::vector<ControllerSample> moves;
+    std::vector<HeadSighting> sightings;
     while (running_) {
         const int size = socket.Receive(buffer, sizeof(buffer));
         const double now = MonoSeconds();
@@ -104,6 +106,12 @@ void BodyTracking::Run()
         if (size > 0 && body_protocol::Parse(buffer, static_cast<size_t>(size), &frame) &&
             session_.AddFrame(frame, now)) {
             OnNewCamera(frame.camera);
+        }
+        session_.TakeHeadSightings(&sightings);
+        for (const HeadSighting& sighting : sightings) {
+            if (head_) {
+                head_->Push(sighting);
+            }
         }
         if (psms_) {
             psms_->DrainControllers(&moves);
