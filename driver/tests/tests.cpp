@@ -1150,6 +1150,35 @@ void TestHeadBodyFixesLightDepth()
     CHECK(alone.Run(5.0, StandStill, nullptr, 2.0).rms > 0.5);
 }
 
+void TestHeadBodyFixesLightTooFar()
+{
+    // As in a test: the PS Eye below the head, PSMoveServiceEx putting the light twice as far as it
+    // is, wandering 30 cm more, so that it is often over 4 m from the PS Eye (impossible, alone);
+    // and the pose model's ears 5 cm higher and 3 cm further forward than first guessed. The body
+    // cameras come in after the light: the head goes where they see it, as soon as their views
+    // arrive, and their ears are learned in a couple of seconds.
+    HeadSimulation sim;
+    sim.camera = Vec3{0.0, 1.25, -1.8};
+    sim.interpolated = true;
+    sim.depth_noise = 0.03;
+    sim.lateral_noise = 0.002;
+    sim.light_scale = 2.0;
+    sim.depth_wander = 0.3;
+    sim.ears_from_neck = sim.config.ears_from_neck + Vec3{0.0, 0.05, -0.03};
+    sim.Run(2.0, StandStill);
+    sim.estimator.TakeStats();
+    sim.body = true;
+    sim.Run(3.0, StandStill);
+    const HeadPositionEstimator::Stats first = sim.estimator.TakeStats();
+    CHECK(first.light_depth_resets >= 1);
+    // The forward 3 cm of the ears cannot be learned from the light's depth, so some of it stays.
+    const HeadRun run = sim.Run(5.0, StandStill, nullptr, 0.0);
+    CHECK(run.rms < 0.04);
+    const HeadPositionEstimator::Stats after = sim.estimator.TakeStats();
+    CHECK(after.sightings > 10 * after.sightings_rejected);
+    CHECK(std::abs(after.ears_from_neck.y - sim.ears_from_neck.y) < 0.01);
+}
+
 void TestHeadBodyFollowsWithoutLight()
 {
     // Turned away from the PS Eye: the light is out of sight while turning 180 degrees and then
@@ -1485,6 +1514,7 @@ int main()
     TestHeadLateSightingReplayed();
     TestHeadBodySteadiesDepth();
     TestHeadBodyFixesLightDepth();
+    TestHeadBodyFixesLightTooFar();
     TestHeadBodyFollowsWithoutLight();
     TestHeadBodyStartsWithoutLight();
     TestHeadLearnsEars();

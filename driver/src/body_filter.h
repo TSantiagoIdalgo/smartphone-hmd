@@ -77,6 +77,7 @@ public:
         int updates = 0;
         int outliers = 0;
         int swapped = 0;  // frames whose left and right were the wrong way round
+        int late = 0;     // points older than what their joint already had: left out
         int started = 0;  // joints found again after not being followed
     };
 

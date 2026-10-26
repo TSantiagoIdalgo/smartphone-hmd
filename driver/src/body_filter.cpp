@@ -112,11 +112,16 @@ double BodyFilter::Update(State* state, int joint, const CameraModel& camera, do
     // where the joint was then.
     const double late = s.time - time;
     if (late > kMaxLateSeconds) {
+        stats_.late += apply;
         return -1.0;
     }
     const Vec3 at = s.position - s.velocity * late;
     double pu = 0.0, pv = 0.0;
     if (!camera.Project(at, &pu, &pv)) {
+        // Behind a camera that sees it in front: as wrong as an outlier.
+        if (apply && ++state->misses >= kMissesToRestart) {
+            state->live = false;
+        }
         return -1.0;
     }
     double h[2][6];
@@ -239,7 +244,7 @@ void BodyFilter::Add(BodyView view)
         if (joints_[j].live) {
             Update(&joints_[j], j, camera, view.time, view.u[j], view.v[j], view.visibility[j], true);
         }
-        missing = missing || !joints_[j].live;
+        missing = missing || !Usable(joints_[j], view.time, nullptr);
     }
     if (missing) {
         Start(view);
@@ -267,7 +272,8 @@ void BodyFilter::Start(const BodyView& view)
         for (int j = 0; j < kJointCount; ++j) {
             Vec3 point;
             double gap = 0.0;
-            if (joints_[j].live || !seen(view, j) || !seen(other, j) ||
+            // A joint lost a while (out of view, or stuck ahead of the frames) starts again too.
+            if (Usable(joints_[j], time, nullptr) || !seen(view, j) || !seen(other, j) ||
                 !RayGap(camera, view.u[j], view.v[j], other_camera, other.u[j], other.v[j], &point, &gap) ||
                 gap > kStartMaxGapM) {
                 continue;
@@ -309,7 +315,8 @@ Vec3 BodyFilter::Output(const State& state, double now) const
 
 bool BodyFilter::Usable(const State& state, double now, bool* holding) const
 {
-    if (!state.live || now - state.last_update > kLostSeconds) {
+    // Lost: nothing new for a while, or stamped far ahead of now (a clock that jumped).
+    if (!state.live || std::fabs(now - state.last_update) > kLostSeconds) {
         return false;
     }
     if (holding) {

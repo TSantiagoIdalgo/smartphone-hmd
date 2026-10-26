@@ -49,8 +49,9 @@ private:
     // Since the last report: each tracker's poses, and how many times all three were published.
     PoseSpread spreads_[3];
     int published_ = 0;
-    // When each tracker last had a pose: until then, and a while after, it shows as disconnected.
-    double last_valid_[3] = {-1e9, -1e9, -1e9};
+    // Whether each tracker has had a pose (until then it shows as disconnected), and its last one.
+    bool has_pose_[3] = {false, false, false};
+    TrackerPose last_pose_[3];
     // Once a second, where the headset is from the hips and where it looks from where they face.
     double next_head_check_ = 0.0;
     double head_offset_sum_ = 0.0;

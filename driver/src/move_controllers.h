@@ -81,7 +81,8 @@ private:
 // more while the hand keeps still, and leaves out the jumps of a bulb half hidden. The body
 // cameras' views of the bulbs (`sightings`, may be null) go into it as they do the head's: they
 // give its depth, and follow it while the PS Eye does not see it. A view is the bulb of the hand
-// nearest its line of sight, when the other hand is clearly farther.
+// nearest its line of sight, when the other hand is clearly farther; near neither, of the one
+// hand that nothing follows.
 class MoveControllers {
 public:
     // `pitch_degrees`: see MoveHand. `bulb`: the filter's settings for a bulb.

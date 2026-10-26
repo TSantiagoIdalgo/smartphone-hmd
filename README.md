@@ -307,9 +307,13 @@ PS Move") y un PS Move para calibrar. Con SteamVR cerrado, pon en `default.vrset
 ```
 
 Al abrir SteamVR aparecen tres trackers (cadera, pie izquierdo y pie derecho) con su rol ya puesto,
-así que VRChat los usa sin configurar nada en "Manage Trackers". Hasta que tienen posición (dos
-cámaras calibradas que te vean) figuran desconectados, para que VRChat no entre en el modo de
-cuerpo completo y te deje en pose de T sin poder calibrar.
+así que VRChat los usa sin configurar nada en "Manage Trackers". Hasta que tienen posición por
+primera vez (dos cámaras calibradas que te vean entero) figuran desconectados, para que VRChat no
+entre en el modo de cuerpo completo y te deje en pose de T sin poder calibrar. Desde entonces
+quedan conectados aunque los móviles dejen de verte un rato (se quedan donde estaban), como un
+tracker real tapado. **Si VRChat no ofrece "Calibrar"** (solo sentado/parado), es que todavía no vio
+los tres: los móviles tienen que verte los pies donde juegas. Mira con `--show` que en los dos
+salgas entero, de la cabeza a los pies, y en `vrserver.txt` que `Body trackers` no diga `nowhere`.
 
 **Dónde poner los móviles** (visto desde arriba):
 
@@ -346,10 +350,14 @@ cuerpo completo y te deje en pose de T sin poder calibrar.
 3. A los 5 segundos empieza. Durante un minuto, con el Move en la mano, muévelo despacio por toda
    la zona de juego: alto y bajo, cerca y lejos, donde lo vean los dos móviles y la PS Eye. Cada
    móvil marca la bola con un anillo celeste cuando la ve. Termina sola cuando tiene suficiente, o
-   pulsa Ctrl+Alt+C otra vez para cancelar.
+   pulsa Ctrl+Alt+C otra vez para cancelar. Cada cámara necesita al menos 60 muestras: si una se
+   queda atrás en las líneas `Body calibration:`, mueve el Move donde la ve ella (sin taparlo con
+   el cuerpo, de frente a ese móvil).
 4. En `vrserver.txt`, las líneas `Body calibration:` dicen cuántas muestras juntó cada cámara y, al
    final, si quedó calibrada, cuánto se aparta (en píxeles y centímetros), dónde está y hacia dónde
-   mira. La calibración se guarda en SteamVR y se usa sola la próxima vez, por número de cámara: si
+   mira. Si una cámara no juntó suficientes, conserva su calibración anterior solo si todavía
+   encaja con lo que vio; si no (la moviste), deja de usarse hasta calibrarla de nuevo, y lo dice.
+   La calibración se guarda en SteamVR y se usa sola la próxima vez, por número de cámara: si
    desinstalas la app o borras sus datos, el móvil sale con otro número y hay que calibrar de nuevo.
 5. Para jugar, vuelve a abrir `body_tracker.py` sin `--ball-color`: así los móviles ven las bolas
    de los dos Moves, de cualquier color (ver "Mandos").
@@ -364,7 +372,8 @@ calibra de nuevo. Con los dos Moves encendidos no comprueba nada y lo dice.
 En `vrserver.txt`, cada 10 segundos, `Body camera …` dice por cámara los cuadros por segundo, a los
 cuántos ms de tomado llega cada cuadro, qué parte tiene un cuadro de la otra cámara a menos de
 20 ms, en qué parte se ve una persona y la bola, y si está calibrada; `Body:` cuántos puntos se usan
-y cuántos se descartan; y `Body trackers` por tracker (cadera, pie izquierdo, pie derecho) a qué
+y cuántos se descartan (por no encajar, o por llegar más viejos que lo que ya había); y
+`Body trackers` por tracker (cadera, pie izquierdo, pie derecho) a qué
 altura del piso estuvo en promedio, la más baja y la más alta, cuánto se apartó de su lugar
 promedio y qué parte del tiempo tuvo posición. Quieto, lo que se aparta es su temblor: debe quedar
 en menos de 1 cm, y si no, baja `body_agility`. Al caminar, la altura más baja de cada pie es la del
@@ -406,7 +415,9 @@ entre las orejas) y el driver la usa junto con la luz:
   suavemente. Sin la luz, la posición llega unos 0,15 s más tarde y algo menos fina, pero no salta.
 
 Viene activado cuando están las dos cosas. **Ctrl+Alt+B** lo apaga (la primera vez que lo pulsas)
-y lo vuelve a encender, para comparar; `vrserver.txt` dice cuál quedó. En `vrserver.txt`:
+y lo vuelve a encender, para comparar; `vrserver.txt` dice cuál quedó (`the light alone` es
+apagado). No lo dejes apagado: si PSMoveServiceEx pone la luz lejos, la cabeza queda detrás del
+cuerpo y de los Moves. En `vrserver.txt`:
 
 - `Head light: out of sight; the body cameras follow the head` cuando la siguen solo los móviles.
 - Cada 10 segundos, `Head from the body cameras:` cuántas vistas de los móviles usó, cuántas

@@ -20,9 +20,11 @@ constexpr int kLoopMilliseconds = 2;
 constexpr double kRecenterHoldSeconds = 1.0;
 constexpr double kFullTiltRadians = 25.0 * 3.14159265358979 / 180.0;  // the trackpad's edge
 // A camera's view of a bulb is a hand's when its line of sight passes this close to where the hand
-// is (the view is a few frames old), and the other hand's this much farther.
+// was, and the other hand's this much farther.
 constexpr double kOwnerMaxGapM = 0.25;
 constexpr double kOwnerMarginM = 0.1;
+// Near neither hand: a hand whose bulb nobody follows may have moved that far since.
+constexpr double kLostOwnerMaxGapM = 0.8;
 constexpr double kMinViewDistanceM = 0.3;
 
 const char* const kHandNames[2] = {"left", "right"};
@@ -345,17 +347,30 @@ int MoveControllers::Owner(const HeadSighting& sighting, double now) const
     const Vec3 ray = sighting.model.Ray(sighting.u, sighting.v);
     double gaps[2] = {1e9, 1e9};
     for (int h = 0; h < 2; ++h) {
+        // Where the hand was when the camera took the frame, a fifth of a second ago.
         const HandPose pose = hands_[h].Pose(now);
-        const Vec3 to = pose.position - sighting.model.position;
+        const Vec3 then = pose.position - pose.velocity * std::clamp(now - sighting.time, 0.0, 0.5);
+        const Vec3 to = then - sighting.model.position;
         if (ids_[h] >= 0 && pose.valid && Dot(to, ray) > kMinViewDistanceM) {
             gaps[h] = Length(to - ray * Dot(to, ray));
         }
     }
     const int nearest = gaps[0] <= gaps[1] ? 0 : 1;
-    if (gaps[nearest] > kOwnerMaxGapM || gaps[1 - nearest] < gaps[nearest] + kOwnerMarginM) {
-        return -1;
+    if (gaps[nearest] > kOwnerMaxGapM) {
+        // The bulb of the one hand not followed, if the other is clearly elsewhere; its filter
+        // moves there only when two cameras agree on it.
+        int lost = -1, count = 0;
+        for (int h = 0; h < 2; ++h) {
+            if (ids_[h] >= 0 && bulbs_[h].state() != HeadPositionEstimator::State::Live) {
+                lost = h;
+                ++count;
+            }
+        }
+        return count == 1 && gaps[lost] < kLostOwnerMaxGapM && gaps[1 - lost] > kOwnerMaxGapM + kOwnerMarginM
+                   ? lost
+                   : -1;
     }
-    return nearest;
+    return gaps[1 - nearest] < gaps[nearest] + kOwnerMarginM ? -1 : nearest;
 }
 
 void MoveControllers::CheckRecenter(int hand, const MoveState& move, double now)

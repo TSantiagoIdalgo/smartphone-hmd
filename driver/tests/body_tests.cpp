@@ -456,6 +456,26 @@ void TestBodyLateFrames()
     }
 }
 
+void TestBodyStartsAgainWhenLost()
+{
+    // A frame stamped a minute ahead (a clock that jumped) would leave the joints waiting for
+    // frames that never come, where they were: they are lost, and start again from both cameras
+    // while the person walks 40 cm to the side.
+    BodySimulation sim;
+    sim.Run(1.0, StandingStill);
+    sim.filter.Add(sim.View(0, Person{}, sim.time + 60.0));
+    const double start = sim.time;
+    const auto walking = [start](double at) {
+        Person p;
+        p.root = Vec3{0.4 * std::clamp((at - start) / 1.5, 0.0, 1.0), 0.0, 0.0};
+        return p;
+    };
+    sim.Run(2.5, walking);
+    CHECK(sim.Error(kLeftHip, walking(sim.time), sim.time) < 0.03);
+    CHECK(sim.Error(kLeftAnkle, walking(sim.time), sim.time) < 0.03);
+    CHECK(sim.filter.TakeStats().late > 0);
+}
+
 void TestBodyNeedsTwoCamerasToStart()
 {
     BodySimulation sim;
@@ -738,6 +758,27 @@ void TestSessionCalibratesWithAJitteryMove()
     CHECK(report.check_mean_m < 0.02);
 }
 
+void TestSessionDropsAMovedCamerasCalibration()
+{
+    // Calibrating again, both cameras see the bulb too little to calibrate; one was moved 40 cm
+    // since its last calibration, which no longer fits and is dropped; the other keeps its own.
+    SessionSimulation sim;
+    CameraModel moved = sim.truth[0];
+    moved.position = moved.position + Vec3{0.4, 0.0, 0.0};
+    sim.session.SetCamera(sim.ids[0], moved);
+    sim.session.SetCamera(sim.ids[1], sim.truth[1]);
+    sim.session.StartCalibration();
+    sim.Run(3.0, nullptr);
+    const std::vector<BodySession::CameraCalibration> results = sim.session.FinishCalibration();
+    CHECK(results.size() == 2);
+    for (const BodySession::CameraCalibration& c : results) {
+        CHECK(!c.result.ok && c.had_old);
+        CHECK(c.dropped_old == (c.id == sim.ids[0]));
+    }
+    CHECK(!sim.session.Calibrated(sim.ids[0]));
+    CHECK(sim.session.Calibrated(sim.ids[1]));
+}
+
 void TestSessionForgetsACalibrationThatNoLongerFits()
 {
     SessionSimulation sim;
@@ -963,6 +1004,7 @@ int main()
     TestBodyFootHiddenFromOneCamera();
     TestBodyLeftAndRightMixedUp();
     TestBodyLateFrames();
+    TestBodyStartsAgainWhenLost();
     TestBodyNeedsTwoCamerasToStart();
     TestBodyHoldsThenLetsGo();
     TestSessionCalibratesAndChecks();
@@ -972,6 +1014,7 @@ int main()
     TestSessionTrackersStillWhenStandingStill();
     TestSessionNeedsTheOtherMoveOff();
     TestSessionCalibratesWithAJitteryMove();
+    TestSessionDropsAMovedCamerasCalibration();
     TestSessionForgetsACalibrationThatNoLongerFits();
     TestSessionSeesTheBulbs();
     TestSessionPairsFramesWhicheverArrivesFirst();

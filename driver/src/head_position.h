@@ -246,6 +246,8 @@ private:
     Snapshot base_;           // the filter before the oldest step
     Vec3 ears_from_neck_;
     double last_sighting_time_ = -1e9;  // when the newest view used arrived
+    double last_view_time_ = -1e9;      // when the newest view arrived, used or not
+    double ears_views_ = 0.0;           // views the ears were learned from
     std::vector<HeadSighting> recent_;  // each camera's newest view
     std::deque<double> rejected_sightings_;
 

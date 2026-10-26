@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 
 namespace {
 
@@ -12,6 +13,11 @@ constexpr double kSpeedSeconds = 0.1;
 constexpr double kMaxCalibrationSpeed = 0.5;     // m/s: faster, a few ms of timing error matter
 constexpr double kMinSampleSpacingM = 0.03;      // a Move held still adds one sample, not hundreds
 constexpr size_t kMinCalibrationSamples = 60;
+// A camera not calibrated again keeps its old calibration if the new samples fit it this well
+// (median pixels in a picture 640 across), or else was moved and stops being used; fewer samples
+// than this tell nothing.
+constexpr double kOldCalibrationMaxPx = 15.0;
+constexpr size_t kMinOldCalibrationSamples = 10;
 constexpr int kEnoughSamples = 300;
 constexpr double kEnoughWidthM = 1.0;   // across the room, the wider way
 constexpr double kEnoughDepthM = 0.5;   // the narrower way
@@ -309,12 +315,28 @@ std::vector<BodySession::CameraCalibration> BodySession::FinishCalibration()
         CameraCalibration calibration;
         calibration.id = entry.first;
         if (camera.samples.size() < kMinCalibrationSamples) {
-            calibration.result.problem = "too few samples: the camera hardly saw the Move's bulb";
+            calibration.result.problem = "too few samples (" + std::to_string(camera.samples.size()) + " of " +
+                                         std::to_string(kMinCalibrationSamples) +
+                                         "): the camera hardly saw the Move's bulb";
         } else {
             calibration.result = CalibrateCamera(camera.samples, camera.width, camera.height);
             if (calibration.result.ok) {
                 camera.model = calibration.result.camera;
                 camera.calibrated = true;
+            }
+        }
+        if (!calibration.result.ok && camera.calibrated && camera.samples.size() >= kMinOldCalibrationSamples) {
+            std::vector<double> errors;
+            for (const CalibrationSample& s : camera.samples) {
+                double u = 0.0, v = 0.0;
+                errors.push_back(camera.model.Project(s.world, &u, &v) ? std::hypot(u - s.u, v - s.v) : 1e9);
+            }
+            calibration.had_old = true;
+            calibration.old_px = Median(errors);
+            const double scale = std::max(camera.width, camera.height) / 640.0;
+            if (calibration.old_px > kOldCalibrationMaxPx * scale) {
+                calibration.dropped_old = true;
+                camera.calibrated = false;
             }
         }
         camera.samples.clear();

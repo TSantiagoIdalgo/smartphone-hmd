@@ -99,6 +99,11 @@ public:
     struct CameraCalibration {
         uint32_t id = 0;
         CalibrationResult result;  // applied when ok
+        // Not calibrated now, but before: how far its old calibration puts the new samples, median
+        // pixels, and whether that is too far to keep it (it was moved).
+        bool had_old = false;
+        double old_px = 0.0;
+        bool dropped_old = false;
     };
 
     explicit BodySession(const BodySessionConfig& config = BodySessionConfig());

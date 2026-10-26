@@ -27,9 +27,6 @@ constexpr double kHeadCheckSeconds = 1.0;
 // under the headset and facing where it looks: farther off than this, it can mix up the legs.
 constexpr double kMaxHeadOffsetM = 0.3;
 constexpr double kMaxHeadTurnDegrees = 60.0;
-// A tracker with no pose this long shows as disconnected: VRChat then does not count it, instead
-// of waiting in T-pose for full body trackers that have nowhere to be.
-constexpr double kConnectedSeconds = 10.0;
 
 // Ctrl+Alt+C starts calibrating the body cameras, or stops it.
 bool CalibrateHotkeyDown()
@@ -241,6 +238,16 @@ void BodyTracking::FinishCalibration()
         const CalibrationResult& r = camera.result;
         if (!r.ok) {
             DriverLog("Body calibration: camera %04X not calibrated: %s", ShortId(camera.id), r.problem.c_str());
+            if (camera.dropped_old) {
+                DriverLog("Body calibration: camera %04X's old calibration puts the bulb %.0f px from where it sees "
+                          "it: it was moved, so it is no longer used. Calibrate again, waving the Move where this "
+                          "phone sees it (it rings the bulb)",
+                          ShortId(camera.id), camera.old_px);
+                vr::VRSettings()->RemoveKeyInSection(kSettingsSection, CameraKey(camera.id).c_str());
+            } else if (camera.had_old) {
+                DriverLog("Body calibration: camera %04X keeps its old calibration, which still fits (%.1f px off)",
+                          ShortId(camera.id), camera.old_px);
+            }
             continue;
         }
         const Vec3 forward = Row(r.camera.rotation, 2);
@@ -261,18 +268,24 @@ void BodyTracking::Publish(double now)
     for (int i = 0; i < 3; ++i) {
         if (poses[i].valid) {
             spreads_[i].Add(poses[i].position);
-            last_valid_[i] = now;
+            last_pose_[i] = poses[i];
+            has_pose_[i] = true;
         }
+        // Lost, it stays where it was last seen.
+        const TrackerPose& shown = poses[i].valid ? poses[i] : last_pose_[i];
         vr::DriverPose_t pose{};
         pose.qWorldFromDriverRotation.w = 1.0;
         pose.qDriverFromHeadRotation.w = 1.0;
-        pose.deviceIsConnected = now - last_valid_[i] < kConnectedSeconds;
+        // Until its first pose a tracker shows as disconnected: VRChat then does not count it, instead
+        // of waiting in T-pose for full body trackers that have nowhere to be. After that it stays,
+        // as a real tracker out of sight does, so VRChat keeps the full body (and its Calibrate).
+        pose.deviceIsConnected = has_pose_[i];
         pose.poseIsValid = poses[i].valid;
         pose.result = poses[i].valid ? vr::TrackingResult_Running_OK : vr::TrackingResult_Running_OutOfRange;
-        pose.vecPosition[0] = poses[i].position.x;
-        pose.vecPosition[1] = poses[i].position.y;
-        pose.vecPosition[2] = poses[i].position.z;
-        const Quat q = poses[i].valid ? poses[i].orientation : Quat{};
+        pose.vecPosition[0] = shown.position.x;
+        pose.vecPosition[1] = shown.position.y;
+        pose.vecPosition[2] = shown.position.z;
+        const Quat q = has_pose_[i] ? shown.orientation : Quat{};
         pose.qRotation.w = q.w;
         pose.qRotation.x = q.x;
         pose.qRotation.y = q.y;
@@ -328,9 +341,9 @@ void BodyTracking::LogReport(double now)
     }
     const BodyFilter::Stats& f = report.filter;
     if (f.updates + f.outliers > 0) {
-        DriverLog("Body: %d points used, %d left out as wrong, %d frames with left and right swapped, %d joints "
-                  "(re)started",
-                  f.updates, f.outliers, f.swapped, f.started);
+        DriverLog("Body: %d points used, %d left out as wrong, %d too old, %d frames with left and right swapped, %d "
+                  "joints (re)started",
+                  f.updates, f.outliers, f.late, f.swapped, f.started);
     }
     if (spreads_[0].count + spreads_[1].count + spreads_[2].count > 0) {
         static const char* const kNames[3] = {"hips", "left foot", "right foot"};

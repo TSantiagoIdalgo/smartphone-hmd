@@ -30,6 +30,7 @@ constexpr double kStartMaxGapM = 0.10;         // if their rays pass this close
 constexpr double kStartVariance = 0.03 * 0.03;
 constexpr double kMaxLightGapSeconds = 0.05;   // to compare a view with the light between two samples
 constexpr double kEarsLearningRate = 0.005;    // per view: some seconds
+constexpr double kEarsWarmupViews = 20.0;      // the first views count for more: an average of them
 constexpr double kMaxEarsCorrectionM = 0.12;
 constexpr double kMinRaysSine = 0.25;           // a view this close to the PS Eye's line of sight teaches nothing
 // The agility scale follows the normalized innovations (1 per dimension on average when the model
@@ -291,8 +292,9 @@ void HeadPositionEstimator::AddLight(double time, Vec3 light, bool tracking, Vec
     const double eye_height = (light + Rotate(orientation, config_.eyes_from_light)).y;
     const double distance = camera_valid_ ? Length(light - camera_) : 0.0;
     // While the body cameras see the head, the light gives its direction from the PS Eye and they
-    // its depth: a depth that puts the eyes where none are does not make the direction wrong.
-    const bool sightings = time - last_sighting_time_ <= kSightingsLostSeconds;
+    // its depth: a depth that puts the eyes where none are does not make the direction wrong. As
+    // soon as their views arrive, before any fits: a far-off depth would otherwise keep them out.
+    const bool sightings = time - last_view_time_ <= kSightingsLostSeconds;
     if (!sightings && (eye_height < config_.min_eye_height || eye_height > config_.max_eye_height ||
                        (camera_valid_ && (distance < kMinCameraDistance || distance > kMaxCameraDistance)))) {
         ++stats_.implausible;
@@ -464,6 +466,7 @@ void HeadPositionEstimator::AddSighting(double now, const HeadSighting& sighting
         !(sighting.noise > 0.0)) {
         return;
     }
+    last_view_time_ = now;
     bool replaced = false;
     for (HeadSighting& r : recent_) {
         if (r.camera == sighting.camera) {
@@ -644,7 +647,9 @@ void HeadPositionEstimator::LearnEars(const HeadSighting& sighting, Quat orienta
         const Vec3 unseen = Unit(both);
         across = unseen * Dot(across, unseen);
     }
-    Vec3 learned = ears_from_neck_ + Rotate(Conjugate(orientation), across) * kEarsLearningRate;
+    const double rate = std::max(kEarsLearningRate, 1.0 / (ears_views_ + kEarsWarmupViews));
+    ++ears_views_;
+    Vec3 learned = ears_from_neck_ + Rotate(Conjugate(orientation), across) * rate;
     const Vec3 correction = learned - config_.ears_from_neck;
     if (Length(correction) > kMaxEarsCorrectionM) {
         learned = config_.ears_from_neck + correction * (kMaxEarsCorrectionM / Length(correction));
