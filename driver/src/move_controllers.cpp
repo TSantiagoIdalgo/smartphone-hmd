@@ -18,6 +18,7 @@ constexpr float kTriggerClick = 0.9f;
 constexpr double kReportSeconds = 10.0;
 constexpr int kLoopMilliseconds = 2;
 constexpr double kRecenterHoldSeconds = 1.0;
+constexpr double kFullTiltRadians = 25.0 * 3.14159265358979 / 180.0;  // the trackpad's edge
 
 const char* const kHandNames[2] = {"left", "right"};
 
@@ -129,37 +130,48 @@ void MoveController::Update(bool connected, const HandPose& hand, uint32_t butto
     const uint32_t index = device_index_;
     if (index != vr::k_unTrackedDeviceIndexInvalid) {
         vr::VRServerDriverHost()->TrackedDevicePoseUpdated(index, pose, sizeof(vr::DriverPose_t));
-        UpdateInputs(buttons, trigger);
+        UpdateInputs(buttons, trigger, q);
     }
 }
 
-void MoveController::UpdateInputs(uint32_t buttons, float trigger)
+void MoveController::UpdateInputs(uint32_t buttons, float trigger, Quat orientation)
 {
-    if (!inputs_ready_ || (have_inputs_ && buttons == last_buttons_ && trigger == last_trigger_)) {
+    const auto down = [buttons](uint32_t bits) { return (buttons & bits) != 0; };
+    const bool tilting = down(kMoveMove);
+    if (tilting && !(have_inputs_ && (last_buttons_ & kMoveMove))) {
+        tilt_from_ = orientation;
+    }
+    if (!inputs_ready_ || (have_inputs_ && buttons == last_buttons_ && trigger == last_trigger_ && !tilting)) {
         return;
     }
     have_inputs_ = true;
     last_buttons_ = buttons;
     last_trigger_ = trigger;
     vr::IVRDriverInput* input = vr::VRDriverInput();
-    const auto down = [buttons](uint32_t bits) { return (buttons & bits) != 0; };
     input->UpdateBooleanComponent(system_, down(kMovePS), 0.0);
-    input->UpdateBooleanComponent(menu_, down(kMoveSelect | kMoveStart), 0.0);
-    input->UpdateBooleanComponent(grip_, down(kMoveMove), 0.0);
+    input->UpdateBooleanComponent(menu_, down(kMoveSelect), 0.0);
+    input->UpdateBooleanComponent(grip_, down(kMoveStart), 0.0);
     input->UpdateBooleanComponent(trigger_click_, down(kMoveTrigger) || trigger >= kTriggerClick, 0.0);
     input->UpdateScalarComponent(trigger_value_, trigger, 0.0);
-    // The face buttons as the trackpad's edges; two together, its diagonal.
+    // The face buttons as the trackpad's edges, clicked; two together, its diagonal.
     double x = (down(kMoveCircle) ? 1.0 : 0.0) - (down(kMoveSquare) ? 1.0 : 0.0);
     double y = (down(kMoveTriangle) ? 1.0 : 0.0) - (down(kMoveCross) ? 1.0 : 0.0);
-    if (x != 0.0 && y != 0.0) {
-        x *= std::sqrt(0.5);
-        y *= std::sqrt(0.5);
+    const bool face = x != 0.0 || y != 0.0;
+    if (!face && tilting) {
+        // Where it points now, seen from where it pointed: right and up move the touch.
+        const Vec3 forward = Rotate(Conjugate(tilt_from_) * orientation, Vec3{0.0, 0.0, -1.0});
+        x = std::atan2(forward.x, -forward.z) / kFullTiltRadians;
+        y = std::atan2(forward.y, std::hypot(forward.x, forward.z)) / kFullTiltRadians;
     }
-    const bool pad = down(kMoveTriangle | kMoveCross | kMoveSquare | kMoveCircle);
+    const double length = std::hypot(x, y);
+    if (length > 1.0) {
+        x /= length;
+        y /= length;
+    }
     input->UpdateScalarComponent(pad_x_, static_cast<float>(x), 0.0);
     input->UpdateScalarComponent(pad_y_, static_cast<float>(y), 0.0);
-    input->UpdateBooleanComponent(pad_touch_, pad, 0.0);
-    input->UpdateBooleanComponent(pad_click_, pad, 0.0);
+    input->UpdateBooleanComponent(pad_touch_, face || tilting, 0.0);
+    input->UpdateBooleanComponent(pad_click_, face, 0.0);
 }
 
 bool MoveController::OnHaptic(const vr::VREvent_HapticVibration_t& haptic, double now)
@@ -183,8 +195,10 @@ float MoveController::Rumble(double now)
 // MoveControllers
 // ---------------------------------------------------------------------------
 
-MoveControllers::MoveControllers(PsmsClient* psms, SharedWrists* wrists, double pitch_degrees)
-    : psms_(psms), wrists_(wrists), pitch_degrees_(pitch_degrees)
+MoveControllers::MoveControllers(PsmsClient* psms, SharedWrists* wrists, double pitch_degrees,
+                                 const HeadPositionConfig& bulb)
+    : psms_(psms), wrists_(wrists), pitch_degrees_(pitch_degrees), bulb_config_(bulb),
+      bulbs_{HeadPositionEstimator(bulb), HeadPositionEstimator(bulb)}
 {
     devices_[0] = std::make_unique<MoveController>("SMARTPHONE-HMD-MOVE-LEFT", true);
     devices_[1] = std::make_unique<MoveController>("SMARTPHONE-HMD-MOVE-RIGHT", false);
@@ -251,6 +265,9 @@ void MoveControllers::Run()
         }
 
         const Wrists wrists = wrists_ ? wrists_->Get() : Wrists{};
+        Vec3 camera;
+        int cameras = 0;
+        const bool camera_valid = psms_->Camera(&camera, &cameras);
         for (int h = 0; h < 2; ++h) {
             if (ids[h] != ids_[h]) {
                 if (ids_[h] >= 0 && rumble_[h] > 0.0f) {
@@ -263,6 +280,7 @@ void MoveControllers::Run()
                 }
                 ids_[h] = ids[h];
                 hands_[h] = MoveHand(h == 0, pitch_degrees_);
+                bulbs_[h] = HeadPositionEstimator(bulb_config_);
                 rumble_[h] = 0.0f;
                 recenter_since_[h] = -1.0;
             }
@@ -272,7 +290,19 @@ void MoveControllers::Run()
                 devices_[h]->Update(false, HandPose{}, 0, 0.0f);
                 continue;
             }
-            hands_[h].Update(*move, wrists, now);
+            // The bulb, filtered; seen while the filter follows it.
+            HeadPositionEstimator& bulb = bulbs_[h];
+            bulb.SetCamera(camera_valid, camera, cameras);
+            bulb.AddLight(move->time, move->position, move->tracking, Vec3{});
+            bulb.Tick(now, true);
+            MoveState filtered = *move;
+            filtered.tracking = bulb.LightFollowed(now);
+            if (filtered.tracking) {
+                const HeadPoseOut out = bulb.Output(now, Quat{}, Vec3{});
+                filtered.position = out.position;
+                filtered.velocity = out.velocity;
+            }
+            hands_[h].Update(filtered, wrists, now);
             devices_[h]->Update(true, hands_[h].Pose(now), move->buttons, move->trigger);
             CheckRecenter(h, *move, now);
             const float rumble = devices_[h]->Rumble(now);
@@ -320,6 +350,7 @@ void MoveControllers::LogReport()
     std::string text = "Hands:";
     for (int h = 0; h < 2; ++h) {
         const MoveHand::Stats stats = hands_[h].TakeStats();
+        const HeadPositionEstimator::Stats bulb = bulbs_[h].TakeStats();
         const int total = stats.tracking + stats.from_wrist + stats.held;
         char part[256];
         if (ids_[h] < 0 || total == 0) {
@@ -328,10 +359,12 @@ void MoveControllers::LogReport()
             const Vec3 offset = hands_[h].BulbFromWrist();
             std::snprintf(part, sizeof(part),
                           "%s %s Move %d, %.0f%% of the time seen by the PS Eye, %.0f%% on the %s wrist, %.0f%% "
-                          "held where it was (%d jumps not believed); the bulb %.0f cm from the wrist",
+                          "held where it was (%d jumps not believed, %d bulb readings left out); its depth "
+                          "shakes %.0f mm and sideways %.0f, agility %.2f; the bulb %.0f cm from the wrist",
                           h > 0 ? ";" : "", kHandNames[h], ids_[h], 100.0 * stats.tracking / total,
                           100.0 * stats.from_wrist / total, kHandNames[hands_[h].wrist()], 100.0 * stats.held / total,
-                          stats.jumps, Length(offset) * 100.0);
+                          stats.jumps, bulb.rejected + bulb.implausible, bulb.depth_innovation_rms_m * 1000.0,
+                          bulb.lateral_innovation_rms_m * 1000.0, bulb.agility, Length(offset) * 100.0);
         }
         text += part;
     }

@@ -124,10 +124,13 @@ bool PsmsClient::TakeOrientationReset(int id, Quat* orientation)
     return true;
 }
 
-bool PsmsClient::Camera(Vec3* position)
+bool PsmsClient::Camera(Vec3* position, int* cameras)
 {
     std::lock_guard<std::mutex> lock(mutex_);
     *position = camera_;
+    if (cameras) {
+        *cameras = cameras_;
+    }
     return camera_valid_;
 }
 

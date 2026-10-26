@@ -59,8 +59,8 @@ public:
     void SetRumble(int id, float fraction);
     // Tells PSMoveServiceEx the rotation a Move is in now, undoing its drift.
     void ResetOrientation(int id, Quat orientation);
-    // Where the first PS Eye is, if known.
-    bool Camera(Vec3* position);
+    // Where the first PS Eye is, if known, and how many there are.
+    bool Camera(Vec3* position, int* cameras = nullptr);
 
 private:
     struct Api;  // the DLL's functions

@@ -67,6 +67,8 @@ private:
     // Feeds the head light's samples from PSMoveServiceEx, and the body cameras' views, to the
     // position estimator.
     void UpdateHeadPosition(std::vector<LightSample>* samples, std::vector<HeadSighting>* sightings);
+    // Ctrl+Alt+L, and each light sample as PSMoveServiceEx gives it while measuring.
+    void MeasureLightDistance(double now, const std::vector<LightSample>& samples);
     void RecenterHead(const char* source);
     void ToggleHeadHold();
     vr::DriverPose_t MakePose(bool receiving, double now) const;
@@ -107,6 +109,11 @@ private:
     bool head_frozen_ = false;
     // Undoes PSMoveServiceEx putting the light too near or far from the PS Eye (a wrong ball size).
     double light_distance_scale_ = 1.0;
+    // Ctrl+Alt+L: measuring it against a Move's bulb held to the light, whose distance is right.
+    bool light_hotkey_was_down_ = false;
+    double light_measure_until_ = 0.0;  // 0: not measuring
+    std::vector<double> light_ratios_;
+    std::vector<MoveState> moves_;
     bool freeze_hotkey_was_down_ = false;
     HeadPositionEstimator::State logged_head_state_ = HeadPositionEstimator::State::NeverSeen;
     bool logged_light_followed_ = false;

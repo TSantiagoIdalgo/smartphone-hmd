@@ -180,8 +180,13 @@ valores.
 - Si la cabeza queda muy alta o lejos de la PS Eye (y los Moves se ven muy adelante tuyo), la línea
   `Head light: the eyes come out … m high` lo avisa: PSMoveServiceEx calcula la distancia por el
   tamaño aparente de la bola, y si el tamaño que tiene configurado no es el de tu bola (o la ve
-  tapada a medias) la pone más lejos. Corrígelo en la configuración del visor virtual de
-  PSMoveServiceEx, o pon en `head_light_distance_scale` el valor que sugiere esa línea.
+  tapada a medias) la pone más lejos. Para corregirlo, con PSMoveServiceEx siguiendo un Move
+  (body tracking o `controllers_enabled`): apoya la bola del Move contra la luz del visor, donde la
+  PS Eye vea las dos, pulsa **Ctrl+Alt+L** y quédate quieto 3 segundos. Como la distancia del Move
+  sí es correcta, el driver mide cuánto se equivoca con la luz y lo guarda en
+  `head_light_distance_scale` (la línea `Head light: PSMoveServiceEx had it … times as far`).
+  También puedes corregir el tamaño de la bola en la configuración del visor virtual de
+  PSMoveServiceEx, y entonces dejar `head_light_distance_scale` en 1.
 - Con el body tracking, los móviles también ayudan a la cabeza: ver "La cabeza con las cámaras del
   cuerpo".
 
@@ -302,8 +307,9 @@ PS Move") y un PS Move para calibrar. Con SteamVR cerrado, pon en `default.vrset
 ```
 
 Al abrir SteamVR aparecen tres trackers (cadera, pie izquierdo y pie derecho) con su rol ya puesto,
-así que VRChat los usa sin configurar nada en "Manage Trackers". Hasta calibrar las cámaras quedan
-sin posición.
+así que VRChat los usa sin configurar nada en "Manage Trackers". Hasta que tienen posición (dos
+cámaras calibradas que te vean) figuran desconectados, para que VRChat no entre en el modo de
+cuerpo completo y te deje en pose de T sin poder calibrar.
 
 **Dónde poner los móviles** (visto desde arriba):
 
@@ -387,8 +393,8 @@ entre las orejas) y el driver la usa junto con la luz:
   sigue a donde la ven los móviles en vez de quedarse clavada; al volver a ver la luz pasa a ella
   suavemente. Sin la luz, la posición llega unos 0,15 s más tarde y algo menos fina, pero no salta.
 
-Viene activado cuando están las dos cosas. **Ctrl+Alt+B** lo apaga y lo vuelve a encender en el
-momento, para comparar. En `vrserver.txt`:
+Viene activado cuando están las dos cosas. **Ctrl+Alt+B** lo apaga (la primera vez que lo pulsas)
+y lo vuelve a encender, para comparar; `vrserver.txt` dice cuál quedó. En `vrserver.txt`:
 
 - `Head light: out of sight; the body cameras follow the head` cuando la siguen solo los móviles.
 - Cada 10 segundos, `Head from the body cameras:` cuántas vistas de los móviles usó, cuántas
@@ -426,9 +432,10 @@ la derecha y el segundo la izquierda.
 | Move | Mando Vive |
 |------|------------|
 | Gatillo | Gatillo |
-| Botón Move (el grande) | Grip |
+| Botón Move (el grande), mantenido | Trackpad tocado donde inclines el Move desde donde apuntaba al pulsarlo (como en VDM: el menú de acciones y los gestos de VRChat) |
 | Triángulo / Equis / Cuadrado / Círculo | Trackpad arriba / abajo / izquierda / derecha (tocado y pulsado) |
-| Select o Start | Menú |
+| Start | Grip |
+| Select | Menú |
 | PS | Sistema (el menú de SteamVR) |
 
 Las vibraciones de los juegos hacen vibrar el Move. Cada juego se puede reasignar en SteamVR →
@@ -438,6 +445,13 @@ Mandos → Administrar asignaciones, como un mando Vive.
   giro que acumula.
 - Si en SteamVR el mando apunta hacia arriba o hacia abajo cuando el Move apunta al frente, pon
   `controller_pitch_degrees` en 90 o -90.
+- **Temblor**: la posición de cada bola pasa por el mismo filtro que la luz del visor. La PS Eye ve
+  bien de costado y mal en profundidad, peor cuanto más lejos; el filtro suaviza más con la mano
+  quieta, sigue de cerca al moverla y deja afuera los saltos de una bola tapada a medias. Si aún
+  tiembla quieto, sube `controller_depth_noise_cm` (2) o baja `controller_agility` (10); si va
+  atrasado al moverlo, al revés. `controller_prediction` (1) adelanta la mano según su velocidad
+  para compensar el retraso de PSMoveServiceEx.
 - En `vrserver.txt`, `Hands:` dice qué Move quedó en cada mano y, cada 10 segundos, qué parte del
   tiempo lo vio la PS Eye, cuánto siguió a la muñeca y cuánto quedó quieto donde estaba (sin bola ni
-  muñeca), y a cuántos centímetros de la muñeca aprendió que está la bola (unos 15-20 cm).
+  muñeca), cuántas lecturas de la bola dejó afuera, cuánto tiembla en profundidad y de costado, y a
+  cuántos centímetros de la muñeca aprendió que está la bola (unos 15-20 cm).

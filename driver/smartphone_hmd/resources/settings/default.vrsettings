@@ -45,6 +45,10 @@
 		"body_agility": 1.0,
 		"body_prediction": 0.3,
 		"controllers_enabled": false,
-		"controller_pitch_degrees": 0.0
+		"controller_pitch_degrees": 0.0,
+		"controller_depth_noise_cm": 2.0,
+		"controller_lateral_noise_mm": 2.0,
+		"controller_agility": 10.0,
+		"controller_prediction": 1.0
 	}
 }

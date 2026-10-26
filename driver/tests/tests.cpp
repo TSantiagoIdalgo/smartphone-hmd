@@ -1220,6 +1220,98 @@ void TestHeadBodyMoving()
     CHECK(shake[1] < 1.3 * shake[0]);
 }
 
+// A Move's bulb through the head's filter, as the controllers set it up.
+HeadPositionConfig BulbConfig()
+{
+    HeadPositionConfig bulb;
+    bulb.eyes_from_light = bulb.eyes_from_neck = bulb.ears_from_neck = Vec3{};
+    bulb.depth_noise_m = bulb.depth_noise_with_sightings_m = 0.02;
+    bulb.agility = 10.0;
+    bulb.prediction_gain = 1.0;
+    bulb.max_speed = 10.0;
+    bulb.min_eye_height = -1.0;
+    bulb.max_eye_height = 3.5;
+    return bulb;
+}
+
+struct BulbRun {
+    double depth_rms = 0.0;  // output, along the camera's line of sight
+    double raw_depth_rms = 0.0;
+    double rms = 0.0;
+    double max_error = 0.0;
+    double raw_rms = 0.0;  // PSMoveServiceEx's own position, as late as it comes
+};
+
+// 60 frames a second at 2.5 m from the PS Eye, 3 cm of depth noise; `hidden(frame)` reports the
+// bulb 1.5 m farther, as a half hidden one.
+BulbRun RunBulb(const std::function<Vec3(double)>& path, double seconds,
+                const std::function<bool(int)>& hidden = nullptr, HeadPositionConfig config = BulbConfig())
+{
+    const Vec3 camera{0.0, 1.2, -2.5};
+    HeadPositionEstimator bulb(config);
+    bulb.SetCamera(true, camera, 1);
+    std::mt19937 random(9);
+    const auto gaussian = [&]() {
+        const double u = (static_cast<double>(random()) + 0.5) / 4294967296.0;
+        const double v = static_cast<double>(random()) / 4294967296.0;
+        return std::sqrt(-2.0 * std::log(u)) * std::cos(2.0 * kPi * v);
+    };
+    BulbRun run;
+    double sum = 0.0, depth_sum = 0.0, raw_sum = 0.0, raw_error_sum = 0.0;
+    int count = 0;
+    for (int frame = 0; frame < seconds * 60.0; ++frame) {
+        const double t = frame / 60.0;
+        const Vec3 truth = path(t);
+        const Vec3 along = Unit(truth - camera);
+        const Vec3 side = Unit(Cross(along, Vec3{0, 1, 0}));
+        const double depth_noise = 0.03 * gaussian();
+        Vec3 seen = truth + along * depth_noise + side * (0.002 * gaussian()) + Cross(side, along) * (0.002 * gaussian());
+        if (hidden && hidden(frame)) {
+            seen = seen + along * 1.5;
+        }
+        // Arrives 40 ms after the camera saw it; the output is read when it arrives.
+        const double arrived = 10.0 + t + 0.040;
+        bulb.AddLight(arrived, seen, true, Vec3{});
+        bulb.Tick(arrived, true);
+        if (t < 1.0) {
+            continue;
+        }
+        const Vec3 now_truth = path(t + 0.040);
+        const Vec3 error = bulb.Output(arrived, Quat{}, Vec3{}).position - now_truth;
+        const double depth = Dot(error, along);
+        sum += Dot(error, error);
+        depth_sum += depth * depth;
+        raw_sum += depth_noise * depth_noise;
+        raw_error_sum += Dot(seen - now_truth, seen - now_truth);
+        run.max_error = std::max(run.max_error, Length(error));
+        ++count;
+    }
+    run.rms = std::sqrt(sum / count);
+    run.depth_rms = std::sqrt(depth_sum / count);
+    run.raw_depth_rms = std::sqrt(raw_sum / count);
+    run.raw_rms = std::sqrt(raw_error_sum / count);
+    return run;
+}
+
+void TestBulbFilter()
+{
+    // Held still at 2.5 m from the PS Eye: the depth shakes far less than PSMoveServiceEx's.
+    const auto still = [](double) { return Vec3{0.2, 1.1, 0.0}; };
+    const BulbRun held = RunBulb(still, 10.0);
+    CHECK(held.depth_rms < 0.4 * held.raw_depth_rms);
+    // Swung 30 cm to the side and back at 1.5 Hz (up to 2.8 m/s), and reaching 40 cm towards the
+    // PS Eye and back at 1 Hz: closer than PSMoveServiceEx's own position, 40 ms late.
+    const auto swing = [](double t) { return Vec3{0.2 + 0.3 * std::sin(2.0 * kPi * 1.5 * t), 1.1, 0.0}; };
+    const BulbRun swung = RunBulb(swing, 6.0);
+    CHECK(swung.rms < 0.6 * swung.raw_rms);
+    const auto reach = [](double t) { return Vec3{0.2, 1.1, -0.4 * std::sin(2.0 * kPi * t)}; };
+    const BulbRun reached = RunBulb(reach, 6.0);
+    CHECK(reached.rms < reached.raw_rms);
+    // Half hidden for 6 frames, reported 1.5 m farther: left out.
+    const BulbRun half = RunBulb(still, 6.0, [](int frame) { return frame >= 150 && frame < 156; });
+    CHECK(half.max_error < 0.05);
+}
+
 int main()
 {
     TestParse();
@@ -1267,6 +1359,7 @@ int main()
     TestHeadBodyStartsWithoutLight();
     TestHeadLearnsEars();
     TestHeadBodyMoving();
+    TestBulbFilter();
     if (g_failures == 0) {
         std::printf("All tests passed\n");
         return 0;

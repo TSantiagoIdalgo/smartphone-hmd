@@ -1,5 +1,7 @@
 #include "device_provider.h"
 
+#include <algorithm>
+
 #include "body_tracking.h"
 #include "driver_log.h"
 #include "move_controllers.h"
@@ -71,8 +73,20 @@ vr::EVRInitError DeviceProvider::Init(vr::IVRDriverContext* driver_context)
         }
     }
     if (controllers) {
+        // A Move's bulb through the head's light filter: no offsets, a hand's speed and heights.
+        HeadPositionConfig bulb;
+        bulb.eyes_from_light = bulb.eyes_from_neck = bulb.ears_from_neck = Vec3{};
+        bulb.latency_seconds = std::clamp(GetDoubleSetting("head_light_latency_ms", 40.0), 0.0, 200.0) / 1000.0;
+        bulb.lateral_noise_m = std::max(GetDoubleSetting("controller_lateral_noise_mm", 2.0), 0.1) / 1000.0;
+        bulb.depth_noise_m = std::max(GetDoubleSetting("controller_depth_noise_cm", 2.0), 0.01) / 100.0;
+        bulb.depth_noise_with_sightings_m = bulb.depth_noise_m;
+        bulb.agility = std::max(GetDoubleSetting("controller_agility", 10.0), 0.01);
+        bulb.prediction_gain = std::clamp(GetDoubleSetting("controller_prediction", 1.0), 0.0, 1.0);
+        bulb.max_speed = 10.0;
+        bulb.min_eye_height = -1.0;
+        bulb.max_eye_height = 3.5;
         controllers_ = std::make_unique<MoveControllers>(psms_.get(), wrists_.get(),
-                                                         GetDoubleSetting("controller_pitch_degrees", 0.0));
+                                                         GetDoubleSetting("controller_pitch_degrees", 0.0), bulb);
         controllers_->Start();
         DriverLog(body ? "Hands: the PS Moves are controllers here, falling back on the wrists when the PS Eye loses "
                          "them; turn off VDM's controllers in SteamVR"

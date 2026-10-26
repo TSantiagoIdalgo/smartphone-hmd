@@ -22,6 +22,9 @@ constexpr double kReportSeconds = 10.0;
 constexpr double kPublishSeconds = 1.0 / 120.0;
 constexpr double kRadiansToDegrees = 180.0 / 3.14159265358979;
 constexpr double kFewDegreesApart = 40.0;  // between two cameras' views, for depth
+// A tracker with no pose this long shows as disconnected: VRChat then does not count it, instead
+// of waiting in T-pose for full body trackers that have nowhere to be.
+constexpr double kConnectedSeconds = 10.0;
 
 // Ctrl+Alt+C starts calibrating the body cameras, or stops it.
 bool CalibrateHotkeyDown()
@@ -246,11 +249,12 @@ void BodyTracking::Publish(double now)
     for (int i = 0; i < 3; ++i) {
         if (poses[i].valid) {
             spreads_[i].Add(poses[i].position);
+            last_valid_[i] = now;
         }
         vr::DriverPose_t pose{};
         pose.qWorldFromDriverRotation.w = 1.0;
         pose.qDriverFromHeadRotation.w = 1.0;
-        pose.deviceIsConnected = true;
+        pose.deviceIsConnected = now - last_valid_[i] < kConnectedSeconds;
         pose.poseIsValid = poses[i].valid;
         pose.result = poses[i].valid ? vr::TrackingResult_Running_OK : vr::TrackingResult_Running_OutOfRange;
         pose.vecPosition[0] = poses[i].position.x;

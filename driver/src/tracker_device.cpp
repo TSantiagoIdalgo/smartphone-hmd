@@ -10,7 +10,7 @@ TrackerDevice::TrackerDevice(std::string serial, std::string role, std::string t
     pose_.qWorldFromDriverRotation.w = 1.0;
     pose_.qDriverFromHeadRotation.w = 1.0;
     pose_.qRotation.w = 1.0;
-    pose_.deviceIsConnected = true;
+    pose_.deviceIsConnected = false;  // until the body tracking gives it a pose
     pose_.poseIsValid = false;
     pose_.result = vr::TrackingResult_Running_OutOfRange;
 }

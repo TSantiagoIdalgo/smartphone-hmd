@@ -47,6 +47,8 @@ private:
     // Since the last report: each tracker's poses, and how many times all three were published.
     PoseSpread spreads_[3];
     int published_ = 0;
+    // When each tracker last had a pose: until then, and a while after, it shows as disconnected.
+    double last_valid_[3] = {-1e9, -1e9, -1e9};
 
     Calibration calibration_ = Calibration::Off;
     double calibration_at_ = 0.0;  // when the countdown ends, or the collecting started

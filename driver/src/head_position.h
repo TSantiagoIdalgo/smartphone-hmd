@@ -42,6 +42,9 @@ struct HeadPositionConfig {
     double depth_noise_with_sightings_m = 0.09;
     double agility = 1.0;                     // process noise, m^2/s^3, at its usual scale
     double prediction_gain = 0.8;             // share of the pivot velocity extrapolated
+    double max_speed = 3.0;                   // m/s
+    double min_eye_height = 0.2;              // m; lights that put the eyes outside are wrong
+    double max_eye_height = 2.4;
     // Midway between the ears, where the body cameras see the head, from the neck: head axes, m. A
     // first guess, learned against the light while both see the head.
     Vec3 ears_from_neck{0.0, 0.06, 0.01};
@@ -154,6 +157,7 @@ private:
         Mat3 p_pp, p_pv, p_vv;
         double time = 0.0;
         double agility = 1.0;
+        double depth_trend = 0.0;
     };
 
     // What the filter took in at one moment: a measurement of the neck pivot, or one it left out.
@@ -228,6 +232,9 @@ private:
     double state_time_ = 0.0;
     // Scales the process noise, learned from how well the head is being predicted.
     double agility_ = 1.0;
+    // The light's recent innovations along its poor direction, normalized and averaged: noise
+    // averages out, moving towards or away from the PS Eye does not.
+    double depth_trend_ = 0.0;
 
     std::deque<Rejected> rejected_;
 

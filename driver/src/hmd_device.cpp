@@ -52,6 +52,16 @@ bool SightingsHotkeyDown()
     return HotkeyDown('B');
 }
 
+// Ctrl+Alt+L measures how far off PSMoveServiceEx has the light, against a Move held to it.
+bool LightDistanceHotkeyDown()
+{
+    return HotkeyDown('L');
+}
+
+constexpr double kLightMeasureSeconds = 3.0;
+constexpr double kLightMeasureMaxDegrees = 4.0;  // the Move's bulb and the light, seen from the PS Eye
+constexpr size_t kLightMeasureMinSamples = 30;
+
 const char* HeadStateText(HeadPositionEstimator::State state, bool light_followed)
 {
     switch (state) {
@@ -471,6 +481,7 @@ void HmdDevice::UpdateHeadPosition(std::vector<LightSample>* samples, std::vecto
 
     const bool streaming = psms_->Drain(samples, &head_camera_valid_, &head_camera_, &head_cameras_);
     head_position_.SetCamera(head_camera_valid_, head_camera_, head_cameras_);
+    MeasureLightDistance(now, *samples);
     const Vec3 angular_velocity = tracker_.AngularVelocity();
     for (LightSample& sample : *samples) {
         if (light_distance_scale_ != 1.0 && head_camera_valid_) {
@@ -530,6 +541,56 @@ void HmdDevice::UpdateHeadPosition(std::vector<LightSample>* samples, std::vecto
                       stats.ears_from_neck.y * 100.0, stats.ears_from_neck.z * 100.0, stats.ears_from_neck.x * 100.0);
         }
     }
+}
+
+// A Move's bulb is the size PSMoveServiceEx expects, so its distance from the PS Eye is right. Held
+// against the visor's light, both lie along nearly the same line from the camera, and how far
+// apart PSMoveServiceEx puts them along it is how far off the light's distance is.
+void HmdDevice::MeasureLightDistance(double now, const std::vector<LightSample>& samples)
+{
+    const bool down = LightDistanceHotkeyDown();
+    if (down && !light_hotkey_was_down_) {
+        light_measure_until_ = now + kLightMeasureSeconds;
+        light_ratios_.clear();
+        DriverLog("Head light: measuring its distance for %.0f s; hold a Move's bulb against the light, both where "
+                  "the PS Eye sees them",
+                  kLightMeasureSeconds);
+    }
+    light_hotkey_was_down_ = down;
+    if (light_measure_until_ == 0.0) {
+        return;
+    }
+    if (head_camera_valid_ && !samples.empty()) {
+        psms_->LatestMoves(&moves_);
+        for (const LightSample& sample : samples) {
+            const Vec3 light = sample.position - head_camera_;
+            for (const MoveState& move : moves_) {
+                const Vec3 bulb = move.position - head_camera_;
+                const double cosine = Dot(Unit(light), Unit(bulb));
+                if (sample.tracking && move.tracking &&
+                    cosine > std::cos(kLightMeasureMaxDegrees * 3.14159265358979 / 180.0) && Length(light) > 0.1) {
+                    light_ratios_.push_back(Length(bulb) / Length(light));
+                }
+            }
+        }
+    }
+    if (now < light_measure_until_) {
+        return;
+    }
+    light_measure_until_ = 0.0;
+    if (light_ratios_.size() < kLightMeasureMinSamples) {
+        DriverLog("Head light: measured %zu times only; is a Move on (with body tracking or controllers_enabled) and "
+                  "its bulb against the light, both seen by the PS Eye?",
+                  light_ratios_.size());
+        return;
+    }
+    std::nth_element(light_ratios_.begin(), light_ratios_.begin() + light_ratios_.size() / 2, light_ratios_.end());
+    const double ratio = light_ratios_[light_ratios_.size() / 2];
+    light_distance_scale_ = std::clamp(ratio, 0.2, 5.0);
+    vr::VRSettings()->SetFloat(kSettingsSection, "head_light_distance_scale", static_cast<float>(light_distance_scale_));
+    DriverLog("Head light: PSMoveServiceEx had it %.2f times as far from the PS Eye as the Move; "
+              "head_light_distance_scale is now %.2f (saved)",
+              1.0 / ratio, light_distance_scale_);
 }
 
 // Makes the current direction "forward". With the head light, forward means towards the PS Eye

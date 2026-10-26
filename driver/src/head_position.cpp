@@ -14,12 +14,9 @@ constexpr double kResetSpreadM = 0.05;      // ...and this close to each other m
 constexpr double kLostAfterSeconds = 0.15;
 constexpr double kMaxExtrapolationSeconds = 0.10;
 constexpr double kMaxExtrapolationM = 0.08;
-constexpr double kMaxSpeed = 3.0;           // m/s
 constexpr double kVelocityConfidence = 3.0;  // squared Mahalanobis length of the velocity at half prediction
 constexpr double kInitialVelocityVariance = 0.25;
 constexpr double kBlendSeconds = 0.15;
-constexpr double kMinEyeHeight = 0.2;
-constexpr double kMaxEyeHeight = 2.4;
 constexpr double kMinCameraDistance = 0.3;
 constexpr double kMaxCameraDistance = 4.0;
 constexpr double kReferenceDistance = 2.0;  // the noise settings are given at this distance
@@ -40,6 +37,9 @@ constexpr double kMaxEarsCorrectionM = 0.12;
 constexpr double kMinAgility = 0.01;
 constexpr double kMaxAgility = 10.0;
 constexpr double kAgilityRate = 0.3;
+constexpr double kDepthTrendRate = 0.25;  // per camera frame: about the last four
+// The variance of that average when the innovations are noise of unit variance.
+constexpr double kDepthTrendVariance = kDepthTrendRate / (2.0 - kDepthTrendRate);
 
 Mat3 Symmetric(const Mat3& a)
 {
@@ -144,6 +144,7 @@ void HeadPositionEstimator::Reset(double measured_at, Vec3 pivot, const Mat3& no
     p_vv_ = Mat3::Identity(kInitialVelocityVariance);
     state_time_ = measured_at;
     agility_ = 1.0;
+    depth_trend_ = 0.0;
     state_ = State::Live;
     ever_seen_ = true;
     rejected_.clear();
@@ -153,7 +154,7 @@ void HeadPositionEstimator::Reset(double measured_at, Vec3 pivot, const Mat3& no
 
 HeadPositionEstimator::Snapshot HeadPositionEstimator::Save() const
 {
-    return {pivot_, velocity_, p_pp_, p_pv_, p_vv_, state_time_, agility_};
+    return {pivot_, velocity_, p_pp_, p_pv_, p_vv_, state_time_, agility_, depth_trend_};
 }
 
 void HeadPositionEstimator::Restore(const Snapshot& snapshot)
@@ -165,6 +166,7 @@ void HeadPositionEstimator::Restore(const Snapshot& snapshot)
     p_vv_ = snapshot.p_vv;
     state_time_ = snapshot.time;
     agility_ = snapshot.agility;
+    depth_trend_ = snapshot.depth_trend;
 }
 
 void HeadPositionEstimator::ForgetSteps()
@@ -216,17 +218,25 @@ double HeadPositionEstimator::Correct(const Measurement& m, bool apply)
     p_pv_ = pv;
     p_vv_ = Symmetric(vv);
     const double speed = Length(velocity_);
-    if (speed > kMaxSpeed) {
-        velocity_ = velocity_ * (kMaxSpeed / speed);
+    if (speed > config_.max_speed) {
+        velocity_ = velocity_ * (config_.max_speed / speed);
     }
     // Its poor direction (the PS Eye's depth) would say more about its own noise than about how
-    // the head moves: only the rest counts, the distance as if that direction were not measured.
+    // the head moves: the rest counts sample by sample, the distance as if that direction were not
+    // measured. For the light, that direction counts by its recent average instead, so going
+    // towards or away from the PS Eye is still followed.
     double counted = distance, dimensions = 3.0;
     const double blind_weight = Dot(m.blind, s_inv * m.blind);
     if (blind_weight > 0.0) {
         const double along = Dot(m.blind, weighted);
         counted = std::max(distance - along * along / blind_weight, 0.0);
         dimensions = 2.0;
+        if (m.light) {
+            const double rate = kDepthTrendRate * m.weight;
+            depth_trend_ = (1.0 - rate) * depth_trend_ + rate * along / std::sqrt(blind_weight);
+            counted += depth_trend_ * depth_trend_ / kDepthTrendVariance;
+            dimensions = 3.0;
+        }
     }
     agility_ = std::clamp(agility_ * std::exp(kAgilityRate * m.weight * std::clamp(counted / dimensions - 1.0, -1.0, 4.0)),
                           kMinAgility, kMaxAgility);
@@ -279,7 +289,7 @@ void HeadPositionEstimator::AddLight(double time, Vec3 light, bool tracking, Vec
     const Quat orientation = OrientationAt(measured_at);
     const double eye_height = (light + Rotate(orientation, config_.eyes_from_light)).y;
     const double distance = camera_valid_ ? Length(light - camera_) : 0.0;
-    if (eye_height < kMinEyeHeight || eye_height > kMaxEyeHeight ||
+    if (eye_height < config_.min_eye_height || eye_height > config_.max_eye_height ||
         (camera_valid_ && (distance < kMinCameraDistance || distance > kMaxCameraDistance))) {
         ++stats_.implausible;
         return;
@@ -557,7 +567,7 @@ bool HeadPositionEstimator::StartFromSightings(double now)
         const Quat orientation = OrientationAt(newest->time);
         const Vec3 pivot = ears - Rotate(orientation, ears_from_neck_);
         const double eye_height = (pivot + Rotate(orientation, config_.eyes_from_neck)).y;
-        if (gap > kStartMaxGapM || eye_height < kMinEyeHeight || eye_height > kMaxEyeHeight) {
+        if (gap > kStartMaxGapM || eye_height < config_.min_eye_height || eye_height > config_.max_eye_height) {
             continue;
         }
         const Vec3 before = Pivot(now, nullptr);
