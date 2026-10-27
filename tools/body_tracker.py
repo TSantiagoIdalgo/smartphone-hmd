@@ -18,7 +18,7 @@ ankles.
     python tools/body_tracker.py --record a.jsonl  # also save every pose, to replay later
     python tools/body_tracker.py --snapshots fotos # a picture of each camera every 2 s
     python tools/body_tracker.py --show            # the cameras live in the browser
-    python tools/body_tracker.py --ball-color magenta  # only a bulb of the Move's colour
+    python tools/body_tracker.py --ball-color magenta,cyan  # only bulbs of the Moves' colours
 
 The first run downloads the pose model next to this script. On Windows, allow Python through the
 firewall on private networks when asked.
@@ -395,7 +395,7 @@ class Tracker:
         self.send_driver = send_driver
         self.snapshots = snapshots  # a folder for a picture of each camera every few seconds
         self.viewer = viewer  # a Viewer, to see the cameras on the PC
-        self.ball_hue = ball_hue  # of the Move's bulb, in degrees; None: any colour
+        self.ball_hue = ball_hue  # of the Moves' bulbs, in degrees (one or several); None: any colour
         self.make_pose = make_pose
         self.out = out
         self.record = record
@@ -799,12 +799,24 @@ BALL_HUE_TOLERANCE = 35
 BALL_RADIUS_PER_TRUNK = (0.018, 0.14)
 
 
+def ball_colors(text):
+    """--ball-color: one colour or several, comma separated, as a list; "any" (or nothing) for any."""
+    names = [name.strip() for name in text.lower().split(",") if name.strip()]
+    if names in ([], ["any"]):
+        return []
+    unknown = [name for name in names if name not in BALL_HUES]
+    if unknown:
+        raise argparse.ArgumentTypeError(f"unknown colour {', '.join(unknown)}: use {', '.join(sorted(BALL_HUES))} "
+                                         "or any")
+    return names
+
+
 def find_ball(rgb, points, hue=None):
     """Where a lit PS Move bulb is, as (x, y, radius) over the picture's width and height (the
     radius over its width), or None. The driver calibrates the cameras with it. It is looked for
     near each wrist, within a forearm and a bit: the bulb glows brighter than anything else there,
-    is coloured, of the bulb's size next to the body, and of its colour, the hue in degrees, if
-    given."""
+    is coloured, of the bulb's size next to the body, and of its colour, the hue in degrees (or one of
+    several), if given."""
     balls = find_balls(rgb, points, hue)
     return balls[0] if balls else None
 
@@ -853,7 +865,7 @@ def bright_blob(patch, radius=None, hue=None):
     None. Glowing means at least two colours near their top (the bulb blows out the camera; a lit
     bulb is magenta, cyan or yellow, or white in its core), which a red shirt in good light is
     not; coloured means saturated, which a white lamp or wall is not and skin is too little.
-    radius is (smallest, largest) in pixels, hue the wanted one in degrees."""
+    radius is (smallest, largest) in pixels, hue the wanted one in degrees, or several."""
     channels = patch.astype(np.int16)
     top, bottom = channels.max(axis=2), channels.min(axis=2)
     coloured = (top >= 150) & (top - bottom >= 0.5 * top)
@@ -879,8 +891,9 @@ def bright_blob(patch, radius=None, hue=None):
         if hues is not None:
             angles = hues[colour]
             mean = math.degrees(math.atan2(np.sin(angles).mean(), np.cos(angles).mean()))
-            if abs((mean - hue + 180) % 360 - 180) > BALL_HUE_TOLERANCE:
-                continue  # another colour than the Move's
+            wanted = hue if isinstance(hue, (tuple, list)) else (hue,)
+            if all(abs((mean - h + 180) % 360 - 180) > BALL_HUE_TOLERANCE for h in wanted):
+                continue  # another colour than the Moves', such as the visor's light
         score = glow / area
         if best is None or score > best[3]:
             best = (centres[i][0] + 0.5, centres[i][1] + 0.5, size, score)
@@ -1114,8 +1127,8 @@ def run(port, record_path, model, threads, engine, driver_port, snapshots, ball_
         except OSError as e:
             print(f"No se pudo mostrar las cámaras en el puerto {show_port} ({e}); prueba otro: --show 8081")
     tracker = Tracker(sock.sendto, make_pose, record=record, send_driver=send_driver, snapshots=snapshots,
-                      ball_hue=BALL_HUES.get(ball_color), viewer=viewer)
-    ball = f"; bola del Move {ball_color}" if ball_color in BALL_HUES else ""
+                      ball_hue=tuple(BALL_HUES[c] for c in ball_color) or None, viewer=viewer)
+    ball = f"; bolas de los Moves {'/'.join(ball_color)}" if ball_color else ""
     print(f"Modelo «{model}» listo ({cores}{ball}). Esperando las cámaras en el puerto UDP {port}… "
           "(Ctrl+C para salir)")
     if viewer:
@@ -1160,8 +1173,9 @@ def main():
                         help=f"UDP port of the headset driver on this PC (default {DRIVER_PORT})")
     parser.add_argument("--snapshots", metavar="FOLDER",
                         help="save what each camera sees, with the points and the Move's ball, every 2 s")
-    parser.add_argument("--ball-color", choices=sorted(BALL_HUES) + ["any"], default="any",
-                        help="the colour of the lit Move's bulb, so nothing else is taken for it (default any)")
+    parser.add_argument("--ball-color", type=ball_colors, default=[], metavar="COLOUR[,COLOUR]",
+                        help="the colours of the lit Moves' bulbs, comma separated, so nothing else is taken for "
+                             f"them, such as the visor's light ({', '.join(sorted(BALL_HUES))}; default any)")
     parser.add_argument("--show", type=int, nargs="?", const=8080, metavar="PORT",
                         help="show what each camera sees, with its points, on a web page of this PC "
                              "(http://localhost:8080 unless another port is given), opened in the browser")

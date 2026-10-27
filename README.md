@@ -273,10 +273,11 @@ página se arma aparte de la pose y no la atrasa.
 verde y la bola del Move en un anillo: sirve para ver por qué no se detecta algo. Van numeradas
 (`camara_19BB_0001.jpg`, …), y las que tienen una bola terminan en `_bola`.
 
-`--ball-color magenta` (o `cyan`, `yellow`, `red`, `green`, `blue`) toma por la bola del Move solo
-algo de ese color. Úsalo al calibrar con el color con que PSMoveServiceEx enciende tu Move (el
-primero sale magenta, el segundo cian): así una lámpara o una prenda de otro color junto a la mano
-no se confunde con ella.
+`--ball-color magenta,cyan` (colores entre `magenta`, `cyan`, `yellow`, `red`, `green`, `blue`,
+separados por comas) toma por bola de un Move solo algo de esos colores. **Úsalo siempre**, con los
+colores con que PSMoveServiceEx enciende tus Moves (el primero sale magenta, el segundo cian) y no
+el de la luz del visor: sin él, la luz del visor (y una lámpara o una prenda que brille) junto a la
+mano se toma por un Move. Al calibrar alcanza con el color del Move que usas.
 
 ### Una ESP32-CAM como cámara
 
@@ -366,8 +367,9 @@ salgas entero, de la cabeza a los pies, y en `vrserver.txt` que `Body trackers` 
    encaja con lo que vio; si no (la moviste), deja de usarse hasta calibrarla de nuevo, y lo dice.
    La calibración se guarda en SteamVR y se usa sola la próxima vez, por número de cámara: si
    desinstalas la app o borras sus datos, el móvil sale con otro número y hay que calibrar de nuevo.
-5. Para jugar, vuelve a abrir `body_tracker.py` sin `--ball-color`: así los móviles ven las bolas
-   de los dos Moves, de cualquier color (ver "Mandos").
+5. Para jugar, abre `body_tracker.py` con los colores de los dos Moves, por ejemplo
+   `--ball-color magenta,cyan`, para que los móviles vean las bolas de los dos (ver "Mandos") y no
+   la luz del visor.
 
 **Comprobarla:** con un solo Move encendido, como al calibrar, déjalo quieto en varios lugares
 donde lo vean los dos móviles. Cada 10 segundos, la línea `Body check:` dice a cuántos centímetros

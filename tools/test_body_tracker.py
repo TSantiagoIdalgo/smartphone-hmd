@@ -307,6 +307,21 @@ class BallTest(unittest.TestCase):
         self.assertEqual(len(bt.find_balls(self.picture, self.points)), 1)
         self.assertEqual(bt.find_balls(self.picture, []), [])
 
+    def test_the_moves_colours_but_not_the_visors(self):
+        # Two Moves, magenta and cyan, and the visor's yellow light by the raised hand.
+        self.points[16] = (0.3, 0.5, 0.0, 0.9, 0.99)
+        self.points[14] = (0.3, 0.6, 0.0, 0.9, 0.99)
+        self.draw_bulb(255, 290)
+        self.draw_bulb(140, 285, colour=(40, 230, 255))
+        self.draw_bulb(200, 230, colour=(250, 240, 60))
+        moves = tuple(bt.BALL_HUES[c] for c in bt.ball_colors("magenta, cyan"))
+        bulbs = sorted(bt.find_balls(self.picture, self.points, moves))
+        self.assertEqual([round(b[0] * 480) for b in bulbs], [140, 256])
+        self.assertEqual(len(bt.find_balls(self.picture, self.points)), 2, "any colour: the visor's light too")
+        self.assertEqual(bt.ball_colors("any"), [])
+        with self.assertRaises(bt.argparse.ArgumentTypeError):
+            bt.ball_colors("magenta,pink")
+
     def test_only_the_moves_colour_when_given(self):
         magenta, cyan = bt.BALL_HUES["magenta"], bt.BALL_HUES["cyan"]
         self.draw_bulb(255, 290)
