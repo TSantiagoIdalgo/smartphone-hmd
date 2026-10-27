@@ -117,6 +117,14 @@ private:
     int ids_[2] = {-1, -1};
     float rumble_[2] = {0.0f, 0.0f};
     double recenter_since_[2] = {-1.0, -1.0};
+    // How much each controller trembles while held still, for the log.
+    struct Tremor {
+        bool started = false;
+        Vec3 mean;
+        double squares = 0.0;
+        int count = 0;
+    };
+    Tremor tremor_[2];
 
     std::atomic<bool> running_{false};
     std::thread thread_;

@@ -26,6 +26,10 @@ constexpr double kOwnerMarginM = 0.1;
 // Near neither hand: a hand whose bulb nobody follows may have moved that far since.
 constexpr double kLostOwnerMaxGapM = 0.8;
 constexpr double kMinViewDistanceM = 0.3;
+// For the log: how much a controller trembles while held still, about its average of the last
+// half second.
+constexpr double kStillSpeed = 0.1;  // m/s
+constexpr double kTremorSeconds = 0.5;
 
 const char* const kHandNames[2] = {"left", "right"};
 
@@ -325,7 +329,18 @@ void MoveControllers::Run()
                 filtered.velocity = out.velocity;
             }
             hands_[h].Update(filtered, wrists, now);
-            devices_[h]->Update(true, hands_[h].Pose(now), move->buttons, move->trigger);
+            const HandPose pose = hands_[h].Pose(now);
+            devices_[h]->Update(true, pose, move->buttons, move->trigger);
+            if (pose.valid) {
+                Tremor& t = tremor_[h];
+                const double rate = 1.0 - std::exp(-kLoopMilliseconds / 1000.0 / kTremorSeconds);
+                t.mean = t.started ? t.mean + (pose.position - t.mean) * rate : pose.position;
+                t.started = true;
+                if (Length(pose.velocity) < kStillSpeed) {
+                    t.squares += Dot(pose.position - t.mean, pose.position - t.mean);
+                    ++t.count;
+                }
+            }
             CheckRecenter(h, *move, now);
             const float rumble = devices_[h]->Rumble(now);
             if (rumble != rumble_[h]) {
@@ -405,21 +420,31 @@ void MoveControllers::LogReport()
         const MoveHand::Stats stats = hands_[h].TakeStats();
         const HeadPositionEstimator::Stats bulb = bulbs_[h].TakeStats();
         const int total = stats.tracking + stats.from_wrist + stats.held;
-        char part[512];
+        char part[640];
         if (ids_[h] < 0 || total == 0) {
             std::snprintf(part, sizeof(part), "%s %s no Move", h > 0 ? ";" : "", kHandNames[h]);
         } else {
             const Vec3 offset = hands_[h].BulbFromWrist();
+            Tremor& t = tremor_[h];
+            char still[64] = "never held still";
+            if (t.count > 0) {
+                std::snprintf(still, sizeof(still), "held still it trembles %.1f mm",
+                              std::sqrt(t.squares / t.count) * 1000.0);
+            }
+            t.squares = 0.0;
+            t.count = 0;
             std::snprintf(part, sizeof(part),
                           "%s %s Move %d, %.0f%% of the time seen by the PS Eye or the phones, %.0f%% on the %s "
-                          "wrist, %.0f%% held where it was (%d jumps not believed, %d bulb readings left out); its "
-                          "depth shakes %.0f mm and sideways %.0f, agility %.2f; the phones' views of it: %d used, %d "
-                          "left out, %d too late, found %d times without the PS Eye; the bulb %.0f cm from the wrist",
+                          "wrist, %.0f%% held where it was (%d jumps not believed, %d bulb readings left out, %d "
+                          "resets); %s; the PS Eye's depth of it shakes %.0f mm and sideways %.0f, agility %.2f; the "
+                          "phones' views of it: %d used, %d left out, %d too late, found %d times without the PS Eye; "
+                          "the bulb %.0f cm from the wrist",
                           h > 0 ? ";" : "", kHandNames[h], ids_[h], 100.0 * stats.tracking / total,
                           100.0 * stats.from_wrist / total, kHandNames[hands_[h].wrist()], 100.0 * stats.held / total,
-                          stats.jumps, bulb.rejected + bulb.implausible, bulb.depth_innovation_rms_m * 1000.0,
-                          bulb.lateral_innovation_rms_m * 1000.0, bulb.agility, bulb.sightings,
-                          bulb.sightings_rejected, bulb.sightings_late, bulb.sighting_starts, Length(offset) * 100.0);
+                          stats.jumps, bulb.rejected + bulb.implausible, bulb.resets, still,
+                          bulb.depth_innovation_rms_m * 1000.0, bulb.lateral_innovation_rms_m * 1000.0, bulb.agility,
+                          bulb.sightings, bulb.sightings_rejected, bulb.sightings_late, bulb.sighting_starts,
+                          Length(offset) * 100.0);
         }
         text += part;
     }

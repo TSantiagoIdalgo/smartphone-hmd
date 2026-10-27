@@ -71,6 +71,12 @@ struct TrackerPose {
     Vec3 velocity;
 };
 
+// Whether the hips face the other way from where the head looks and from where both feet point
+// (heel to toe, which left and right do not change): then the filter has the person's left and
+// right the wrong way round. `head_looks`: the headset's forward, roughly level.
+bool HipsFaceBackwards(Vec3 head_looks, const TrackerPose& hips, const TrackerPose& left_foot,
+                       const TrackerPose& right_foot);
+
 class BodyFilter {
 public:
     struct Stats {
@@ -93,6 +99,8 @@ public:
     TrackerPose Foot(bool left, double now) const;
     // Position and velocity only.
     TrackerPose Wrist(bool left, double now) const;
+    // The person's left and right were the wrong way round: swaps every joint with its partner.
+    void SwapSides();
 
     // Counters since the last call.
     Stats TakeStats();

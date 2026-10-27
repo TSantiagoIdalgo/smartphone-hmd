@@ -435,6 +435,34 @@ void TestBodyLeftAndRightMixedUp()
     CHECK(sim.filter.TakeStats().swapped > 20);
 }
 
+void TestBodyTurnedRoundIsSwappedBack()
+{
+    // The filter left with the person's left and right the wrong way round (as after the hands
+    // together in front of the face): every frame is swapped to fit it, and the hips face back.
+    BodySimulation sim;
+    sim.Run(1.0, StandingStill);
+    sim.filter.SwapSides();
+    sim.filter.TakeStats();
+    sim.Run(1.0, StandingStill);
+    CHECK(sim.filter.TakeStats().swapped > 40);
+    const Vec3 looks{0.0, -0.3, -1.0};  // ahead, a little down, as the person faces
+    const auto backwards = [&]() {
+        return HipsFaceBackwards(looks, sim.filter.Waist(sim.time), sim.filter.Foot(true, sim.time),
+                                 sim.filter.Foot(false, sim.time));
+    };
+    CHECK(backwards());
+    // Swapped back, the frames fit as they come.
+    sim.filter.SwapSides();
+    sim.Run(1.0, StandingStill);
+    CHECK(sim.filter.TakeStats().swapped == 0);
+    CHECK(!backwards());
+    CHECK(sim.Error(kLeftHip, Person{}, sim.time) < 0.02);
+    CHECK(sim.Error(kLeftAnkle, Person{}, sim.time) < 0.02);
+    // Looking over the shoulder is not enough: the feet still point ahead with the hips.
+    CHECK(!HipsFaceBackwards(Vec3{0.0, 0.0, 1.0}, sim.filter.Waist(sim.time), sim.filter.Foot(true, sim.time),
+                             sim.filter.Foot(false, sim.time)));
+}
+
 void TestBodyLateFrames()
 {
     // The right camera's frames arrive 30 ms late, after the left camera's newer ones.
@@ -1004,6 +1032,7 @@ int main()
     TestBodyFootHiddenFromOneCamera();
     TestBodyLeftAndRightMixedUp();
     TestBodyLateFrames();
+    TestBodyTurnedRoundIsSwappedBack();
     TestBodyStartsAgainWhenLost();
     TestBodyNeedsTwoCamerasToStart();
     TestBodyHoldsThenLetsGo();

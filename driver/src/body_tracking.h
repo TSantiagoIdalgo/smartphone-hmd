@@ -34,7 +34,7 @@ private:
     void ToggleCalibration(double now);
     void FinishCalibration();
     void Publish(double now);
-    void CheckHead(const TrackerPose& hips);
+    void CheckHead(const TrackerPose& hips, const TrackerPose& left_foot, const TrackerPose& right_foot);
     void LogReport(double now);
     void LogProgress();
 
@@ -57,6 +57,7 @@ private:
     double head_offset_sum_ = 0.0;
     double head_turn_sum_ = 0.0;
     int head_checks_ = 0;
+    int backwards_checks_ = 0;
 
     Calibration calibration_ = Calibration::Off;
     double calibration_at_ = 0.0;  // when the countdown ends, or the collecting started

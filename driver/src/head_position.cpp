@@ -344,7 +344,9 @@ void HeadPositionEstimator::AddLight(double time, Vec3 light, bool tracking, Vec
         while (rejected_.front().time < time - kResetWindowSeconds) {
             rejected_.pop_front();
         }
-        if (rejected_.size() < kResetCount) {
+        // While the body cameras' views arrive they hold it: a jump of the light alone (a ball half
+        // hidden, put far away) is not believed.
+        if (rejected_.size() < kResetCount || time - last_view_time_ <= kSightingsLostSeconds) {
             return;
         }
         Vec3 mean;

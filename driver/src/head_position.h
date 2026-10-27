@@ -39,7 +39,7 @@ struct HeadPositionConfig {
     // The same while the body cameras see the head. The PS Eye's depth wanders, a guess from the
     // light's size that PSMoveServiceEx smooths, so its frames are not as independent as they
     // look, and it can be off by tens of cm; the cameras' views are steady: they give the depth.
-    double depth_noise_with_sightings_m = 0.5;
+    double depth_noise_with_sightings_m = 1.0;
     double agility = 1.0;                     // process noise, m^2/s^3, at its usual scale
     double prediction_gain = 0.8;             // share of the pivot velocity extrapolated
     double max_speed = 3.0;                   // m/s

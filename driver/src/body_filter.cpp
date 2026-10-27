@@ -9,6 +9,9 @@ constexpr double kGate = 16.0;              // squared Mahalanobis distance; abo
 constexpr double kCostCap = 25.0;           // so one wild point does not decide left and right alone
 constexpr double kSwapMargin = 4.0;
 constexpr int kMinCompared = 3;
+// Hips this far from where the head looks and the feet point, and these within this of each other.
+constexpr double kBackwardsRadians = 120.0 * 3.14159265358979 / 180.0;
+constexpr double kTogetherRadians = 60.0 * 3.14159265358979 / 180.0;
 constexpr double kMaxLateSeconds = 0.15;    // frames this far behind the filter are too old to use
 constexpr double kStartWindowSeconds = 0.1;  // two cameras' frames this close start a joint
 constexpr double kStartMaxGapM = 0.08;      // if their rays pass this close
@@ -35,6 +38,16 @@ constexpr double kAgility[kJointCount] = {2, 2, 2, 2, 6, 6, 10, 10, 10, 10, 10, 
 int Partner(int joint)
 {
     return joint ^ 1;
+}
+
+// Between two directions seen from above, 0 to pi; -1 if either is nearly vertical.
+double LevelAngle(Vec3 a, Vec3 b)
+{
+    a.y = b.y = 0.0;
+    if (Length(a) < 0.3 || Length(b) < 0.3) {
+        return -1.0;
+    }
+    return std::acos(std::clamp(Dot(Unit(a), Unit(b)), -1.0, 1.0));
 }
 
 // The rotation whose columns are the given axes.
@@ -210,12 +223,13 @@ void BodyFilter::Add(BodyView view)
     const CameraModel& camera = cameras_[view.camera];
     const auto seen = [&](int joint) { return view.visibility[joint] >= config_.min_visibility; };
 
-    // Left and right: whichever way round agrees better with the joints being followed.
+    // Left and right: whichever way round agrees better with the joints being followed. Not the
+    // wrists: hands cross, and held together they would turn the whole body round.
     double straight = 0.0, crossed = 0.0;
     int compared = 0;
     for (int j = 0; j < kJointCount; ++j) {
         const int other = Partner(j);
-        if (!joints_[j].live || !seen(j) || !seen(other)) {
+        if (j == kLeftWrist || j == kRightWrist || !joints_[j].live || !seen(j) || !seen(other)) {
             continue;
         }
         const double as_is = Update(&joints_[j], j, camera, view.time, view.u[j], view.v[j], view.visibility[j], false);
@@ -404,6 +418,33 @@ TrackerPose BodyFilter::Wrist(bool left, double now) const
         pose.velocity = joints_[joint].velocity;
     }
     return pose;
+}
+
+void BodyFilter::SwapSides()
+{
+    for (int j = 0; j < kJointCount; j += 2) {
+        std::swap(joints_[j], joints_[j + 1]);
+        for (BodyView& view : last_views_) {
+            std::swap(view.u[j], view.u[j + 1]);
+            std::swap(view.v[j], view.v[j + 1]);
+            std::swap(view.visibility[j], view.visibility[j + 1]);
+        }
+    }
+}
+
+bool HipsFaceBackwards(Vec3 head_looks, const TrackerPose& hips, const TrackerPose& left_foot,
+                       const TrackerPose& right_foot)
+{
+    if (!hips.valid || !left_foot.valid || !right_foot.valid) {
+        return false;
+    }
+    const Vec3 forward{0.0, 0.0, -1.0};
+    const Vec3 hips_forward = Rotate(hips.orientation, forward);
+    const Vec3 feet = Rotate(left_foot.orientation, forward) + Rotate(right_foot.orientation, forward);
+    const double head_hips = LevelAngle(head_looks, hips_forward), feet_hips = LevelAngle(feet, hips_forward),
+                 feet_head = LevelAngle(feet, head_looks);
+    return head_hips > kBackwardsRadians && feet_hips > kBackwardsRadians && feet_head >= 0.0 &&
+           feet_head < kTogetherRadians;
 }
 
 BodyFilter::Stats BodyFilter::TakeStats()

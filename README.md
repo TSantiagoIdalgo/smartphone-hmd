@@ -381,7 +381,11 @@ calibra de nuevo. Con los dos Moves encendidos no comprueba nada y lo dice.
 En `vrserver.txt`, cada 10 segundos, `Body camera …` dice por cámara los cuadros por segundo, a los
 cuántos ms de tomado llega cada cuadro, qué parte tiene un cuadro de la otra cámara a menos de
 20 ms, en qué parte se ve una persona y la bola, y si está calibrada; `Body:` cuántos puntos se usan
-y cuántos se descartan (por no encajar, o por llegar más viejos que lo que ya había); y
+y cuántos se descartan (por no encajar, o por llegar más viejos que lo que ya había), y en cuántos
+cuadros el modelo de pose tenía la izquierda y la derecha al revés (unos pocos es normal; casi
+todos quiere decir que el cuerpo quedó dado vuelta: el driver lo corrige solo en unos segundos,
+cuando la cabeza y las puntas de los pies coinciden en que la cadera mira hacia atrás, y lo dice
+con `Body: the hips faced away…`); y
 `Body trackers` por tracker (cadera, pie izquierdo, pie derecho) a qué
 altura del piso estuvo en promedio, la más baja y la más alta, cuánto se apartó de su lugar
 promedio y qué parte del tiempo tuvo posición. Quieto, lo que se aparta es su temblor: debe quedar
@@ -438,7 +442,7 @@ cuerpo y de los Moves. En `vrserver.txt`:
 
 Ajustes de `default.vrsettings`:
 
-- `head_position_depth_noise_with_body_cm` (50): cuánto se cree en la profundidad de la PS Eye
+- `head_position_depth_noise_with_body_cm` (100): cuánto se cree en la profundidad de la PS Eye
   mientras los móviles ven la cabeza. Alto, la profundidad sale de los móviles: más quieta y sobre
   tu cuerpo, pero unos 0,15 s más lenta al acercarte o alejarte de la PS Eye. Más bajo (9, como
   antes), más de la PS Eye: solo si su distancia es buena.
@@ -490,14 +494,17 @@ Mandos → Administrar asignaciones, como un mando Vive.
 - **Temblor**: la posición de cada bola pasa por el mismo filtro que la luz del visor. La PS Eye ve
   bien de costado y mal en profundidad, peor cuanto más lejos; el filtro suaviza más con la mano
   quieta, sigue de cerca al moverla y deja afuera los saltos de una bola tapada a medias. Mientras
-  los móviles la ven, la profundidad es la suya: `controller_depth_noise_with_body_cm` (30) es
-  cuánto se cree entonces en la de la PS Eye. Si aún tiembla quieto, sube
+  los móviles la ven, la profundidad es la suya: `controller_depth_noise_with_body_cm` (100) es
+  cuánto se cree entonces en la de la PS Eye (más bajo, una bola tapada a medias, que la PS Eye
+  pone lejos, arrastra el mando). Si aún tiembla quieto, sube
   `controller_depth_noise_cm` (2, sin los móviles) o baja `controller_agility` (10); si va atrasado
   al moverlo, al revés. `controller_prediction` (1) adelanta la mano según su velocidad para
   compensar el retraso de PSMoveServiceEx.
 - En `vrserver.txt`, `Hands:` dice qué Move quedó en cada mano y, cada 10 segundos, qué parte del
   tiempo lo vieron la PS Eye o los móviles, cuánto siguió a la muñeca y cuánto quedó quieto donde
-  estaba (sin bola ni muñeca), cuántas lecturas de la bola dejó afuera, cuánto tiembla en
-  profundidad y de costado, cuántas vistas de los móviles usó y cuántas descartó, y a cuántos
+  estaba (sin bola ni muñeca), cuántas lecturas de la bola dejó afuera, **cuánto tiembla el mando
+  quieto** (`held still it trembles … mm`: lo que ves en el juego; menos de 5 mm está bien), cuánto
+  tiembla la profundidad que da la PS Eye y de costado, cuántas vistas de los móviles usó y cuántas
+  descartó, y a cuántos
   centímetros de la muñeca aprendió que está la bola (unos 15-20 cm). En `body_tracker.py`, "bola
   del Move en N%" dice en qué parte de los cuadros encontró alguna.

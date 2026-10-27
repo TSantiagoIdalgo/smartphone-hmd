@@ -1383,13 +1383,14 @@ struct PhonesRun {
 };
 
 PhonesRun RunBulbWithPhones(const std::function<Vec3(double)>& path, double seconds, bool phones,
-                            const std::function<bool(double)>& lost = nullptr)
+                            const std::function<bool(double)>& lost = nullptr,
+                            const std::function<bool(double)>& far = nullptr)
 {
     const Vec3 camera{0.0, 1.2, -2.5};
     const std::vector<CameraModel> cameras{HeadSimulation::BodyCamera({-1.5, 0.9, -2.0}),
                                            HeadSimulation::BodyCamera({0.6, 1.0, -2.1})};
     HeadPositionConfig config = BulbConfig();
-    config.depth_noise_with_sightings_m = 0.3;
+    config.depth_noise_with_sightings_m = 1.0;
     HeadPositionEstimator bulb(config);
     bulb.SetCamera(true, camera, 1);
     std::mt19937 random(5);
@@ -1410,8 +1411,8 @@ PhonesRun RunBulbWithPhones(const std::function<Vec3(double)>& path, double seco
             wander = a * wander + std::sqrt(1.0 - a * a) * 0.04 * gaussian();
             const Vec3 truth = path(t - 0.040), along = Unit(truth - camera);
             const Vec3 side = Unit(Cross(along, Vec3{0, 1, 0}));
-            const Vec3 seen = truth + along * (0.05 * gaussian() + wander) + side * (0.002 * gaussian()) +
-                              Cross(side, along) * (0.002 * gaussian());
+            const Vec3 seen = truth + along * (0.05 * gaussian() + wander + (far && far(t) ? 1.5 : 0.0)) +
+                              side * (0.002 * gaussian()) + Cross(side, along) * (0.002 * gaussian());
             bulb.AddLight(now, seen, !(lost && lost(t)), Vec3{});
         }
         for (int c = 0; phones && c < 2; ++c) {
@@ -1468,6 +1469,10 @@ void TestBulbWithPhones()
     const PhonesRun hidden = RunBulbWithPhones(sway, 8.0, true, [](double t) { return t >= 4.0 && t < 5.0; });
     CHECK(hidden.always_live);
     CHECK(hidden.max_error < 0.12);
+    // Half hidden from the PS Eye for half a second, PSMoveServiceEx puts it 1.5 m farther: the
+    // phones hold it where it is.
+    const PhonesRun half = RunBulbWithPhones(still, 8.0, true, nullptr, [](double t) { return t >= 4.0 && t < 4.5; });
+    CHECK(half.max_error < 0.05);
 }
 
 int main()

@@ -177,7 +177,7 @@ HmdDevice::HmdDevice(PsmsClient* psms, HeadSightingQueue* sightings) : psms_(psm
         head.lateral_noise_m = std::max(GetDoubleSetting("head_position_lateral_noise_mm", 2.0), 0.1) / 1000.0;
         head.depth_noise_m = std::max(GetDoubleSetting("head_position_depth_noise_cm", 3.0), 0.01) / 100.0;
         head.depth_noise_with_sightings_m =
-            std::max(GetDoubleSetting("head_position_depth_noise_with_body_cm", 50.0), 0.01) / 100.0;
+            std::max(GetDoubleSetting("head_position_depth_noise_with_body_cm", 100.0), 0.01) / 100.0;
         head.agility = std::max(GetDoubleSetting("head_position_agility", 1.0), 0.001);
         light_distance_scale_ = std::clamp(GetDoubleSetting("head_light_distance_scale", 1.0), 0.2, 5.0);
         head.prediction_gain = std::clamp(GetDoubleSetting("head_position_prediction", 0.8), 0.0, 1.0);

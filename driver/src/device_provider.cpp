@@ -82,7 +82,7 @@ vr::EVRInitError DeviceProvider::Init(vr::IVRDriverContext* driver_context)
         bulb.depth_noise_m = std::max(GetDoubleSetting("controller_depth_noise_cm", 2.0), 0.01) / 100.0;
         // While the phones see it too, the depth is theirs, as for the head.
         bulb.depth_noise_with_sightings_m =
-            std::max(GetDoubleSetting("controller_depth_noise_with_body_cm", 30.0), 0.01) / 100.0;
+            std::max(GetDoubleSetting("controller_depth_noise_with_body_cm", 100.0), 0.01) / 100.0;
         bulb.agility = std::max(GetDoubleSetting("controller_agility", 10.0), 0.01);
         bulb.prediction_gain = std::clamp(GetDoubleSetting("controller_prediction", 1.0), 0.0, 1.0);
         bulb.max_speed = 10.0;

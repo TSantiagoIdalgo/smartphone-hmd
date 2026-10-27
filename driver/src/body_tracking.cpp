@@ -27,6 +27,9 @@ constexpr double kHeadCheckSeconds = 1.0;
 // under the headset and facing where it looks: farther off than this, it can mix up the legs.
 constexpr double kMaxHeadOffsetM = 0.3;
 constexpr double kMaxHeadTurnDegrees = 60.0;
+// Checks in a row (seconds) with the hips facing away from the head and the feet before they are
+// taken as the wrong way round.
+constexpr int kBackwardsChecks = 3;
 
 // Ctrl+Alt+C starts calibrating the body cameras, or stops it.
 bool CalibrateHotkeyDown()
@@ -294,7 +297,7 @@ void BodyTracking::Publish(double now)
     }
     if (poses[0].valid && now >= next_head_check_) {
         next_head_check_ = now + kHeadCheckSeconds;
-        CheckHead(poses[0]);
+        CheckHead(poses[0], poses[1], poses[2]);
     }
     if (wrists_) {
         Wrists wrists;
@@ -308,7 +311,7 @@ void BodyTracking::Publish(double now)
     }
 }
 
-void BodyTracking::CheckHead(const TrackerPose& hips)
+void BodyTracking::CheckHead(const TrackerPose& hips, const TrackerPose& left_foot, const TrackerPose& right_foot)
 {
     vr::TrackedDevicePose_t head{};
     vr::VRServerDriverHost()->GetRawTrackedDevicePoses(0.0f, &head, 1);
@@ -323,6 +326,15 @@ void BodyTracking::CheckHead(const TrackerPose& hips)
     head_offset_sum_ += Length(offset);
     head_turn_sum_ += std::fabs(turn) * kRadiansToDegrees;
     ++head_checks_;
+    // The pose model sometimes has the whole body the wrong way round (from behind, or with the
+    // hands together), and the filter can keep that; the head and the feet tell.
+    backwards_checks_ = HipsFaceBackwards(looks, hips, left_foot, right_foot) ? backwards_checks_ + 1 : 0;
+    if (backwards_checks_ >= kBackwardsChecks) {
+        backwards_checks_ = 0;
+        session_.SwapSides();
+        DriverLog("Body: the hips faced away from where the head looks and the feet point: left and right were the "
+                  "wrong way round, now swapped");
+    }
 }
 
 void BodyTracking::LogReport(double now)
