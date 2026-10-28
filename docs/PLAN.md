@@ -135,3 +135,21 @@ móvil necesitan tu PC.
 
 - Modelo del móvil (resolución de pantalla y tamaño físico).
 - Modelo de GPU de la PC (para confirmar que codifica H.264 por hardware).
+
+## 9. Pendiente para más adelante (cuando el body tracking funcione bien)
+
+- **Timewarp en el móvil, para que girar la cabeza se sienta fluido.** Hoy la imagen llega al
+  móvil 70-115 ms después de calcularse y se muestra tal cual. La PC compensa prediciendo la cabeza
+  hasta 80 ms con el giroscopio, y eso se pasa al empezar o frenar un giro: se siente brusco. Lo que
+  hacen las Quest con Air Link es girar la imagen en el visor, justo antes de mostrarla, con su
+  propio sensor. Aquí sería:
+  - el driver manda con cada cuadro para qué momento del giroscopio del móvil (marca de tiempo del
+    móvil más lo que predijo) se calculó;
+  - el móvil redibuja a su propia frecuencia y, en el shader de los ojos, gira la imagen lo que la
+    cabeza giró desde ese momento (integrando su giroscopio);
+  - la PC calcula la imagen con algo de margen alrededor, para que los giros rápidos no muestren
+    bordes negros;
+  - con eso, bajar mucho la predicción de la PC (menos sobrepaso al frenar).
+- **Cuadros que se pierden al codificar.** De los 60 cuadros por segundo que entrega SteamVR solo
+  se codifican unos 42 (en un log, 228 de 300 en 5 s), así que la imagen avanza a saltos desparejos.
+  Ver por qué el codificador no los toma todos a 2400x1080.
