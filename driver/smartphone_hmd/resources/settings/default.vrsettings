@@ -47,7 +47,6 @@
 		"controller_reach_cm": 120.0,
 		"controller_found_ms": 300.0,
 		"controller_still_mm": 15.0,
-		"controller_still_degrees": 0.6,
-		"controller_yaw_from_motion": true
+		"controller_still_degrees": 0.6
 	}
 }

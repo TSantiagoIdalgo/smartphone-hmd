@@ -359,10 +359,6 @@ MoveState ToMoveState(const PSMPSMove& m, int id, int hand, double now)
                          physics.LinearVelocityCmPerSec.z * 0.01};
     move.angular_velocity = Vec3{physics.AngularVelocityRadPerSec.x, physics.AngularVelocityRadPerSec.y,
                                  physics.AngularVelocityRadPerSec.z};
-    const PSMPSMoveCalibratedSensorData& sensors = m.CalibratedSensorData;
-    move.accel = Vec3{sensors.Accelerometer.x, sensors.Accelerometer.y, sensors.Accelerometer.z};
-    move.gyro = Vec3{sensors.Gyroscope.x, sensors.Gyroscope.y, sensors.Gyroscope.z};
-    move.sensor_time = sensors.TimeInSeconds;
     const std::pair<PSMButtonState, MoveButton> buttons[] = {
         {m.SquareButton, kMoveSquare}, {m.TriangleButton, kMoveTriangle}, {m.CrossButton, kMoveCross},
         {m.CircleButton, kMoveCircle}, {m.MoveButton, kMoveMove},         {m.PSButton, kMovePS},
@@ -633,8 +629,7 @@ void PsmsClient::Stream(const Api& api)
                     }
                     if (api.AllocateControllerListener(id) == PSMResult_Success &&
                         api.StartControllerDataStream(
-                            id, PSMStreamFlags_includePositionData | PSMStreamFlags_includePhysicsData |
-                                    PSMStreamFlags_includeCalibratedSensorData,
+                            id, PSMStreamFlags_includePositionData | PSMStreamFlags_includePhysicsData,
                             kRequestTimeoutMs) == PSMResult_Success) {
                         followed.push_back({id, static_cast<int>(list.controller_hand[i]), 0.0f, MoveState{}});
                     } else {

@@ -9,7 +9,6 @@
 #include "chaperone.h"
 #include "driver_log.h"
 #include "mono_clock.h"
-#include "move_yaw.h"
 #include "psms_client.h"
 
 namespace {
@@ -28,11 +27,6 @@ double Heading(Quat q)
 {
     const Vec3 forward = Rotate(q, Vec3{0.0, 0.0, -1.0});
     return std::atan2(-forward.x, -forward.z);
-}
-
-double Degrees(double radians)
-{
-    return std::remainder(radians * 180.0 / 3.14159265358979, 360.0);
 }
 
 }  // namespace
@@ -210,8 +204,7 @@ float MoveController::Rumble(double now)
 
 MoveControllers::MoveControllers(PsmsClient* psms, const HeadPositionConfig& bulb, const HandConfig& hand)
     : psms_(psms), bulb_config_(bulb), hand_config_(hand),
-      bulbs_{HeadPositionEstimator(bulb), HeadPositionEstimator(bulb)}, hands_{MoveHand(true, hand), MoveHand(false, hand)},
-      yaws_{MoveYaw(bulb.latency_seconds), MoveYaw(bulb.latency_seconds)}
+      bulbs_{HeadPositionEstimator(bulb), HeadPositionEstimator(bulb)}, hands_{MoveHand(true, hand), MoveHand(false, hand)}
 {
     devices_[0] = std::make_unique<MoveController>("SMARTPHONE-HMD-MOVE-LEFT", true);
     devices_[1] = std::make_unique<MoveController>("SMARTPHONE-HMD-MOVE-RIGHT", false);
@@ -294,7 +287,6 @@ void MoveControllers::Run()
                 ids_[h] = ids[h];
                 hands_[h] = MoveHand(h == 0, hand_config_);
                 bulbs_[h] = HeadPositionEstimator(bulb_config_);
-                yaws_[h] = MoveYaw(bulb_config_.latency_seconds);
                 rumble_[h] = 0.0f;
                 recenter_since_[h] = -1.0;
             }
@@ -311,13 +303,6 @@ void MoveControllers::Run()
             bulb.Tick(now, true);
             MoveState filtered = *move;
             filtered.tracking = bulb.state() == HeadPositionEstimator::State::Live;
-            // PSMoveServiceEx's rotation, its drift about the vertical undone.
-            yaws_[h].Add(*move, now);
-            if (hand_config_.yaw_from_motion) {
-                const Quat turn = AxisAngle(Vec3{0.0, 1.0, 0.0}, yaws_[h].Correction());
-                filtered.orientation = Normalize(turn * move->orientation);
-                filtered.angular_velocity = Rotate(turn, move->angular_velocity);
-            }
             if (filtered.tracking) {
                 const HeadPoseOut out = bulb.Output(now, Quat{}, Vec3{});
                 filtered.position = out.position;
@@ -383,14 +368,10 @@ void MoveControllers::CheckRecenter(int hand, const MoveState& move, double now)
     const Quat controller = AxisAngle(Vec3{0, 1, 0}, yaw) * AxisAngle(Vec3{1, 0, 0}, pitch);
     const Quat reset = hands_[hand].MoveOrientation(controller);
     psms_->ResetOrientation(move.id, reset);
-    // Pointing at the PS Eye, how far PSMoveServiceEx's rotation had drifted, and what the
-    // correction from the Move's motion had left of it.
-    const double drift = Degrees(Heading(reset) - Heading(move.orientation));
-    const double corrected = hand_config_.yaw_from_motion ? Degrees(yaws_[hand].Correction()) : 0.0;
-    yaws_[hand].Reset();
+    const double off = (Heading(reset) - Heading(move.orientation)) * 180.0 / 3.14159265358979;
     DriverLog("Hands: the %s Move's rotation reset, pointing at the PS Eye (Select and Start held): PSMoveServiceEx "
-              "had it %.0f degrees off, %.0f after the driver's correction",
-              kHandNames[hand], drift, std::remainder(drift - corrected, 360.0));
+              "had it %.0f degrees off",
+              kHandNames[hand], std::remainder(off, 360.0));
 }
 
 void MoveControllers::LogReport()
@@ -399,7 +380,6 @@ void MoveControllers::LogReport()
     for (int h = 0; h < 2; ++h) {
         const MoveHand::Stats stats = hands_[h].TakeStats();
         const HeadPositionEstimator::Stats bulb = bulbs_[h].TakeStats();
-        const MoveYaw::Stats yaw = yaws_[h].TakeStats();
         const int total = stats.tracking + stats.at_rest + stats.held;
         char part[640];
         if (ids_[h] < 0 || total == 0) {
@@ -419,15 +399,12 @@ void MoveControllers::LogReport()
                           "where it was (%d jumps not believed, %d glimpses of it left out, %d bulb positions out of "
                           "reach, %d bulb readings left out, %d resets); on its bulb, on average %.0f cm to the right "
                           "of the eyes, %.0f cm in front and %.0f cm below, and across the floor up to %.0f cm from "
-                          "them; %s; the PS Eye's depth of it shakes %.0f mm and sideways %.0f, agility %.2f; spun up "
-                          "to %.0f degrees a second, its rotation turned %.0f degrees about the vertical (%d brisk "
-                          "moments compared)",
+                          "them; %s; the PS Eye's depth of it shakes %.0f mm and sideways %.0f, agility %.2f",
                           h > 0 ? ";" : "", kHandNames[h], ids_[h], 100.0 * stats.tracking / total,
                           100.0 * stats.at_rest / total, 100.0 * stats.held / total, stats.jumps, stats.glimpses,
                           stats.out_of_reach, bulb.rejected + bulb.implausible, bulb.resets, stats.offset.x * 100.0,
                           stats.offset.z * 100.0, -stats.offset.y * 100.0, stats.farthest * 100.0, still,
-                          bulb.depth_innovation_rms_m * 1000.0, bulb.lateral_innovation_rms_m * 1000.0, bulb.agility,
-                          yaw.peak_spin_degrees, yaw.correction_degrees, yaw.moments);
+                          bulb.depth_innovation_rms_m * 1000.0, bulb.lateral_innovation_rms_m * 1000.0, bulb.agility);
         }
         text += part;
         if (stats.out_of_reach > stats.tracking && stats.out_of_reach > 100) {

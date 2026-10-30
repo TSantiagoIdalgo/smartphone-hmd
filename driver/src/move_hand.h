@@ -47,11 +47,6 @@ struct MoveState {
     Quat orientation;       // PSMoveServiceEx's: identity pointing along -z, buttons up
     Vec3 velocity;          // m/s
     Vec3 angular_velocity;  // rad/s, world
-    // The Move's own sensors, in its axes, as PSMoveServiceEx calibrates them: the accelerometer
-    // (gravity included) and the gyroscope (rad/s), and when PSMoveServiceEx read them, s.
-    Vec3 accel;
-    Vec3 gyro;
-    double sensor_time = 0.0;
     uint32_t buttons = 0;   // MoveButton bits
     float trigger = 0.0f;   // 0 to 1
 };
@@ -69,7 +64,6 @@ struct HandConfig {
     double found_seconds = 0.3;   // lost a while, seen this long again before it is believed
     double still_mm = 15.0;       // held still, shaking this small is left out
     double still_degrees = 0.6;
-    bool yaw_from_motion = true;  // undo the drift of the Move's rotation about the vertical (MoveYaw)
 };
 
 // The headset as SteamVR has it now.
