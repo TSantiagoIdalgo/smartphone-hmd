@@ -47,8 +47,10 @@ void MoveHand::Update(const MoveState& move, double now, const Headset& headset)
     HandPose pose;
     pose.orientation = orientation;
 
+    Vec3 across = move.position - headset.eyes;
+    across.y = 0.0;
     bool seen = move.tracking;
-    if (seen && config_.reach_m > 0.0 && headset.valid && Length(move.position - headset.eyes) > config_.reach_m) {
+    if (seen && config_.reach_m > 0.0 && headset.valid && Length(across) > config_.reach_m) {
         seen = false;
         ++stats_.out_of_reach;
     }
@@ -87,7 +89,10 @@ void MoveHand::Update(const MoveState& move, double now, const Headset& headset)
         pose.velocity = move.velocity;
         ++stats_.tracking;
         if (headset.valid) {
-            stats_.farthest = std::max(stats_.farthest, Length(move.position - headset.eyes));
+            const Vec3 off = move.position - headset.eyes;
+            const Vec3 offset{Dot(off, Cross(headset.forward, Vec3{0.0, 1.0, 0.0})), off.y, Dot(off, headset.forward)};
+            stats_.farthest = std::max(stats_.farthest, Length(across));
+            stats_.offset = stats_.offset + (offset - stats_.offset) * (1.0 / ++stats_.placed);
         }
     } else if (config_.rest_enabled && headset.valid && now - followed_at_ >= kRestAfterSeconds) {
         const Vec3 right = Cross(headset.forward, Vec3{0.0, 1.0, 0.0});

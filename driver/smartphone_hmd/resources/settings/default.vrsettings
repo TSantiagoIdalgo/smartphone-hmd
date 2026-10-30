@@ -44,7 +44,7 @@
 		"controller_rest_below_cm": 50.0,
 		"controller_rest_forward_cm": 30.0,
 		"controller_rest_side_cm": 20.0,
-		"controller_reach_cm": 110.0,
+		"controller_reach_cm": 120.0,
 		"controller_found_ms": 300.0,
 		"controller_still_mm": 15.0,
 		"controller_still_degrees": 0.6

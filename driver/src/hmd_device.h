@@ -86,6 +86,7 @@ private:
 
     HeadTracker tracker_;  // only touched by the tracking thread
     double prediction_seconds_ = 0.0;  // same
+    double last_recenter_ = -1.0;      // same
 
     Vec3 eyes_from_neck_{0.0, 0.075, -0.08};  // our neck model, head axes, m
     // 3DoF only (Ctrl+Alt+H): the eyes stay exactly still, for VDM's playspace calibration.

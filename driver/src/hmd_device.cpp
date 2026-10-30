@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 #include "chaperone.h"
@@ -27,6 +28,17 @@ constexpr double kMaxPredictionSeconds = 0.08;
 // Recentering towards the camera needs the head at least this far from it, horizontally.
 constexpr double kMinCameraDistance = 0.3;
 constexpr double kHeadStatsSeconds = 10.0;
+constexpr double kPhoneStatsSeconds = 10.0;
+// Without a moment lying still on a table this long into the phone's data, the log says how to
+// learn its gyroscope's bias.
+constexpr double kBiasHintSeconds = 60.0;
+constexpr double kDegreesPerRadian = 180.0 / 3.14159265358979;
+
+// How much a recenter turned the view, in degrees: `delta` is a turn about the vertical.
+double YawDegrees(Quat delta)
+{
+    return std::remainder(2.0 * std::atan2(delta.y, delta.w) * kDegreesPerRadian, 360.0);
+}
 
 // Ctrl+Alt+R recenters the view.
 bool RecenterHotkeyDown()
@@ -371,6 +383,9 @@ void HmdDevice::TrackingThread()
     bool was_receiving = false;
     uint32_t last_discoverer = 0;
     double logged_prediction = -1.0;
+    double next_phone_stats = MonoSeconds() + kPhoneStatsSeconds;
+    double first_sample = -1.0;
+    bool bias_learned = false, bias_hinted = false;
     uint8_t buffer[1500];
     std::vector<LightSample> light_samples;
 
@@ -383,6 +398,9 @@ void HmdDevice::TrackingThread()
             if (packet.type == protocol::PacketType::Sensors) {
                 if (tracker_.AddSample(packet)) {
                     last_sample = Clock::now();
+                    if (first_sample < 0.0) {
+                        first_sample = MonoSeconds();
+                    }
                     if (position_enabled_) {
                         head_position_.AddOrientation(MonoSeconds(), tracker_.Orientation());
                     }
@@ -435,6 +453,22 @@ void HmdDevice::TrackingThread()
             UpdateHeadPosition(&light_samples);
         }
 
+        if (MonoSeconds() >= next_phone_stats) {
+            next_phone_stats = MonoSeconds() + kPhoneStatsSeconds;
+            const HeadTracker::Stats stats = tracker_.TakeStats();
+            bias_learned = bias_learned || stats.table_seconds > 0;
+            if (stats.gaps > 0 || stats.table_seconds > 0) {
+                DriverLog("Phone: %d gaps of more than 0.1 s in its sensor data (%.1f s in all); %d s lying still on "
+                          "the table; gyroscope bias %.3f degrees a second",
+                          stats.gaps, stats.gap_seconds, stats.table_seconds, stats.bias * kDegreesPerRadian);
+            }
+            if (!bias_learned && !bias_hinted && first_sample >= 0.0 && MonoSeconds() - first_sample > kBiasHintSeconds) {
+                DriverLog("Phone: its gyroscope's bias was not learned, so the view will turn by itself: after pressing "
+                          "Iniciar, leave the phone flat and still on the table for 5 seconds before putting it in the "
+                          "visor");
+                bias_hinted = true;
+            }
+        }
         const bool receiving = Clock::now() - last_sample < std::chrono::seconds(1);
         if (receiving != was_receiving) {
             vr::VRDriverInput()->UpdateBooleanComponent(proximity_, receiving, 0.0);
@@ -494,15 +528,25 @@ void HmdDevice::UpdateHeadPosition(std::vector<LightSample>* samples)
                       head_last_light_.x, head_last_light_.y, head_last_light_.z, head_camera_.x, head_camera_.y,
                       head_camera_.z);
             // Eyes higher than anyone's: PSMoveServiceEx has the light farther from the PS Eye than it
-            // is, all along the camera's line of sight, which also puts the hands far in front.
+            // is, all along the camera's line of sight, which also puts the hands far in front. Once
+            // that distance is measured against a Move (Ctrl+Alt+L), what is left is the PS Eye's own
+            // pose in PSMoveServiceEx: tilted a few degrees, everything comes out higher or lower.
             const bool too_high = stats.implausible > stats.accepted || stats.eye_height_m > 2.1;
             if (too_high && head_camera_valid_ && stats.eye_height_m > head_camera_.y + 0.1) {
-                DriverLog("Head light: the eyes come out %.2f m high: PSMoveServiceEx puts the light too far from the "
-                          "PS Eye. Check the ball's size in its virtual HMD settings, or try head_light_distance_scale "
-                          "%.2f (for eyes at head_height_meters, %.2f m)",
-                          stats.eye_height_m,
-                          light_distance_scale_ * (head_height_ - head_camera_.y) / (stats.eye_height_m - head_camera_.y),
-                          head_height_);
+                if (light_distance_scale_ != 1.0) {
+                    DriverLog("Head light: the eyes come out %.2f m high, with the light's distance already measured "
+                              "against a Move: PSMoveServiceEx most likely has the PS Eye tilted from where it is; "
+                              "compute its pose again in PSMoveServiceEx, or check head_light_above_eyes_cm",
+                              stats.eye_height_m);
+                } else {
+                    DriverLog("Head light: the eyes come out %.2f m high: PSMoveServiceEx puts the light too far from "
+                              "the PS Eye. Measure it against a Move with Ctrl+Alt+L, or try head_light_distance_scale "
+                              "%.2f (for eyes at head_height_meters, %.2f m)",
+                              stats.eye_height_m,
+                              light_distance_scale_ * (head_height_ - head_camera_.y) /
+                                  (stats.eye_height_m - head_camera_.y),
+                              head_height_);
+                }
             }
         }
     }
@@ -603,9 +647,14 @@ void HmdDevice::MeasureLightDistance(double now, const std::vector<LightSample>&
 // when recentering. Without it, forward is -z, as in Part 1.
 void HmdDevice::RecenterHead(const char* source)
 {
+    // How far the view had turned by itself since the last recenter, if the user faced the same way.
+    const double now = MonoSeconds();
+    const double since = last_recenter_ >= 0.0 ? now - last_recenter_ : 0.0;
+    last_recenter_ = now;
+    char after[96] = "";
     if (position_enabled_ && head_camera_valid_ && head_cameras_ == 1) {
-        const double now = MonoSeconds();
         bool turned = false;
+        double degrees = 0.0;
         // The eyes move a little with the yaw (the light is not between them), so repeat.
         for (int i = 0; i < 3; ++i) {
             const Vec3 eyes = head_position_.Output(now, tracker_.Orientation(), Vec3{}).position;
@@ -616,11 +665,17 @@ void HmdDevice::RecenterHead(const char* source)
                 break;
             }
             const Quat before = tracker_.Orientation();
-            head_position_.OnYawChange(tracker_.RecenterTowards(to_camera * (1.0 / distance)), before);
+            const Quat delta = tracker_.RecenterTowards(to_camera * (1.0 / distance));
+            head_position_.OnYawChange(delta, before);
+            degrees += YawDegrees(delta);
             turned = true;
         }
         if (turned) {
-            DriverLog("Recentered from %s, facing the camera", source);
+            if (since > 0.0) {
+                std::snprintf(after, sizeof(after), ", %.0f s after the last", since);
+            }
+            DriverLog("Recentered from %s, facing the camera: the view turned %.0f degrees%s", source,
+                      std::remainder(degrees, 360.0), after);
             return;
         }
     }
@@ -629,7 +684,10 @@ void HmdDevice::RecenterHead(const char* source)
     if (position_enabled_) {
         head_position_.OnYawChange(delta, before);
     }
-    DriverLog("Recentered from %s", source);
+    if (since > 0.0) {
+        std::snprintf(after, sizeof(after), ", %.0f s after the last", since);
+    }
+    DriverLog("Recentered from %s: the view turned %.0f degrees%s", source, YawDegrees(delta), after);
 }
 
 void HmdDevice::ToggleHeadHold()

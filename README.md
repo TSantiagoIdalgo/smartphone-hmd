@@ -68,7 +68,9 @@ En `default.vrsettings`:
    escribe la IP que da `ipconfig` en la PC.
 5. Pulsa **Iniciar**. En unos segundos se ve SteamVR en el móvil, y al girarlo la vista gira igual.
    Abre SteamVR Home o un juego: sin ninguno abierto, la imagen puede verse casi negra.
-6. Pon el móvil en el visor en horizontal, con la pantalla hacia los ojos y la parte de arriba del
+6. Deja el móvil **plano y quieto sobre la mesa 5 segundos**. Así el driver mide cuánto se desvía su
+   giroscopio, y la vista no gira sola mientras juegas. Repítelo cada vez que vuelvas a empezar.
+7. Pon el móvil en el visor en horizontal, con la pantalla hacia los ojos y la parte de arriba del
    teléfono a la izquierda.
 
 **Atrás** en el móvil detiene el envío. Si la conexión se corta, la app vuelve a buscar la PC sola.
@@ -92,8 +94,8 @@ teléfono. Ajusta con el móvil fuera del visor, pulsa **Listo** y compruébalo 
 **Restablecer** vuelve a la imagen a pantalla completa.
 
 Para recentrar la vista, pulsa un botón de volumen del móvil o **Ctrl+Alt+R** en la PC. Si la vista
-se desvía sola con el tiempo, pon `"magnetometer_gain": 0.1` en `default.vrsettings`. Si entonces la
-vista se mece sola, vuelve a `0`.
+se desvía sola aunque dejaste el móvil quieto en la mesa al empezar, prueba
+`"magnetometer_gain": 0.1` en `default.vrsettings`. Si entonces la vista se mece sola, vuelve a `0`.
 
 ## 6. Posición de la cabeza con la PS Eye (opcional)
 
@@ -138,7 +140,7 @@ con la PS Eye y sus sensores; el driver solo decide qué mostrar:
   sigue hacia donde miras. Queda 50 cm bajo los ojos, 30 cm adelante y 20 cm hacia su lado.
 - Para volver a la bola, la PS Eye tiene que verla seguido 0,3 s. Así, si estás de espaldas y la
   cámara alcanza a ver un poco de la luz, el mando no salta. Tampoco va nunca a una bola a más de
-  1,1 m del visor, porque ningún brazo llega tan lejos.
+  1,2 m del visor medidos sobre el piso, porque ningún brazo llega tan lejos.
 - Con la mano quieta, el mando queda quieto. La PS Eye y PSMoveServiceEx hacen temblar la bola unos
   mm y el giro una fracción de grado, y el driver no pasa ese temblor mientras el giroscopio del
   Move dice que no te mueves. Al mover la mano, el mando la sigue sin retraso.
@@ -178,7 +180,7 @@ Ajustes en `default.vrsettings`, si hacen falta:
 | `controller_rest_below_cm`, `controller_rest_forward_cm`, `controller_rest_side_cm` | 50, 30, 20 | Dónde queda un mando perdido frente al visor |
 | `controller_rest_enabled` | true | `false`: el mando perdido se queda donde se perdió |
 | `controller_found_ms` | 300 | Cuánto tiene que ver la PS Eye la bola para volver a ella |
-| `controller_reach_cm` | 110 | A más distancia del visor, la bola no se cree. `0` lo apaga |
+| `controller_reach_cm` | 120 | A más distancia del visor, medida sobre el piso, la bola no se cree. `0` lo apaga |
 | `controller_still_mm`, `controller_still_degrees` | 15, 0.6 | Cuánto temblor se tapa con la mano quieta. Súbelos si aún tiembla |
 | `controller_depth_noise_cm` | 4 | Cuánto se suaviza la distancia de la bola a la PS Eye. Más alto, más suave y más lento |
 
@@ -189,12 +191,19 @@ Busca las líneas con `smartphone_hmd` en `Steam\logs\vrserver.txt`:
 - `Video:`, cada 5 segundos: cuántas imágenes se capturan, codifican y envían. Mientras no llega
   video, el móvil muestra cuántos paquetes recibe.
 - `Phone latency`: cuánto tarda la imagen en llegar al móvil y cuánto se anticipa la cabeza.
+- `Phone:`, cada 10 segundos: si se perdieron datos del móvil por el camino, cuánto estuvo quieto
+  en la mesa y cuánto se desvía su giroscopio. Si dice `its gyroscope's bias was not learned`, deja
+  el móvil plano y quieto 5 segundos (paso 4.6).
+- `Recentered`: cuántos grados se había desviado la vista desde el último recentrado.
 - `Head light:`, cada 10 segundos: si la PS Eye ve la luz y a qué altura quedan los ojos. Si dice
-  `the eyes come out … m high`, la distancia de la luz está mal: repite el paso 6.5.
+  `the eyes come out … m high`, la distancia de la luz está mal: repite el paso 6.5. Si ya lo
+  hiciste (`already measured`), PSMoveServiceEx tiene la PS Eye inclinada respecto de como está:
+  vuelve a calibrar su posición en PSMoveServiceEx, o revisa la medida de `head_light_above_eyes_cm`.
 - `Hands:`, cada 10 segundos, por cada mano: cuánto tiempo estuvo en la bola, frente al visor o
   quieto donde se perdió. También dice cuántas veces no creyó a la bola, por un salto, por verla
-  solo un momento o por estar demasiado lejos, y cuánto tembló con la mano quieta. Si la bola
-  queda casi siempre `out of reach`, la distancia de la luz del visor está mal: repite el paso 6.5.
+  solo un momento o por estar demasiado lejos, dónde quedó en promedio respecto de los ojos, y
+  cuánto tembló con la mano quieta. Si la bola queda casi siempre `out of reach`, la distancia de
+  la luz del visor está mal: repite el paso 6.5.
 
 Si la imagen se corta o llega tarde, usa el cable USB o Wi-Fi de 5 GHz, o baja
 `video_bitrate_mbps`.

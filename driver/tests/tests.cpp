@@ -246,11 +246,42 @@ void TestTiltFollowsGravity()
 
 void TestGyroBiasIsLearned()
 {
-    // A constant 0.01 rad/s offset would drift 0.2 rad in 20 s if it were not removed.
+    // A constant 0.01 rad/s offset would drift 0.6 rad in a minute. Lying flat on the table for 5 s
+    // (gravity across the screen) it is learned; then, upright in the visor, the view holds still.
     Feeder f;
-    f.Run(20.0, 0.01f, 0, 0, kG, 0, 0);
+    f.Run(5.0, 0.01f, 0, 0, 0, 0, kG);
+    f.Run(5.0, 0.01f, 0, 0, kG, 0, 0);  // the tilt settles
+    const Vec3 before = f.Forward();
+    f.Run(60.0, 0.01f, 0, 0, kG, 0, 0);
+    const Vec3 after = f.Forward();
+    CHECK(std::fabs(std::atan2(-after.x, -after.z) - std::atan2(-before.x, -before.z)) < 0.03);
+    CHECK(f.tracker.TakeStats().table_seconds >= 4);
+}
+
+void TestSlowTurnIsNotBias()
+{
+    // Worn, the head turns slowly, 2 degrees a second for 20 s: all of it shows, none of it is
+    // taken for the gyroscope's bias.
+    Feeder f;
+    f.Run(20.0, 0.035f, 0, 0, kG, 0, 0);
     const Vec3 fwd = f.Forward();
-    CHECK(std::fabs(std::atan2(-fwd.x, -fwd.z)) < 0.05);
+    CHECK_NEAR(std::atan2(-fwd.x, -fwd.z), 0.7, 0.01);
+    // And still afterwards, it stays where it turned to.
+    f.Run(10.0, 0.0f, 0, 0, kG, 0, 0);
+    const Vec3 still = f.Forward();
+    CHECK_NEAR(std::atan2(-still.x, -still.z), 0.7, 0.01);
+}
+
+void TestGapWhileTurningIsJoined()
+{
+    // Turning at 1 rad/s, 0.3 s of samples lost on the way: the turn is still all there.
+    Feeder f;
+    f.Run(0.5, 1.0f, 0, 0, kG, 0, 0);
+    f.ts += 150 * kStepNs;
+    f.Run(0.5, 1.0f, 0, 0, kG, 0, 0);
+    const Vec3 fwd = f.Forward();
+    CHECK_NEAR(std::atan2(-fwd.x, -fwd.z), 1.3, 0.02);
+    CHECK(f.tracker.TakeStats().gaps == 1);
 }
 
 void TestRejectsBadSamples()
@@ -1174,10 +1205,14 @@ void TestMoveHandRestsInFrontOfTheHead()
     run.headset.forward = Vec3{-1.0, 0.0, 0.0};
     pose = run.Run(250, [](int) { return false; }, [&](int) { return bulb; });
     CHECK(pose.at_rest && Length(pose.position - Vec3{-0.3, 1.1, -0.2}) < 0.02);
+    run.hand.TakeStats();
+    run.headset.forward = Vec3{0.0, 0.0, -1.0};
     pose = run.Run(250, [](int) { return true; }, [&](int) { return bulb; });
     CHECK(pose.tracking && Length(pose.position - bulb) < 0.02);
+    // Where it was, from the eyes looking ahead: 30 cm to the right, 40 cm in front, 50 cm below.
     const MoveHand::Stats stats = run.hand.TakeStats();
-    CHECK(stats.at_rest > 400 && stats.held > 60);
+    CHECK(Length(stats.offset - Vec3{0.3, -0.5, 0.4}) < 1e-9);
+    CHECK_NEAR(stats.farthest, 0.5, 1e-9);
 }
 
 void TestMoveHandIgnoresGlimpses()
@@ -1210,9 +1245,13 @@ void TestMoveHandOutOfReach()
 {
     // The PS Eye follows something 2 m from the headset: no arm reaches there.
     HandRun run;
-    const HandPose pose = run.Run(500, [](int) { return true; }, [](int) { return Vec3{0.0, 1.2, -2.0}; });
+    HandPose pose = run.Run(500, [](int) { return true; }, [](int) { return Vec3{0.0, 1.2, -2.0}; });
     CHECK(pose.at_rest && Length(pose.position - Vec3{0.2, 1.1, -0.3}) < 0.02);
     CHECK(run.hand.TakeStats().out_of_reach == 500);
+    // 1.3 m below the eyes, though, it is the hand: the headset may be put too high.
+    pose = run.Run(500, [](int) { return true; }, [](int) { return Vec3{0.2, 0.3, -0.3}; });
+    CHECK(pose.tracking);
+    CHECK(run.hand.TakeStats().out_of_reach == 0);
 }
 
 void TestMoveHandHoldsWithoutRest()
@@ -1338,6 +1377,8 @@ int main()
     TestMagnetometerIgnoresBentField();
     TestTiltFollowsGravity();
     TestGyroBiasIsLearned();
+    TestSlowTurnIsNotBias();
+    TestGapWhileTurningIsJoined();
     TestRejectsBadSamples();
     TestPacketize();
     TestStartsWithSps();

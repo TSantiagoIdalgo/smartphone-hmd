@@ -386,13 +386,14 @@ void MoveControllers::LogReport()
             std::snprintf(part, sizeof(part),
                           "%s %s Move %d, %.0f%% of the time on its bulb, %.0f%% in front of the headset, %.0f%% held "
                           "where it was (%d jumps not believed, %d glimpses of it left out, %d bulb positions out of "
-                          "reach, %d bulb readings left out, %d resets); the bulb up to %.0f cm from the eyes; %s; "
-                          "the PS Eye's depth of it shakes %.0f mm and sideways %.0f, agility %.2f",
+                          "reach, %d bulb readings left out, %d resets); on its bulb, on average %.0f cm to the right "
+                          "of the eyes, %.0f cm in front and %.0f cm below, and across the floor up to %.0f cm from "
+                          "them; %s; the PS Eye's depth of it shakes %.0f mm and sideways %.0f, agility %.2f",
                           h > 0 ? ";" : "", kHandNames[h], ids_[h], 100.0 * stats.tracking / total,
                           100.0 * stats.at_rest / total, 100.0 * stats.held / total, stats.jumps, stats.glimpses,
-                          stats.out_of_reach, bulb.rejected + bulb.implausible, bulb.resets, stats.farthest * 100.0,
-                          still, bulb.depth_innovation_rms_m * 1000.0, bulb.lateral_innovation_rms_m * 1000.0,
-                          bulb.agility);
+                          stats.out_of_reach, bulb.rejected + bulb.implausible, bulb.resets, stats.offset.x * 100.0,
+                          stats.offset.z * 100.0, -stats.offset.y * 100.0, stats.farthest * 100.0, still,
+                          bulb.depth_innovation_rms_m * 1000.0, bulb.lateral_innovation_rms_m * 1000.0, bulb.agility);
         }
         text += part;
         if (stats.out_of_reach > stats.tracking && stats.out_of_reach > 100) {

@@ -15,7 +15,8 @@
 //   any hand is not believed until the bulb stays there a moment.
 // - Turned away from the PS Eye, it glimpses a sliver of a bulb now and then: a lost Move goes
 //   back to its bulb only once the PS Eye has seen it for a moment, and never to one farther from
-//   the headset than an arm reaches.
+//   the headset, across the floor, than an arm reaches. Only across the floor: how high the headset
+//   is depends on how PSMoveServiceEx has the PS Eye tilted, and on where the light sits on it.
 //
 // Held still, the PS Eye's depth and PSMoveServiceEx's rotation still shake by some mm and a
 // fraction of a degree, which a pointer at a menu makes plain. While the Move's gyro says the hand
@@ -59,7 +60,7 @@ struct HandConfig {
     double rest_below_m = 0.5;    // under the eyes
     double rest_forward_m = 0.3;  // in front of them
     double rest_side_m = 0.2;     // each hand to its side
-    double reach_m = 1.1;         // a bulb farther from the eyes is not the hand's; 0: any
+    double reach_m = 1.2;         // a bulb farther from the eyes, across the floor, is not the hand's; 0: any
     double found_seconds = 0.3;   // lost a while, seen this long again before it is believed
     double still_mm = 15.0;       // held still, shaking this small is left out
     double still_degrees = 0.6;
@@ -91,7 +92,9 @@ public:
         int jumps = 0;        // bulb positions not believed: farther than a hand moves
         int glimpses = 0;     // the bulb seen too briefly, after it was lost, to be believed
         int out_of_reach = 0;  // bulb positions farther from the headset than an arm reaches
-        double farthest = 0.0;  // the farthest believed bulb from the eyes, m
+        double farthest = 0.0;  // the farthest believed bulb from the eyes across the floor, m
+        int placed = 0;         // updates on the bulb with the headset known, and on average in them
+        Vec3 offset;            // the bulb from the eyes: x to their right, y up, z forward, m
         int still = 0;  // updates with the hand held still; meanwhile:
         double still_seconds = 0.0;
         double shake_m = 0.0;  // the most the bulb went from the controller

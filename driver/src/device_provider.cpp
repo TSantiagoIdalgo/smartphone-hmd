@@ -56,7 +56,7 @@ vr::EVRInitError DeviceProvider::Init(vr::IVRDriverContext* driver_context)
         hand.rest_forward_m = GetDoubleSetting("controller_rest_forward_cm", 30.0) / 100.0;
         hand.rest_side_m = GetDoubleSetting("controller_rest_side_cm", 20.0) / 100.0;
         // Without the head light, the headset's position says nothing about where the hands can be.
-        hand.reach_m = head ? std::max(GetDoubleSetting("controller_reach_cm", 110.0), 0.0) / 100.0 : 0.0;
+        hand.reach_m = head ? std::max(GetDoubleSetting("controller_reach_cm", 120.0), 0.0) / 100.0 : 0.0;
         hand.found_seconds = std::clamp(GetDoubleSetting("controller_found_ms", 300.0), 0.0, 2000.0) / 1000.0;
         hand.still_mm = std::clamp(GetDoubleSetting("controller_still_mm", 15.0), 0.0, 100.0);
         hand.still_degrees = std::clamp(GetDoubleSetting("controller_still_degrees", 0.6), 0.0, 10.0);
@@ -71,7 +71,8 @@ vr::EVRInitError DeviceProvider::Init(vr::IVRDriverContext* driver_context)
                       hand.found_seconds * 1000.0);
         }
         if (hand.reach_m > 0.0) {
-            DriverLog("Hands: a bulb seen more than %.0f cm from the headset is not the hand's (controller_reach_cm)",
+            DriverLog("Hands: a bulb seen more than %.0f cm from the headset, across the floor, is not the hand's "
+                      "(controller_reach_cm)",
                       hand.reach_m * 100.0);
         }
         DriverLog("Hands: held still, a hand stays put through %.0f mm and %.1f degrees of shaking "
