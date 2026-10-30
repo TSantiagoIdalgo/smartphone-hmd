@@ -26,10 +26,6 @@ add_library(tracking STATIC
   src/vsync_clock.cpp
   src/chaperone.cpp
   src/head_position.cpp
-  src/camera_model.cpp
-  src/body_filter.cpp
-  src/body_protocol.cpp
-  src/body_session.cpp
   src/move_hand.cpp
 )
 target_include_directories(tracking PUBLIC src)
@@ -51,8 +47,6 @@ add_library(driver_smartphone_hmd SHARED
   src/hmd_device.cpp
   src/psms_client.cpp
   src/udp_socket.cpp
-  src/body_tracking.cpp
-  src/tracker_device.cpp
   src/move_controllers.cpp
 )
 target_include_directories(driver_smartphone_hmd SYSTEM PRIVATE third_party/openvr third_party/psmoveclient)
@@ -90,6 +84,3 @@ enable_testing()
 add_executable(driver_tests tests/tests.cpp)
 target_link_libraries(driver_tests PRIVATE tracking)
 add_test(NAME driver_tests COMMAND driver_tests)
-add_executable(body_tests tests/body_tests.cpp)
-target_link_libraries(body_tests PRIVATE tracking)
-add_test(NAME body_tests COMMAND body_tests)

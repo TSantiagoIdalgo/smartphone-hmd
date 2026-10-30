@@ -2,12 +2,10 @@
 
 #include <algorithm>
 
-#include "body_tracking.h"
 #include "driver_log.h"
 #include "move_controllers.h"
 #include "psms_client.h"
 #include "settings.h"
-#include "tracker_device.h"
 
 DeviceProvider::DeviceProvider() = default;
 
@@ -18,92 +16,67 @@ vr::EVRInitError DeviceProvider::Init(vr::IVRDriverContext* driver_context)
     VR_INIT_SERVER_DRIVER_CONTEXT(driver_context);
 
     const bool head = GetBoolSetting("head_position_enabled", false);
-    const bool body = GetBoolSetting("body_tracking_enabled", false);
     const bool controllers = GetBoolSetting("controllers_enabled", false);
     PsmsConfig psms;
-    if (head || body || controllers) {
+    if (head || controllers) {
         psms.dll_path = GetStringSetting("psms_client_dll");
         psms.host = GetStringSetting("psms_host", "127.0.0.1");
         psms.port = GetStringSetting("psms_port", "9512");
         psms.follow_head = head;
         psms.hmd_id = GetIntSetting("psms_hmd_id", -1);
         psms.controller_id = GetIntSetting("psms_controller_id", -1);
-        psms.stream_controllers = body || controllers;
+        psms.stream_controllers = controllers;
         psms_ = std::make_unique<PsmsClient>();
     }
 
-    if (body) {
-        head_sightings_ = std::make_unique<HeadSightingQueue>();
-    }
-    hmd_ = std::make_unique<HmdDevice>(head ? psms_.get() : nullptr, head_sightings_.get());
+    hmd_ = std::make_unique<HmdDevice>(head ? psms_.get() : nullptr);
     if (!vr::VRServerDriverHost()->TrackedDeviceAdded(
             hmd_->SerialNumber().c_str(), vr::TrackedDeviceClass_HMD, hmd_.get())) {
         DriverLog("Failed to add the HMD device");
         return vr::VRInitError_Driver_Unknown;
     }
 
-    if (body) {
-        struct Tracker {
-            const char* serial;
-            const char* role;
-            const char* type;
-        };
-        static const Tracker kTrackers[] = {
-            {"SMARTPHONE-HMD-WAIST", "TrackerRole_Waist", "vive_tracker_waist"},
-            {"SMARTPHONE-HMD-LEFT-FOOT", "TrackerRole_LeftFoot", "vive_tracker_left_foot"},
-            {"SMARTPHONE-HMD-RIGHT-FOOT", "TrackerRole_RightFoot", "vive_tracker_right_foot"},
-        };
-        for (const Tracker& t : kTrackers) {
-            trackers_.push_back(std::make_unique<TrackerDevice>(t.serial, t.role, t.type));
-            if (!vr::VRServerDriverHost()->TrackedDeviceAdded(t.serial, vr::TrackedDeviceClass_GenericTracker,
-                                                              trackers_.back().get())) {
-                DriverLog("Body tracking: could not add the %s tracker", t.serial);
-            }
-        }
-        if (controllers) {
-            wrists_ = std::make_unique<SharedWrists>();
-            bulb_sightings_ = std::make_unique<HeadSightingQueue>();
-        }
-        body_ = std::make_unique<BodyTracking>(psms_.get(), trackers_[0].get(), trackers_[1].get(), trackers_[2].get(),
-                                               head_sightings_.get(), wrists_.get(), bulb_sightings_.get());
-        body_->Start();
-        DriverLog("Body tracking: on, with hip and foot trackers");
-        if (!head) {
-            DriverLog("Body tracking: head_position_enabled is off, so the head stays put while the hips and feet "
-                      "move: turn it on for the body to line up with the head");
-        }
-    }
     if (controllers) {
         // A Move's bulb through the head's light filter: no offsets, a hand's speed and heights.
         HeadPositionConfig bulb;
-        bulb.eyes_from_light = bulb.eyes_from_neck = bulb.ears_from_neck = Vec3{};
+        bulb.eyes_from_light = bulb.eyes_from_neck = Vec3{};
         bulb.latency_seconds = std::clamp(GetDoubleSetting("head_light_latency_ms", 40.0), 0.0, 200.0) / 1000.0;
         bulb.lateral_noise_m = std::max(GetDoubleSetting("controller_lateral_noise_mm", 2.0), 0.1) / 1000.0;
         bulb.depth_noise_m = std::max(GetDoubleSetting("controller_depth_noise_cm", 4.0), 0.01) / 100.0;
-        // The phones only follow it while the PS Eye does not: the PS Eye's depth stays.
-        bulb.depth_noise_with_sightings_m = bulb.depth_noise_m;
-        bulb.sightings_only_without_light = true;
         bulb.agility = std::max(GetDoubleSetting("controller_agility", 5.0), 0.01);
         bulb.prediction_gain = std::clamp(GetDoubleSetting("controller_prediction", 1.0), 0.0, 1.0);
         bulb.max_speed = 10.0;
         bulb.min_eye_height = -1.0;
         bulb.max_eye_height = 3.5;
-        HandRestConfig rest;
-        rest.enabled = GetBoolSetting("controller_rest_enabled", true);
-        rest.below_m = GetDoubleSetting("controller_rest_below_cm", 50.0) / 100.0;
-        rest.forward_m = GetDoubleSetting("controller_rest_forward_cm", 30.0) / 100.0;
-        rest.side_m = GetDoubleSetting("controller_rest_side_cm", 20.0) / 100.0;
-        controllers_ = std::make_unique<MoveControllers>(psms_.get(), wrists_.get(), bulb_sightings_.get(),
-                                                         GetDoubleSetting("controller_pitch_degrees", 0.0), bulb, rest);
+        bulb.distrust_jumps = true;
+        HandConfig hand;
+        hand.pitch_degrees = GetDoubleSetting("controller_pitch_degrees", 0.0);
+        hand.rest_enabled = GetBoolSetting("controller_rest_enabled", true);
+        hand.rest_below_m = GetDoubleSetting("controller_rest_below_cm", 50.0) / 100.0;
+        hand.rest_forward_m = GetDoubleSetting("controller_rest_forward_cm", 30.0) / 100.0;
+        hand.rest_side_m = GetDoubleSetting("controller_rest_side_cm", 20.0) / 100.0;
+        // Without the head light, the headset's position says nothing about where the hands can be.
+        hand.reach_m = head ? std::max(GetDoubleSetting("controller_reach_cm", 110.0), 0.0) / 100.0 : 0.0;
+        hand.found_seconds = std::clamp(GetDoubleSetting("controller_found_ms", 300.0), 0.0, 2000.0) / 1000.0;
+        hand.still_mm = std::clamp(GetDoubleSetting("controller_still_mm", 15.0), 0.0, 100.0);
+        hand.still_degrees = std::clamp(GetDoubleSetting("controller_still_degrees", 0.6), 0.0, 10.0);
+        controllers_ = std::make_unique<MoveControllers>(psms_.get(), bulb, hand);
         controllers_->Start();
-        DriverLog(body ? "Hands: the PS Moves are controllers here, their bulbs followed by the phones while the PS Eye "
-                         "does not see them, and by the wrists when neither does; turn off VDM's controllers in SteamVR"
-                       : "Hands: the PS Moves are controllers here; turn off VDM's controllers in SteamVR");
-        if (rest.enabled) {
-            DriverLog("Hands: a Move lost a moment goes %.0f cm under the eyes, %.0f cm in front and %.0f cm to its side, "
-                      "turning with the headset (controller_rest_*)",
-                      rest.below_m * 100.0, rest.forward_m * 100.0, rest.side_m * 100.0);
+        DriverLog("Hands: the PS Moves are controllers here; turn off VDM's controllers in SteamVR");
+        if (hand.rest_enabled) {
+            DriverLog("Hands: a Move lost a moment goes %.0f cm under the eyes, %.0f cm in front and %.0f cm to its "
+                      "side, turning with the headset (controller_rest_*); found again, back to its bulb once the PS "
+                      "Eye has seen it for %.0f ms (controller_found_ms)",
+                      hand.rest_below_m * 100.0, hand.rest_forward_m * 100.0, hand.rest_side_m * 100.0,
+                      hand.found_seconds * 1000.0);
         }
+        if (hand.reach_m > 0.0) {
+            DriverLog("Hands: a bulb seen more than %.0f cm from the headset is not the hand's (controller_reach_cm)",
+                      hand.reach_m * 100.0);
+        }
+        DriverLog("Hands: held still, a hand stays put through %.0f mm and %.1f degrees of shaking "
+                  "(controller_still_mm, controller_still_degrees)",
+                  hand.still_mm, hand.still_degrees);
     }
     if (psms_) {
         psms_->Start(psms);
@@ -115,13 +88,8 @@ void DeviceProvider::Cleanup()
 {
     // The threads go first, then what they use.
     controllers_ = nullptr;
-    body_ = nullptr;
     hmd_ = nullptr;
     psms_ = nullptr;
-    head_sightings_ = nullptr;
-    wrists_ = nullptr;
-    bulb_sightings_ = nullptr;
-    trackers_.clear();
 }
 
 const char* const* DeviceProvider::GetInterfaceVersions()

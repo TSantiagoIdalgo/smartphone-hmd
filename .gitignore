@@ -13,6 +13,5 @@ out/
 .vs/
 CMakeSettings.json
 
-# Body tracker: the pose models it downloads, and Python's cache
-tools/models/
+# Python's cache
 __pycache__/

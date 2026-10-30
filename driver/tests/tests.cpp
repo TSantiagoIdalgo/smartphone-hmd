@@ -13,9 +13,9 @@
 
 #include "chaperone.h"
 #include "color_convert.h"
-#include "camera_model.h"
 #include "head_position.h"
 #include "head_tracker.h"
+#include "move_hand.h"
 #include "protocol.h"
 #include "video_protocol.h"
 #include "vsync_clock.h"
@@ -527,10 +527,6 @@ HeadPositionConfig TestHeadConfig()
     HeadPositionConfig config;
     config.eyes_from_light = Vec3{0.0, -0.10, 0.03};  // light 10 cm above, 3 cm behind the eyes
     config.eyes_from_neck = Vec3{0.0, 0.075, -0.08};
-    // As the driver has it with the body cameras on.
-    config.depth_noise_with_sightings_m = 0.3;
-    config.learn_light_scale = true;
-    config.sighting_pairs = true;
     return config;
 }
 
@@ -543,13 +539,6 @@ struct HeadSimulation {
     // treats a light that repeats exactly as lost.
     double depth_noise = 0.0001;
     double lateral_noise = 0.0001;
-    // A slow wander along the ray too, as PSMoveServiceEx's own smoothing leaves: its size and
-    // how long it takes to change, s.
-    double depth_wander = 0.0;
-    double depth_wander_seconds = 0.5;
-    double wander = 0.0;
-    // The light's distance from the camera times this: PSMoveServiceEx's guess from its size off.
-    double light_scale = 1.0;
     bool interpolated = false;   // PSMoveServiceEx's 200 Hz stream between frames
     double time = 100.0;
     double last_frame = 100.0;
@@ -558,33 +547,6 @@ struct HeadSimulation {
     double frame_arrival = 0.0;
     bool have_frame = false;
     bool frame_seen = false;
-    // Two body cameras on either side, 30 frames a second each, arriving body_age late.
-    bool body = false;
-    std::vector<CameraModel> body_cameras{BodyCamera({-1.6, 1.1, -2.4}), BodyCamera({1.7, 1.0, -2.2})};
-    double body_age = 0.15;
-    double body_pixel_noise = 3.0;
-    Vec3 body_moved;  // how far the body cameras went since they were calibrated
-    std::vector<Vec3> body_ears_off{Vec3{}, Vec3{}};  // where each camera's pose model puts the ears wrong
-    Vec3 ears_from_neck{0.0, 0.06, 0.01};  // where the pose model really puts them
-    std::function<bool(double)> body_visible;
-    std::vector<double> last_body_frame{100.0, 100.0 + 1.0 / 60.0};
-    std::deque<HeadSighting> body_in_flight;
-
-    static CameraModel BodyCamera(Vec3 position)
-    {
-        const Vec3 target{0.1, 1.5, 0.2};
-        const Vec3 forward = (target - position) * (1.0 / Length(target - position));
-        Vec3 right = Cross(forward, Vec3{0, 1, 0});
-        right = right * (1.0 / Length(right));
-        CameraModel camera;
-        camera.width = 480;
-        camera.height = 640;
-        camera.focal = 520.0;
-        camera.rotation = Rows(right, Cross(forward, right), forward);
-        camera.position = position;
-        return camera;
-    }
-
     // Box-Muller on the raw generator, so every compiler draws the same numbers.
     double Gaussian()
     {
@@ -603,12 +565,8 @@ struct HeadSimulation {
         Vec3 side = Cross(along, Vec3{0, 1, 0});
         side = side * (1.0 / Length(side));
         const Vec3 up = Cross(side, along);
-        if (depth_wander > 0.0) {
-            const double a = std::exp(-1.0 / 60.0 / depth_wander_seconds);
-            wander = a * wander + std::sqrt(1.0 - a * a) * depth_wander * Gaussian();
-        }
-        return camera + (light - camera) * light_scale + along * (depth_noise * Gaussian() + wander) +
-               side * (lateral_noise * Gaussian()) + up * (lateral_noise * Gaussian());
+        return light + along * (depth_noise * Gaussian()) + side * (lateral_noise * Gaussian()) +
+               up * (lateral_noise * Gaussian());
     }
 
     // Runs `seconds` of `motion(t)`, t from 0 at the start of this run; `visible(t)` false hides the
@@ -649,35 +607,6 @@ struct HeadSimulation {
                 const double f = std::min((time - frame_arrival) * 60.0, 1.0);
                 estimator.AddLight(time, previous_frame_light + (frame_light - previous_frame_light) * f, true,
                                    now.angular_velocity);
-            }
-            for (size_t c = 0; body && c < body_cameras.size(); ++c) {
-                if (last_body_frame[c] < time - 0.1) {
-                    last_body_frame[c] = time;
-                }
-                if (time < last_body_frame[c] + 1.0 / 30.0) {
-                    continue;
-                }
-                last_body_frame[c] += 1.0 / 30.0;
-                const double frame_t = last_body_frame[c] - start;
-                const HeadMotion then = motion(frame_t);
-                HeadSighting sighting;
-                sighting.camera = static_cast<uint32_t>(c);
-                sighting.time = last_body_frame[c];
-                sighting.model = body_cameras[c];
-                sighting.noise = body_pixel_noise;
-                CameraModel moved = body_cameras[c];
-                moved.position = moved.position + body_moved;
-                if ((!body_visible || body_visible(frame_t)) &&
-                    moved.Project(then.neck + Rotate(then.rotation, ears_from_neck) + body_ears_off[c], &sighting.u,
-                                  &sighting.v)) {
-                    sighting.u += body_pixel_noise * Gaussian();
-                    sighting.v += body_pixel_noise * Gaussian();
-                    body_in_flight.push_back(sighting);
-                }
-            }
-            while (!body_in_flight.empty() && body_in_flight.front().time + body_age <= time) {
-                estimator.AddSighting(time, body_in_flight.front());
-                body_in_flight.pop_front();
             }
             estimator.Tick(time, true);
             if (each_step) {
@@ -1039,300 +968,14 @@ void TestHeadIgnoresNonFinite()
     CHECK(Length(eyes - sim.Eyes(StandStill(0))) < 0.005);
 }
 
-void TestHeadLateSightingReplayed()
-{
-    // A view that arrives after newer light samples ends up as if it had come in its place.
-    HeadSimulation sim;
-    HeadPositionConfig config = TestHeadConfig();
-    config.depth_noise_with_sightings_m = config.depth_noise_m;
-    config.sighting_pairs = false;  // one view alone counts
-    const CameraModel camera = sim.body_cameras[0];
-    HeadSighting sighting;
-    sighting.time = 1.0 + 20 / 60.0 - 0.041;
-    sighting.model = camera;
-    camera.Project(Vec3{0.1, 1.61, 0.21}, &sighting.u, &sighting.v);
-    sighting.u += 4.0;
-    HeadPositionEstimator in_order(config), late(config);
-    for (HeadPositionEstimator* e : {&in_order, &late}) {
-        e->SetCamera(true, sim.camera, 1);
-        e->AddOrientation(0.0, Quat{});
-    }
-    for (int i = 0; i < 40; ++i) {
-        const double t = 1.0 + i / 60.0;
-        const Vec3 light = Vec3{0.1, 1.71, 0.18} + Vec3{0.0, 0.0, 0.01 * std::sin(i * 1.3)};
-        in_order.AddLight(t, light, true, Vec3{});
-        late.AddLight(t, light, true, Vec3{});
-        if (i == 20) {
-            in_order.AddSighting(t, sighting);
-        }
-        if (i == 26) {
-            late.AddSighting(t, sighting);
-        }
-    }
-    // Once the glide in of either is over.
-    const Vec3 a = in_order.Output(10.0, Quat{}, Vec3{}).position, b = late.Output(10.0, Quat{}, Vec3{}).position;
-    CHECK(Length(a - b) < 1e-9);
-    CHECK(in_order.TakeStats().sightings == 1 && late.TakeStats().sightings == 1);
-}
-
-// Along the PS Eye's ray and across it, the eyes' error while standing still, over several runs.
-struct DepthAcross {
-    double depth = 0.0;
-    double across = 0.0;
-};
-
-DepthAcross StillError(const std::function<void(HeadSimulation&)>& setup)
-{
-    double depth_sum = 0.0, across_sum = 0.0;
-    int count = 0;
-    for (int seed = 0; seed < 6; ++seed) {
-        HeadSimulation sim;
-        sim.random.seed(100 + seed);
-        sim.interpolated = true;
-        sim.depth_noise = 0.03;
-        sim.lateral_noise = 0.002;
-        setup(sim);
-        const Vec3 truth = sim.Eyes(StandStill(0));
-        const Vec3 along = Unit(truth - sim.camera);
-        sim.Run(20.0, StandStill, nullptr, 1.0, [&](double time) {
-            if (time < 102.0) {
-                return;
-            }
-            const Vec3 error = sim.estimator.Output(time, Quat{}, Vec3{}).position - truth;
-            const double depth = Dot(error, along);
-            depth_sum += depth * depth;
-            across_sum += Dot(error, error) - depth * depth;
-            ++count;
-        });
-    }
-    return {std::sqrt(depth_sum / count), std::sqrt(across_sum / count)};
-}
-
-void TestHeadBodySteadiesDepth()
-{
-    // PSMoveServiceEx's depth wanders slowly, 2 cm, on top of its frame-to-frame noise; the body
-    // cameras, 0.15 s late, hold it much steadier, without the sideways getting worse.
-    const auto wandering = [](bool body) {
-        return StillError([body](HeadSimulation& sim) {
-            sim.depth_wander = 0.02;
-            sim.body = body;
-        });
-    };
-    const DepthAcross light = wandering(false), both = wandering(true);
-    CHECK(both.depth < 0.6 * light.depth);
-    CHECK(both.across < 1.2 * light.across);
-    // With frame-to-frame noise alone, their depth, about a centimetre, takes over from the light's.
-    const DepthAcross white_both = StillError([](HeadSimulation& sim) { sim.body = true; });
-    CHECK(white_both.depth < 0.015);
-    CHECK(white_both.across < 0.003);
-    // Standing still is smoothed more than the settings say: the agility learns it.
-    HeadSimulation sim;
-    sim.depth_noise = 0.03;
-    sim.lateral_noise = 0.002;
-    sim.Run(3.0, StandStill);
-    sim.estimator.TakeStats();
-    sim.Run(2.0, StandStill);
-    CHECK(sim.estimator.TakeStats().agility < 0.1);
-}
-
-void TestHeadBodyCamerasMoved()
-{
-    // The body cameras were moved after their calibration: most of their views miss, and the light
-    // keeps its depth instead of letting it wander off. The few that happen to fit still pull it.
-    const DepthAcross light = StillError([](HeadSimulation& sim) { sim.depth_wander = 0.02; });
-    const DepthAcross moved = StillError([](HeadSimulation& sim) {
-        sim.depth_wander = 0.02;
-        sim.body = true;
-        sim.body_moved = Vec3{0.3, 0.0, 0.3};
-    });
-    CHECK(moved.depth < 2.0 * light.depth);
-    CHECK(moved.across < 2.0 * light.across);
-}
-
-void TestHeadBodyFixesLightDepth()
-{
-    // PSMoveServiceEx puts the light half as far again from the PS Eye as it is, wandering 10 cm
-    // more: where the body cameras meet on the light's line of sight, the head is, and the light's
-    // distance is learned to match.
-    HeadSimulation sim;
-    sim.interpolated = true;
-    sim.depth_noise = 0.03;
-    sim.lateral_noise = 0.002;
-    sim.light_scale = 1.5;
-    sim.depth_wander = 0.1;
-    sim.body = true;
-    const HeadRun run = sim.Run(10.0, StandStill, nullptr, 2.0);
-    const HeadPositionEstimator::Stats stats = sim.estimator.TakeStats();
-    CHECK(run.rms < 0.03);
-    CHECK(std::fabs(stats.light_scale - 1.0 / 1.5) < 0.03);
-    CHECK(stats.on_line_views > 0.95 * stats.paired_views);
-    CHECK(stats.sightings > 5 * stats.sightings_rejected);
-    // Without them, the head is that far off.
-    HeadSimulation alone = sim;
-    alone.estimator = HeadPositionEstimator(TestHeadConfig());
-    alone.body = false;
-    CHECK(alone.Run(5.0, StandStill, nullptr, 2.0).rms > 0.5);
-}
-
-void TestHeadBodyFixesLightTooFar()
-{
-    // As in a test: the PS Eye below the head, PSMoveServiceEx putting the light twice as far as it
-    // is, wandering 30 cm more, so that it is often over 4 m from the PS Eye (impossible, alone);
-    // and the pose model's ears 5 cm higher and 3 cm further forward than first guessed. The body
-    // cameras come in after the light: the head goes where they meet, as soon as their views
-    // arrive, and their ears are learned in a couple of seconds.
-    HeadSimulation sim;
-    sim.camera = Vec3{0.0, 1.25, -1.8};
-    sim.interpolated = true;
-    sim.depth_noise = 0.03;
-    sim.lateral_noise = 0.002;
-    sim.light_scale = 2.0;
-    sim.depth_wander = 0.3;
-    sim.ears_from_neck = sim.config.ears_from_neck + Vec3{0.0, 0.05, -0.03};
-    sim.Run(2.0, StandStill);
-    sim.estimator.TakeStats();
-    sim.body = true;
-    sim.Run(3.0, StandStill);
-    const HeadPositionEstimator::Stats first = sim.estimator.TakeStats();
-    CHECK(std::fabs(first.light_scale - 0.5) < 0.05);
-    // The forward 3 cm of the ears cannot be learned from the light's depth, so some of it stays.
-    const HeadRun run = sim.Run(5.0, StandStill, nullptr, 0.0);
-    CHECK(run.rms < 0.04);
-    const HeadPositionEstimator::Stats after = sim.estimator.TakeStats();
-    CHECK(after.sightings > 10 * after.sightings_rejected);
-    CHECK(std::abs(after.ears_from_neck.y - sim.ears_from_neck.y) < 0.01);
-}
-
-void TestHeadBodyFixesFarLightEarsApart()
-{
-    // As in a VRChat test: PSMoveServiceEx puts the light twice as far as it is, wandering 10 cm,
-    // and with the headset over the ears each phone's pose model puts them at another height, 7 cm
-    // above and below. Each view alone disagrees with the other camera's; where the two meet is on
-    // the light's line of sight, and the head goes there.
-    HeadSimulation sim;
-    sim.camera = Vec3{0.0, 1.25, -1.2};
-    sim.interpolated = true;
-    sim.depth_noise = 0.03;
-    sim.lateral_noise = 0.002;
-    sim.light_scale = 2.0;
-    sim.depth_wander = 0.1;
-    sim.body_ears_off = {Vec3{0.0, 0.07, 0.0}, Vec3{0.0, -0.07, 0.0}};
-    sim.Run(2.0, StandStill);
-    sim.body = true;
-    const HeadRun run = sim.Run(10.0, StandStill, nullptr, 4.0);
-    CHECK(run.rms < 0.03);
-    CHECK(std::fabs(sim.estimator.TakeStats().light_scale - 0.5) < 0.03);
-}
-
-void TestHeadBodyFollowsWithoutLight()
-{
-    // Turned away from the PS Eye: the light is out of sight while turning 180 degrees and then
-    // stepping 30 cm to the side. The body cameras keep the head followed, coarser and later than
-    // the light, but without holding it still or jumping when the light goes or comes back.
-    HeadSimulation sim;
-    sim.body = true;
-    sim.depth_noise = 0.03;
-    sim.lateral_noise = 0.002;
-    sim.Run(2.0, StandStill);
-    const auto turn_and_step = [](double t) {
-        HeadMotion m = StandStill(t);
-        const double turn = std::clamp(t - 0.5, 0.0, 1.0);
-        m.rotation = AxisAngle(Vec3{0, 1, 0}, kPi * turn * turn * (3.0 - 2.0 * turn));
-        m.angular_velocity = Vec3{0, t > 0.5 && t < 1.5 ? kPi * 6.0 * turn * (1.0 - turn) : 0.0, 0};
-        m.neck = m.neck + Vec3{0.3 * std::clamp(t - 1.6, 0.0, 1.0), 0, 0};
-        return m;
-    };
-    sim.estimator.TakeStats();
-    bool alone = true;
-    const HeadRun run = sim.Run(4.0, turn_and_step, [](double t) { return t < 0.3 || t > 3.0; }, 0.0, [&](double time) {
-        const double t = time - 102.0;
-        if (t > 0.6 && t < 2.9) {
-            alone = alone && sim.estimator.state() == HeadPositionEstimator::State::Live &&
-                    !sim.estimator.LightFollowed(time);
-        }
-    });
-    const HeadPositionEstimator::Stats stats = sim.estimator.TakeStats();
-    CHECK(alone);
-    CHECK(stats.losses == 0);
-    CHECK(run.max_step < 0.01);
-    // The step at 0.3 m/s, about 0.4 s behind at worst: holding still would be the whole 30 cm.
-    CHECK(run.max_error < 0.15);
-    CHECK(Length(run.last_eyes - run.last_truth) < 0.03);
-}
-
-void TestHeadBodyStartsWithoutLight()
-{
-    // No light at all: two cameras find the head, and follow it.
-    HeadSimulation sim;
-    sim.body = true;
-    const HeadRun run = sim.Run(3.0, StandStill, [](double) { return false; }, 1.0);
-    const HeadPositionEstimator::Stats stats = sim.estimator.TakeStats();
-    CHECK(stats.sighting_starts == 1);
-    CHECK(sim.estimator.state() == HeadPositionEstimator::State::Live);
-    CHECK(run.rms < 0.02);
-    // The cameras lose the person too: the head holds.
-    sim.body_visible = [](double) { return false; };
-    sim.Run(1.0, StandStill, [](double) { return false; });
-    CHECK(sim.estimator.state() == HeadPositionEstimator::State::Holding);
-}
-
-void TestHeadLearnsEars()
-{
-    // The pose model puts the ears 4 cm lower and 3 cm further back than the first guess: the
-    // light teaches where, so the head does not move when the light is lost.
-    HeadSimulation sim;
-    sim.body = true;
-    sim.depth_noise = 0.03;
-    sim.lateral_noise = 0.002;
-    sim.ears_from_neck = sim.config.ears_from_neck + Vec3{0.0, -0.04, 0.03};
-    const auto sway = [](double t) {
-        HeadMotion m = StandStill(t);
-        const double yaw = 0.8 * std::sin(1.3 * t), pitch = 0.3 * std::sin(0.7 * t);
-        m.rotation = AxisAngle(Vec3{0, 1, 0}, yaw) * AxisAngle(Vec3{1, 0, 0}, pitch);
-        m.angular_velocity = Vec3{0, 0.8 * 1.3 * std::cos(1.3 * t), 0};
-        return m;
-    };
-    sim.Run(30.0, sway);
-    // Up and down at once; forwards and backwards, along the PS Eye's line of sight whose depth may
-    // be off, only as the head turns.
-    const Vec3 error = sim.estimator.TakeStats().ears_from_neck - sim.ears_from_neck;
-    CHECK(std::abs(error.y) < 0.005);
-    CHECK(Length(error) < 0.02);
-    const HeadRun run = sim.Run(1.5, [&](double t) { return sway(t + 30.0); }, [](double t) { return t < 0.5; }, 0.5);
-    CHECK(run.max_error < 0.03);
-}
-
-void TestHeadBodyMoving()
-{
-    // Crouching and shaking the head, with the PS Eye's usual noise: as close with the body
-    // cameras as with the light alone.
-    double crouch[2], settle[2], shake[2];
-    for (const bool body : {false, true}) {
-        HeadSimulation sim;
-        sim.body = body;
-        sim.depth_noise = 0.03;
-        sim.lateral_noise = 0.002;
-        crouch[body] = sim.Run(2.3, Crouch).max_error;
-        settle[body] = sim.Run(0.5, [](double t) { return Crouch(t + 2.3); }, nullptr, 0.3).max_error;
-        HeadSimulation shaking;
-        shaking.body = body;
-        shaking.depth_noise = 0.03;
-        shaking.lateral_noise = 0.002;
-        shake[body] = shaking.Run(4.0, ShakeHead).rms;
-    }
-    CHECK(crouch[1] < 1.2 * crouch[0]);
-    CHECK(settle[1] < settle[0] + 0.01);
-    CHECK(shake[1] < 1.3 * shake[0]);
-}
-
 // A Move's bulb through the head's filter, as the controllers set it up.
 HeadPositionConfig BulbConfig()
 {
     HeadPositionConfig bulb;
-    bulb.eyes_from_light = bulb.eyes_from_neck = bulb.ears_from_neck = Vec3{};
-    bulb.depth_noise_m = bulb.depth_noise_with_sightings_m = 0.04;
+    bulb.eyes_from_light = bulb.eyes_from_neck = Vec3{};
+    bulb.depth_noise_m = 0.04;
     bulb.agility = 5.0;
-    bulb.sightings_only_without_light = true;
+    bulb.distrust_jumps = true;
     bulb.prediction_gain = 1.0;
     bulb.max_speed = 10.0;
     bulb.min_eye_height = -1.0;
@@ -1419,119 +1062,268 @@ void TestBulbFilter()
     CHECK(half.max_error < 0.05);
 }
 
-// A bulb as the user's PS Eye sees it from 2.5 m: 5 cm of depth noise on top of a slow 4 cm
-// wander; and, with `phones`, as two phones beside the PS Eye see it, 25 frames a second each,
-// arriving 180 ms late. `lost(t)`: the PS Eye does not see it.
-struct PhonesRun {
-    double depth_rms = 0.0;
-    double max_error = 0.0;
-    double tremor = 0.0;  // as the driver measures it: around its average over half a second
-    bool always_live = true;
-    int sightings = 0;
-    int sightings_rejected = 0;
-};
-
-// A bulb 2.5 m from the PS Eye, whose depth shakes 5 cm and wanders 4 cm, and two phones that see
-// it to a pixel and a half, 0.18 s late; views_off is how far off their calibration puts it.
-PhonesRun RunBulbWithPhones(const std::function<Vec3(double)>& path, double seconds, bool phones,
-                            const std::function<bool(double)>& lost = nullptr,
-                            const std::function<bool(double)>& far = nullptr, Vec3 views_off = Vec3{})
+void TestMoveHandAxes()
 {
-    const Vec3 camera{0.0, 1.2, -2.5};
-    const std::vector<CameraModel> cameras{HeadSimulation::BodyCamera({-1.5, 0.9, -2.0}),
-                                           HeadSimulation::BodyCamera({0.6, 1.0, -2.1})};
-    HeadPositionEstimator bulb(BulbConfig());
-    bulb.SetCamera(true, camera, 1);
-    std::mt19937 random(5), phone_random(6);
-    const auto gaussian = [](std::mt19937& r) {
-        const double u = (static_cast<double>(r()) + 0.5) / 4294967296.0;
-        const double v = static_cast<double>(r()) / 4294967296.0;
-        return std::sqrt(-2.0 * std::log(u)) * std::cos(2.0 * kPi * v);
-    };
-    std::deque<HeadSighting> in_flight;
-    double wander = 0.0, next_phone[2] = {0.0, 0.02};
-    PhonesRun run;
-    double depth_sum = 0.0, tremor_sum = 0.0;
-    int count = 0;
-    Vec3 mean;
-    for (int step = 0; step * 0.002 < seconds; ++step) {
-        const double t = step * 0.002, now = 10.0 + t;
-        if (step % 8 == 0) {  // about 60 frames a second
-            const double a = std::exp(-1.0 / 60.0 / 0.5);
-            wander = a * wander + std::sqrt(1.0 - a * a) * 0.04 * gaussian(random);
-            const Vec3 truth = path(t - 0.040), along = Unit(truth - camera);
-            const Vec3 side = Unit(Cross(along, Vec3{0, 1, 0}));
-            const Vec3 seen = truth + along * (0.05 * gaussian(random) + wander + (far && far(t) ? 1.5 : 0.0)) +
-                              side * (0.002 * gaussian(random)) + Cross(side, along) * (0.002 * gaussian(random));
-            bulb.AddLight(now, seen, !(lost && lost(t)), Vec3{});
-        }
-        for (int c = 0; phones && c < 2; ++c) {
-            if (t < next_phone[c]) {
-                continue;
-            }
-            next_phone[c] += 0.04;
-            HeadSighting sighting;
-            sighting.camera = static_cast<uint32_t>(c);
-            sighting.time = now;
-            sighting.model = cameras[c];
-            sighting.noise = 1.5;
-            if (cameras[c].Project(path(t) + views_off, &sighting.u, &sighting.v)) {
-                sighting.u += 1.5 * gaussian(phone_random);
-                sighting.v += 1.5 * gaussian(phone_random);
-                in_flight.push_back(sighting);
-            }
-        }
-        while (!in_flight.empty() && in_flight.front().time + 0.18 <= now) {
-            bulb.AddSighting(now, in_flight.front());
-            in_flight.pop_front();
-        }
-        bulb.Tick(now, true);
-        if (t < 2.0) {
-            continue;
-        }
-        run.always_live = run.always_live && bulb.state() == HeadPositionEstimator::State::Live;
-        const Vec3 truth = path(t);
-        const Vec3 out = bulb.Output(now, Quat{}, Vec3{}).position, error = out - truth;
-        const double depth = Dot(error, Unit(truth - camera));
-        depth_sum += depth * depth;
-        run.max_error = std::max(run.max_error, Length(error));
-        mean = count > 0 ? mean + (out - mean) * (1.0 - std::exp(-0.002 / 0.5)) : out;
-        tremor_sum += Dot(out - mean, out - mean);
-        ++count;
-    }
-    run.depth_rms = std::sqrt(depth_sum / count);
-    run.tremor = std::sqrt(tremor_sum / count);
-    const HeadPositionEstimator::Stats stats = bulb.TakeStats();
-    run.sightings = stats.sightings;
-    run.sightings_rejected = stats.sightings_rejected;
-    return run;
+    // PSMoveServiceEx's identity is the Move pointing along -z, buttons up: SteamVR's too.
+    MoveHand hand(true);
+    MoveState move;
+    move.tracking = true;
+    move.orientation = AxisAngle(Vec3{0, 1, 0}, 0.7);
+    hand.Update(move, 1.0);
+    CHECK(Length(Rotate(hand.Pose().orientation, Vec3{0, 0, -1}) - Rotate(move.orientation, Vec3{0, 0, -1})) < 1e-9);
+    // Tilted by the setting: a Move whose identity were upright points forward lying flat.
+    HandConfig config;
+    config.pitch_degrees = 90.0;
+    MoveHand tilted(true, config);
+    move.orientation = AxisAngle(Vec3{1, 0, 0}, -kPi / 2);
+    tilted.Update(move, 1.0);
+    const HandPose pose = tilted.Pose();
+    CHECK(Length(Rotate(pose.orientation, Vec3{0, 0, -1}) - Vec3{0, 0, -1}) < 1e-9);
+    CHECK(Length(Rotate(pose.orientation, Vec3{0, 1, 0}) - Vec3{0, 1, 0}) < 1e-9);
+    // And back: the rotation PSMoveServiceEx would give for a controller's.
+    const Quat back = tilted.MoveOrientation(pose.orientation);
+    CHECK(Length(Rotate(back, Vec3{0, 1, 0}) - Rotate(move.orientation, Vec3{0, 1, 0})) < 1e-9);
 }
 
-void TestBulbWithPhones()
+void TestMoveHandIgnoresBulbJumps()
 {
-    // Held still where the phones see it too: it is the PS Eye's, and their views shake it no more,
-    // not even with a calibration 2 cm off, or 14 cm (the phones or the PS Eye moved since). Such
-    // views are left out.
-    const auto still = [](double) { return Vec3{0.2, 1.1, 0.0}; };
-    const PhonesRun eye = RunBulbWithPhones(still, 12.0, false), both = RunBulbWithPhones(still, 12.0, true);
-    const PhonesRun off = RunBulbWithPhones(still, 12.0, true, nullptr, nullptr, Vec3{0.02, 0.0, 0.0});
-    const PhonesRun stale = RunBulbWithPhones(still, 12.0, true, nullptr, nullptr, Vec3{0.10, 0.0, 0.10});
-    CHECK(both.tremor < 1.05 * eye.tremor);
-    CHECK(off.tremor < 1.05 * eye.tremor);
-    CHECK(stale.tremor < 1.05 * eye.tremor);
-    CHECK(both.sightings > 500 && both.sightings_rejected < 20);
-    CHECK(stale.sightings_rejected > stale.sightings / 2);
-    // The PS Eye loses it for a second while it sways 30 cm: the phones keep it followed, about a
-    // fifth of a second late (up to 9 cm behind, at 0.47 m/s), from the moment the PS Eye lost it.
-    const auto sway = [](double t) { return Vec3{0.2 + 0.15 * std::sin(kPi * t), 1.1, 0.0}; };
-    const PhonesRun hidden = RunBulbWithPhones(sway, 8.0, true, [](double t) { return t >= 4.0 && t < 5.0; });
-    CHECK(hidden.always_live);
-    CHECK(hidden.max_error < 0.12);
-    // Half hidden from the PS Eye for half a second, PSMoveServiceEx puts it 1.5 m farther: the
-    // phones hold it where it is.
-    const PhonesRun steady = RunBulbWithPhones(still, 8.0, true);
-    const PhonesRun half = RunBulbWithPhones(still, 8.0, true, nullptr, [](double t) { return t >= 4.0 && t < 4.5; });
-    CHECK(half.max_error < steady.max_error + 0.02);
+    // Half hidden for a tenth of a second, the bulb is reported 1.5 m farther, still "tracked":
+    // the hand stays put. Truly moved and staying there, it follows after a moment.
+    MoveHand hand(false);
+    MoveState move;
+    move.tracking = true;
+    move.position = Vec3{0.2, 1.0, 0.5};
+    double time = 10.0, max_jump = 0.0;
+    for (int i = 0; i < 120; ++i, time += 1.0 / 60.0) {
+        move.time = time;
+        const bool hidden = i >= 60 && i < 66;
+        MoveState reported = move;
+        if (hidden) {
+            reported.position = move.position + Vec3{0.0, 0.0, 1.5};
+        }
+        hand.Update(reported, time);
+        if (i >= 30) {
+            max_jump = std::max(max_jump, Length(hand.Pose().position - move.position));
+        }
+    }
+    CHECK(max_jump < 0.01);
+    CHECK(hand.TakeStats().jumps == 6);
+    move.position = Vec3{0.2, 1.0, 1.2};  // moved 70 cm at once, and stays
+    for (int i = 0; i < 60; ++i, time += 1.0 / 60.0) {
+        move.time = time;
+        hand.Update(move, time);
+    }
+    CHECK(Length(hand.Pose().position - move.position) < 0.02);
+}
+
+// The headset 1.6 m up looking along -z, and where a hand rests in front of it.
+Headset LookingAhead()
+{
+    Headset headset;
+    headset.valid = true;
+    headset.eyes = Vec3{0.0, 1.6, 0.0};
+    headset.forward = Vec3{0.0, 0.0, -1.0};
+    return headset;
+}
+
+// Runs a right hand at 250 updates a second from `time`; `seen(i)` and `where(i)` per update.
+struct HandRun {
+    MoveHand hand{false};
+    double time = 100.0;
+    Headset headset = LookingAhead();
+    double largest_step = 0.0;
+    Vec3 previous;
+    bool have_previous = false;
+
+    HandPose Run(int updates, const std::function<bool(int)>& seen, const std::function<Vec3(int)>& where)
+    {
+        HandPose pose;
+        for (int i = 0; i < updates; ++i, time += 0.004) {
+            MoveState move;
+            move.time = time;
+            move.tracking = seen(i);
+            move.position = where(i);
+            hand.Update(move, time, headset);
+            pose = hand.Pose();
+            if (have_previous) {
+                largest_step = std::max(largest_step, Length(pose.position - previous));
+            }
+            previous = pose.position;
+            have_previous = true;
+        }
+        return pose;
+    }
+};
+
+void TestMoveHandRestsInFrontOfTheHead()
+{
+    // The PS Eye loses the bulb. Hidden a moment it stays where it was; lost longer it glides to
+    // where it rests in front of the headset, and follows it there as it turns; seen again, it goes
+    // back to the bulb.
+    HandRun run;
+    const Vec3 bulb{0.3, 1.1, -0.4};
+    run.Run(500, [](int) { return true; }, [&](int) { return bulb; });
+    HandPose pose = run.Run(50, [](int) { return false; }, [&](int) { return bulb; });  // 0.2 s
+    CHECK(!pose.at_rest && Length(pose.position - bulb) < 0.02);  // within the still radius
+    run.largest_step = 0.0;
+    pose = run.Run(250, [](int) { return false; }, [&](int) { return bulb; });
+    // 50 cm under the eyes, 30 cm in front and 20 cm to the right.
+    CHECK(pose.at_rest && Length(pose.position - Vec3{0.2, 1.1, -0.3}) < 0.02);
+    CHECK(run.largest_step < 0.01);  // glides, at most 10 mm in 4 ms
+    // The head turns to look left: the hand goes with it, in front and to its right.
+    run.headset.forward = Vec3{-1.0, 0.0, 0.0};
+    pose = run.Run(250, [](int) { return false; }, [&](int) { return bulb; });
+    CHECK(pose.at_rest && Length(pose.position - Vec3{-0.3, 1.1, -0.2}) < 0.02);
+    pose = run.Run(250, [](int) { return true; }, [&](int) { return bulb; });
+    CHECK(pose.tracking && Length(pose.position - bulb) < 0.02);
+    const MoveHand::Stats stats = run.hand.TakeStats();
+    CHECK(stats.at_rest > 400 && stats.held > 60);
+}
+
+void TestMoveHandIgnoresGlimpses()
+{
+    // Turned away from the PS Eye, the hand rests in front of the headset. Now and then the PS Eye
+    // glimpses a sliver of the bulb, put wherever: the hand stays. Seen for good, it goes back.
+    HandRun run;
+    const Vec3 rest{0.2, 1.1, -0.3};
+    run.Run(250, [](int) { return false; }, [](int) { return Vec3{}; });
+    double farthest = 0.0;
+    for (int i = 0; i < 10; ++i) {
+        // 60 ms seen, near the hand or far off, then 0.4 s not.
+        const HandPose pose = run.Run(115, [](int u) { return u < 15; },
+                                      [&](int) { return rest + Vec3{0.0, 0.0, i % 2 == 0 ? 0.25 : 0.9}; });
+        farthest = std::max(farthest, Length(pose.position - rest));
+        CHECK(pose.at_rest);
+    }
+    CHECK(farthest < 0.001);
+    CHECK(run.hand.TakeStats().glimpses == 10);
+    const Vec3 bulb = rest + Vec3{0.1, 0.1, 0.1};
+    HandPose pose = run.Run(70, [](int) { return true; }, [&](int) { return bulb; });  // 0.28 s
+    CHECK(pose.at_rest);
+    run.largest_step = 0.0;
+    pose = run.Run(300, [](int) { return true; }, [&](int) { return bulb; });
+    CHECK(pose.tracking && Length(pose.position - bulb) < 0.02);
+    CHECK(run.largest_step < 0.01);
+}
+
+void TestMoveHandOutOfReach()
+{
+    // The PS Eye follows something 2 m from the headset: no arm reaches there.
+    HandRun run;
+    const HandPose pose = run.Run(500, [](int) { return true; }, [](int) { return Vec3{0.0, 1.2, -2.0}; });
+    CHECK(pose.at_rest && Length(pose.position - Vec3{0.2, 1.1, -0.3}) < 0.02);
+    CHECK(run.hand.TakeStats().out_of_reach == 500);
+}
+
+void TestMoveHandHoldsWithoutRest()
+{
+    // Rest turned off: lost, it stays where it was, still turning, without jumping.
+    HandConfig config;
+    config.rest_enabled = false;
+    HandRun run;
+    run.hand = MoveHand(false, config);
+    const Vec3 bulb{0.3, 1.1, -0.4};
+    run.Run(100, [](int) { return true; }, [&](int) { return bulb; });
+    run.hand.TakeStats();
+    const Vec3 last = run.hand.Pose().position;
+    const HandPose pose = run.Run(500, [](int) { return false; }, [&](int) { return bulb; });
+    CHECK(!pose.at_rest && !pose.tracking && Length(pose.position - last) < 1e-9);
+    CHECK(run.hand.TakeStats().held == 500);
+}
+
+// A hand held still 2.5 m from the PS Eye: PSMoveServiceEx's bulb shakes `depth_noise` in depth,
+// its rotation 0.15 degrees, and the gyro reads the hand's own tremor, about 10 Hz. Through the
+// bulb filter and the hand, as the controllers have them; with `turn_after`, the hand then turns at
+// 1 rad/s.
+struct StillHand {
+    double drift_m = 0.0;      // how far the controller went a second, held still
+    double drift_degrees = 0.0;
+    double off_m = 0.0;        // the most the controller was from the bulb
+    double off_degrees = 0.0;
+    double still_speed = 0.0;  // the velocities SteamVR got while held still
+    double lag_degrees = 0.0;  // turning, the most it was behind the Move, after 0.1 s
+};
+
+StillHand RunStillHand(double seconds, double depth_noise, bool turn_after)
+{
+    const Vec3 camera{0.0, 1.2, -2.5}, truth{0.2, 1.1, 0.0};
+    HeadPositionEstimator bulb(BulbConfig());
+    bulb.SetCamera(true, camera, 1);
+    MoveHand hand(false);
+    std::mt19937 random(7);
+    const auto gaussian = [&]() {
+        const double u = (static_cast<double>(random()) + 0.5) / 4294967296.0;
+        const double v = static_cast<double>(random()) / 4294967296.0;
+        return std::sqrt(-2.0 * std::log(u)) * std::cos(2.0 * kPi * v);
+    };
+    const auto angle = [](Quat a, Quat b) {
+        const double cosine = std::fabs(a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z);
+        return 2.0 * std::acos(std::min(cosine, 1.0)) * 180.0 / kPi;
+    };
+    StillHand result;
+    Headset headset = LookingAhead();
+    headset.eyes = truth + Vec3{0.0, 0.5, 0.3};
+    Vec3 seen = truth, previous_position;
+    Quat noisy{}, previous_rotation{};
+    const Vec3 along = Unit(truth - camera), side = Unit(Cross(along, Vec3{0, 1, 0}));
+    for (int step = 0; step * 0.002 < seconds + (turn_after ? 1.0 : 0.0); ++step) {
+        const double t = step * 0.002, now = 10.0 + t;
+        const bool turning = turn_after && t >= seconds;
+        const Quat rotation = AxisAngle(Vec3{0, 1, 0}, turning ? t - seconds : 0.0);
+        if (step % 8 == 0) {  // about 60 frames a second
+            seen = truth + along * (depth_noise * gaussian()) + side * (0.002 * gaussian()) +
+                   Cross(side, along) * (0.002 * gaussian());
+            const Vec3 axis = Unit(Vec3{gaussian(), gaussian(), gaussian()});
+            noisy = rotation * AxisAngle(axis, 0.15 * kPi / 180.0 * gaussian());
+        }
+        bulb.AddLight(now, seen, true, Vec3{});
+        bulb.Tick(now, true);
+        MoveState move;
+        move.time = now;
+        move.tracking = bulb.state() == HeadPositionEstimator::State::Live;
+        const HeadPoseOut out = bulb.Output(now, Quat{}, Vec3{});
+        move.position = out.position;
+        move.velocity = out.velocity;
+        move.orientation = noisy;
+        move.angular_velocity = Vec3{0.1 * std::sin(2.0 * kPi * 10.0 * t), 0.02 * gaussian() + (turning ? 1.0 : 0.0),
+                                     0.02 * gaussian()};
+        hand.Update(move, now, headset);
+        const HandPose& pose = hand.Pose();
+        if (t >= 2.0 && !turning) {
+            result.drift_m += Length(pose.position - previous_position) / (seconds - 2.0);
+            result.drift_degrees += angle(pose.orientation, previous_rotation) / (seconds - 2.0);
+            result.off_m = std::max(result.off_m, Length(pose.position - truth));
+            result.off_degrees = std::max(result.off_degrees, angle(pose.orientation, rotation));
+            result.still_speed = std::max(result.still_speed, Length(pose.velocity) + Length(pose.angular_velocity));
+        } else if (turning && t - seconds > 0.1) {
+            result.lag_degrees = std::max(result.lag_degrees, angle(pose.orientation, noisy));
+        }
+        previous_position = pose.position;
+        previous_rotation = pose.orientation;
+    }
+    return result;
+}
+
+void TestMoveHandKeepsStill()
+{
+    // Held still for 20 s, the bulb's depth shaking 1.5 or 3 cm: the controller hardly moves, and
+    // SteamVR gets no velocities to carry it on with.
+    for (const double depth_noise : {0.015, 0.03}) {
+        const StillHand still = RunStillHand(22.0, depth_noise, false);
+        std::printf("held still, depth noise %.0f mm: drifts %.2f mm and %.3f degrees a second, off by up to %.1f mm "
+                    "and %.2f degrees\n",
+                    depth_noise * 1000.0, still.drift_m * 1000.0, still.drift_degrees, still.off_m * 1000.0,
+                    still.off_degrees);
+        CHECK(still.drift_m < 0.002);
+        CHECK(still.drift_degrees < 0.05);
+        CHECK(still.off_m < 0.03);
+        CHECK(still.off_degrees < 0.8);
+        CHECK(still.still_speed < 1e-9);
+    }
+    // Then turned at 1 rad/s: it follows the Move as it is, soon.
+    const StillHand turned = RunStillHand(4.0, 0.03, true);
+    std::printf("turning: up to %.2f degrees behind\n", turned.lag_degrees);
+    CHECK(turned.lag_degrees < 0.01);
 }
 
 int main()
@@ -1575,18 +1367,14 @@ int main()
     TestHeadUnfreezeWhileMoving();
     TestHeadRecenterFrozenBeforeSeen();
     TestHeadIgnoresNonFinite();
-    TestHeadLateSightingReplayed();
-    TestHeadBodySteadiesDepth();
-    TestHeadBodyCamerasMoved();
-    TestHeadBodyFixesLightDepth();
-    TestHeadBodyFixesLightTooFar();
-    TestHeadBodyFixesFarLightEarsApart();
-    TestHeadBodyFollowsWithoutLight();
-    TestHeadBodyStartsWithoutLight();
-    TestHeadLearnsEars();
-    TestHeadBodyMoving();
     TestBulbFilter();
-    TestBulbWithPhones();
+    TestMoveHandAxes();
+    TestMoveHandIgnoresBulbJumps();
+    TestMoveHandRestsInFrontOfTheHead();
+    TestMoveHandIgnoresGlimpses();
+    TestMoveHandOutOfReach();
+    TestMoveHandHoldsWithoutRest();
+    TestMoveHandKeepsStill();
     if (g_failures == 0) {
         std::printf("All tests passed\n");
         return 0;

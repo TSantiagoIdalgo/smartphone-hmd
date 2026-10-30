@@ -1,22 +1,26 @@
 #pragma once
 
 #include <cstdint>
-#include <mutex>
 
 #include "math3d.h"
 
 // A PS Move held in one hand, as SteamVR should see it: where PSMoveServiceEx sees its bulb
-// while the PS Eye sees it, and while it does not (behind the body, out of the camera's view,
-// hidden by the other hand) where the body cameras see the wrist holding it, with the bulb where
-// it has been from that wrist. Seen by neither a moment, it goes to where it rests in front of the
-// headset, if given. The rotation always comes from the Move itself.
+// while the PS Eye sees it; while it does not (behind the body, out of the camera's view, hidden
+// by the other hand), a moment where it was, then where it rests in front of the headset. The
+// rotation always comes from the Move itself.
 //
-// Which wrist holds it, and where the bulb sits from that wrist in the Move's own axes, are
-// learned while both are seen. Changing from one to the other glides over a moment.
+// What the PS Eye sees is not always the bulb's place:
+// - A bulb partly hidden (behind the other hand, at the edge of the picture) looks smaller, so
+//   PSMoveServiceEx puts it much farther away while still calling it tracked: a jump faster than
+//   any hand is not believed until the bulb stays there a moment.
+// - Turned away from the PS Eye, it glimpses a sliver of a bulb now and then: a lost Move goes
+//   back to its bulb only once the PS Eye has seen it for a moment, and never to one farther from
+//   the headset than an arm reaches.
 //
-// A bulb partly hidden (behind the other hand, at the edge of the picture) looks smaller to the
-// PS Eye, so PSMoveServiceEx puts it much farther away while still calling it tracked: a jump
-// faster than any hand is not believed until the bulb stays there a moment.
+// Held still, the PS Eye's depth and PSMoveServiceEx's rotation still shake by some mm and a
+// fraction of a degree, which a pointer at a menu makes plain. While the Move's gyro says the hand
+// keeps still, the controller stays put until the bulb or the rotation goes farther than that
+// shaking, and then follows slowly; as soon as the hand moves, it follows as it is.
 //
 // World: the head's, SteamVR raw space in metres. Times: MonoSeconds().
 
@@ -46,43 +50,32 @@ struct MoveState {
     float trigger = 0.0f;   // 0 to 1
 };
 
-// The wrists as the body cameras see them, now.
-struct Wrists {
-    bool valid[2] = {false, false};  // the person's left, right
-    Vec3 position[2];
-    Vec3 velocity[2];
+struct HandConfig {
+    // Tilts PSMoveServiceEx's rotation about the Move's crosswise axis, should it not point where
+    // it is held.
+    double pitch_degrees = 0.0;
+    // Where a lost Move's hand goes: in front of the headset, turning with it but not tilting.
+    bool rest_enabled = true;
+    double rest_below_m = 0.5;    // under the eyes
+    double rest_forward_m = 0.3;  // in front of them
+    double rest_side_m = 0.2;     // each hand to its side
+    double reach_m = 1.1;         // a bulb farther from the eyes is not the hand's; 0: any
+    double found_seconds = 0.3;   // lost a while, seen this long again before it is believed
+    double still_mm = 15.0;       // held still, shaking this small is left out
+    double still_degrees = 0.6;
 };
 
-// Hands the newest wrists from the body tracking's thread to the controllers'.
-class SharedWrists {
-public:
-    void Set(const Wrists& wrists)
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        wrists_ = wrists;
-    }
-    Wrists Get()
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return wrists_;
-    }
-
-private:
-    std::mutex mutex_;
-    Wrists wrists_;
-};
-
-// Where a hand goes when neither the PS Eye nor the wrist says: in front of the headset, as it turns.
-struct HandRest {
+// The headset as SteamVR has it now.
+struct Headset {
     bool valid = false;
-    Vec3 position;
+    Vec3 eyes;
+    Vec3 forward;  // where it looks, level: unit
 };
 
 struct HandPose {
     bool valid = false;
-    bool tracking = false;    // from the bulb
-    bool from_wrist = false;  // from the wrist
-    bool at_rest = false;     // in front of the headset; none of these: held where it was
+    bool tracking = false;  // from the bulb
+    bool at_rest = false;   // in front of the headset; neither: held where it was
     Vec3 position;
     Quat orientation;  // SteamVR's controller axes: -z where it points, +y its top
     Vec3 velocity;
@@ -93,39 +86,39 @@ class MoveHand {
 public:
     struct Stats {
         int tracking = 0;  // updates from the bulb
-        int from_wrist = 0;
         int at_rest = 0;
         int held = 0;
-        int jumps = 0;     // bulb positions not believed: farther than a hand moves
+        int jumps = 0;        // bulb positions not believed: farther than a hand moves
+        int glimpses = 0;     // the bulb seen too briefly, after it was lost, to be believed
+        int out_of_reach = 0;  // bulb positions farther from the headset than an arm reaches
+        double farthest = 0.0;  // the farthest believed bulb from the eyes, m
+        int still = 0;  // updates with the hand held still; meanwhile:
+        double still_seconds = 0.0;
+        double shake_m = 0.0;  // the most the bulb went from the controller
+        double shake_degrees = 0.0;
+        double drift_m = 0.0;  // how far the controller went all the same
+        double drift_degrees = 0.0;
     };
 
-    // `left`: the hand it starts with, and the wrist it guesses holds it. `pitch_degrees` tilts
-    // PSMoveServiceEx's rotation about the Move's crosswise axis, should it not point where it is
-    // held.
-    explicit MoveHand(bool left, double pitch_degrees = 0.0);
+    explicit MoveHand(bool left, const HandConfig& config = HandConfig{});
 
     // The rotation PSMoveServiceEx would give a Move whose controller has `controller` (SteamVR's).
     Quat MoveOrientation(Quat controller) const { return Normalize(controller * Conjugate(move_from_controller_)); }
 
-    // Each new state of the Move, with the wrists of the same moment and where it would rest.
-    void Update(const MoveState& move, const Wrists& wrists, double now, const HandRest& rest = HandRest{});
-    HandPose Pose(double now) const;
-
-    // The person's wrist that holds it: 0 left, 1 right.
-    int wrist() const { return wrist_; }
-    // Where the bulb sits from it, in the controller's axes.
-    Vec3 BulbFromWrist() const { return offset_[wrist_]; }
+    // Each new state of the Move, with the headset as it is now.
+    void Update(const MoveState& move, double now, const Headset& headset = Headset{});
+    // As SteamVR should have it, after the newest Update.
+    const HandPose& Pose() const { return out_; }
     // Counters since the last call.
     Stats TakeStats();
 
 private:
+    bool left_;
+    HandConfig config_;
     Quat move_from_controller_;
-    HandPose pose_;
-    int wrist_;
-    Vec3 offset_[2];
-    double distance_[2] = {0.0, 0.0};  // between the bulb and each wrist, on average
-    int samples_[2] = {0, 0};
-    double learned_at_ = -1.0;
+    HandPose pose_;  // before the blend and keeping still
+    HandPose out_;
+    double last_update_ = -1.0;
     // The bulb's last believed position, and when: a jump from it no hand makes is not believed.
     bool have_bulb_ = false;
     Vec3 bulb_;
@@ -133,8 +126,11 @@ private:
     bool jumping_ = false;
     Vec3 jump_last_;
     double jump_since_ = 0.0;
-    Vec3 blend_;
-    double blend_time_ = 0.0;
-    double followed_at_ = -1e9;  // when the bulb or the wrist last said where it is
+    double followed_at_ = -1e9;  // when the bulb last said where it is
+    double seen_since_ = -1.0;   // when the PS Eye started seeing it again, after losing it
+    Vec3 blend_;  // from where it was shown, when it changed: gliding away to nothing
+    double blend_time_ = -1e9;
+    double blend_seconds_ = 0.2;
+    Vec3 spin_;  // the Move's angular velocity, smoothed
     Stats stats_;
 };

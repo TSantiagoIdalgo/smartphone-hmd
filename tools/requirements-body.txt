@@ -1,7 +1,0 @@
-# For tools/body_tracker.py:  pip install -r tools/requirements-body.txt
-# LiteRT only has packages for 64-bit Python 3.10 to 3.14.
-ai-edge-litert>=2.1.2
-opencv-python-headless>=4.8
-av>=12
-numpy>=1.24
-# --engine mediapipe, the same model on a single core, also needs:  pip install mediapipe

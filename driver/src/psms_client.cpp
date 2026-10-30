@@ -29,8 +29,6 @@
 namespace {
 
 constexpr size_t kMaxQueuedSamples = 256;
-constexpr size_t kMaxQueuedControllerSamples = 1024;
-constexpr double kUntrackedMoveSeconds = 0.25;
 constexpr int kRetryMilliseconds = 2000;
 constexpr double kDeviceRetrySeconds = 5.0;
 constexpr double kCameraRetrySeconds = 1.0;
@@ -71,14 +69,6 @@ bool PsmsClient::Drain(std::vector<LightSample>* samples, bool* camera_valid, Ve
     *camera = camera_;
     *cameras = cameras_;
     return streaming_;
-}
-
-bool PsmsClient::DrainControllers(std::vector<ControllerSample>* samples)
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-    samples->swap(controller_samples_);
-    controller_samples_.clear();
-    return controllers_streaming_;
 }
 
 void PsmsClient::LatestMoves(std::vector<MoveState>* moves)
@@ -132,21 +122,6 @@ bool PsmsClient::Camera(Vec3* position, int* cameras)
         *cameras = cameras_;
     }
     return camera_valid_;
-}
-
-void PsmsClient::PushController(const ControllerSample& sample)
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (controller_samples_.size() >= kMaxQueuedControllerSamples) {
-        controller_samples_.erase(controller_samples_.begin());
-    }
-    controller_samples_.push_back(sample);
-}
-
-void PsmsClient::SetControllersStreaming(bool streaming)
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-    controllers_streaming_ = streaming;
 }
 
 void PsmsClient::Push(const LightSample& sample)
@@ -460,7 +435,6 @@ void PsmsClient::Run()
                 (client_version ? client_version : "?") + ")");
         Stream(api);
         SetStreaming(false);
-        SetControllersStreaming(false);
         SetCameras(false, Vec3{}, 0);
         if (api.GetIsInitialized()) {
             api.Shutdown();
@@ -483,13 +457,10 @@ void PsmsClient::Stream(const Api& api)
     bool last_tracking = false;
     PSMVector3f last_position{};
 
-    // Every other PS Move, for calibrating the body cameras and for the hands.
+    // Every other PS Move, for the hands.
     struct Followed {
         int id;
         int hand;
-        bool tracking;
-        PSMVector3f position;
-        double sent;
         float rumble;
         MoveState last;  // kept, untracked, when a read fails, so the Move keeps its hand
     };
@@ -511,7 +482,6 @@ void PsmsClient::Stream(const Api& api)
         }
         followed.clear();
         SetMoves({});
-        SetControllersStreaming(false);
     };
 
     const auto stop_device = [&]() {
@@ -661,15 +631,13 @@ void PsmsClient::Stream(const Api& api)
                         api.StartControllerDataStream(
                             id, PSMStreamFlags_includePositionData | PSMStreamFlags_includePhysicsData,
                             kRequestTimeoutMs) == PSMResult_Success) {
-                        followed.push_back({id, static_cast<int>(list.controller_hand[i]), false, PSMVector3f{}, 0.0,
-                                            0.0f, MoveState{}});
+                        followed.push_back({id, static_cast<int>(list.controller_hand[i]), 0.0f, MoveState{}});
                     } else {
                         api.FreeControllerListener(id);
                     }
                 }
                 // Until one is connected, look again now and then.
                 list_controllers = followed.empty();
-                SetControllersStreaming(!followed.empty());
                 LogOnce("PSMoveServiceEx: following " + std::to_string(followed.size()) + " PS Move(s)");
             }
         }
@@ -683,18 +651,7 @@ void PsmsClient::Stream(const Api& api)
                 }
                 continue;
             }
-            const bool tracking = state.bIsCurrentlyTracking;
-            const PSMVector3f position = state.Pose.Position;
-            // An untracked Move is still lit for the phones to see: say now and then that it is on.
-            const double now = MonoSeconds();
-            if (tracking != f.tracking || (tracking && std::memcmp(&position, &f.position, sizeof(position)) != 0) ||
-                (!tracking && now - f.sent >= kUntrackedMoveSeconds)) {
-                PushController({now, f.id, Vec3{position.x * 0.01, position.y * 0.01, position.z * 0.01}, tracking});
-                f.tracking = tracking;
-                f.position = position;
-                f.sent = now;
-            }
-            f.last = ToMoveState(state, f.id, f.hand, now);
+            f.last = ToMoveState(state, f.id, f.hand, MonoSeconds());
             moves.push_back(f.last);
             const float rumble = Rumble(f.id);
             if (rumble != f.rumble &&

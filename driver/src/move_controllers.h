@@ -72,30 +72,16 @@ private:
 };
 
 // Both hands: follows the PS Moves from PSMoveServiceEx on its own thread and gives the
-// controllers their poses, falling back on the wrists the body tracking sees (`wrists`, may be
-// null). A Move set to the left or right hand in PSMoveServiceEx goes there; the others fill the
-// right hand first, then the left.
+// controllers their poses (see MoveHand). A Move set to the left or right hand in PSMoveServiceEx
+// goes there; the others fill the right hand first, then the left.
 //
 // Each bulb goes through the head's light filter first: like the visor's light, the PS Eye sees it
 // well sideways and poorly in depth, worse the farther it is, so it shakes; the filter smooths it
-// more while the hand keeps still, and leaves out the jumps of a bulb half hidden. The body
-// cameras' views of the bulbs (`sightings`, may be null) go into it as they do the head's: they
-// give its depth, and follow it while the PS Eye does not see it. A view is the bulb of the hand
-// nearest its line of sight, when the other hand is clearly farther; near neither, of the one
-// hand that nothing follows.
-// Where a lost Move's hand goes: in front of the headset, turning with it but not tilting.
-struct HandRestConfig {
-    bool enabled = true;
-    double below_m = 0.5;    // under the eyes
-    double forward_m = 0.3;  // in front of them
-    double side_m = 0.2;     // each hand to its side
-};
-
+// more while the hand keeps still, and leaves out the jumps of a bulb half hidden.
 class MoveControllers {
 public:
-    // `pitch_degrees`: see MoveHand. `bulb`: the filter's settings for a bulb.
-    MoveControllers(PsmsClient* psms, SharedWrists* wrists, HeadSightingQueue* sightings, double pitch_degrees,
-                    const HeadPositionConfig& bulb, const HandRestConfig& rest = HandRestConfig{});
+    // `bulb`: the filter's settings for a bulb.
+    MoveControllers(PsmsClient* psms, const HeadPositionConfig& bulb, const HandConfig& hand);
     ~MoveControllers();
 
     // Adds the controllers to SteamVR and starts following the Moves.
@@ -106,35 +92,24 @@ public:
 
 private:
     void Run();
-    // The hand whose bulb a camera saw, or -1.
-    int Owner(const HeadSighting& sighting, double now) const;
+    // The headset as SteamVR has it now.
+    Headset ReadHeadset();
     // Select and Start held: tells PSMoveServiceEx the Move points at the PS Eye.
     void CheckRecenter(int hand, const MoveState& move, double now);
     void LogReport();
 
     PsmsClient* psms_;
-    SharedWrists* wrists_;
-    HeadSightingQueue* sightings_;
-    double pitch_degrees_;
     std::unique_ptr<MoveController> devices_[2];  // left, right
     bool added_[2] = {false, false};
     // The thread only.
     HeadPositionConfig bulb_config_;
-    HandRestConfig rest_config_;
-    Vec3 rest_forward_{0.0, 0.0, -1.0};
+    HandConfig hand_config_;
+    Vec3 forward_{0.0, 0.0, -1.0};  // where the headset last looked, level
     HeadPositionEstimator bulbs_[2];
-    MoveHand hands_[2]{MoveHand(true), MoveHand(false)};
+    MoveHand hands_[2];
     int ids_[2] = {-1, -1};
     float rumble_[2] = {0.0f, 0.0f};
     double recenter_since_[2] = {-1.0, -1.0};
-    // How much each controller trembles while held still and seen, for the log.
-    struct Tremor {
-        bool started = false;
-        Vec3 mean;
-        double squares = 0.0;
-        int count = 0;
-    };
-    Tremor tremor_[2];
 
     std::atomic<bool> running_{false};
     std::thread thread_;

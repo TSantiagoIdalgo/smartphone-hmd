@@ -19,21 +19,6 @@ constexpr double kReportSeconds = 10.0;
 constexpr int kLoopMilliseconds = 2;
 constexpr double kRecenterHoldSeconds = 1.0;
 constexpr double kFullTiltRadians = 25.0 * 3.14159265358979 / 180.0;  // the trackpad's edge
-// A camera's view of a bulb is a hand's when its line of sight passes this close to where the hand
-// was, and the other hand's this much farther.
-constexpr double kOwnerMaxGapM = 0.25;
-constexpr double kOwnerMarginM = 0.1;
-// Near neither hand: a hand whose bulb nobody follows may have moved that far since.
-constexpr double kLostOwnerMaxGapM = 0.8;
-constexpr double kMinViewDistanceM = 0.3;
-// For the log: how much a controller trembles while held still and seen, about its average of the
-// last quarter second; slower than this, moving it slowly would count.
-constexpr double kStillSpeed = 0.03;  // m/s
-constexpr double kTremorSeconds = 0.25;
-// The phones' calibration no longer fits the PS Eye when this share of their views of a bulb miss
-// it, out of at least this many in a report.
-constexpr double kMisfitShare = 1.0 / 3.0;
-constexpr int kMisfitViews = 30;
 
 const char* const kHandNames[2] = {"left", "right"};
 
@@ -210,10 +195,9 @@ float MoveController::Rumble(double now)
 // MoveControllers
 // ---------------------------------------------------------------------------
 
-MoveControllers::MoveControllers(PsmsClient* psms, SharedWrists* wrists, HeadSightingQueue* sightings,
-                                 double pitch_degrees, const HeadPositionConfig& bulb, const HandRestConfig& rest)
-    : psms_(psms), wrists_(wrists), sightings_(sightings), pitch_degrees_(pitch_degrees), bulb_config_(bulb),
-      rest_config_(rest), bulbs_{HeadPositionEstimator(bulb), HeadPositionEstimator(bulb)}
+MoveControllers::MoveControllers(PsmsClient* psms, const HeadPositionConfig& bulb, const HandConfig& hand)
+    : psms_(psms), bulb_config_(bulb), hand_config_(hand),
+      bulbs_{HeadPositionEstimator(bulb), HeadPositionEstimator(bulb)}, hands_{MoveHand(true, hand), MoveHand(false, hand)}
 {
     devices_[0] = std::make_unique<MoveController>("SMARTPHONE-HMD-MOVE-LEFT", true);
     devices_[1] = std::make_unique<MoveController>("SMARTPHONE-HMD-MOVE-RIGHT", false);
@@ -261,20 +245,10 @@ void MoveControllers::OnEvent(const vr::VREvent_t& event)
 void MoveControllers::Run()
 {
     std::vector<MoveState> moves;
-    std::vector<HeadSighting> sightings;
-    std::vector<int> owners;
     double next_report = MonoSeconds() + kReportSeconds;
     while (running_) {
         const double now = MonoSeconds();
         psms_->LatestMoves(&moves);
-        sightings.clear();
-        if (sightings_) {
-            sightings_->Drain(&sightings);
-        }
-        owners.clear();
-        for (const HeadSighting& sighting : sightings) {
-            owners.push_back(Owner(sighting, now));
-        }
         std::sort(moves.begin(), moves.end(), [](const MoveState& a, const MoveState& b) { return a.id < b.id; });
         // Which Move in which hand.
         int ids[2] = {-1, -1};
@@ -289,27 +263,7 @@ void MoveControllers::Run()
             }
         }
 
-        const Wrists wrists = wrists_ ? wrists_->Get() : Wrists{};
-        // Where each hand rests when lost: in front of the headset, as it turns.
-        HandRest rest[2];
-        vr::TrackedDevicePose_t head{};
-        if (rest_config_.enabled) {
-            vr::VRServerDriverHost()->GetRawTrackedDevicePoses(0.0f, &head, 1);
-        }
-        if (head.bPoseIsValid) {
-            const vr::HmdMatrix34_t& m = head.mDeviceToAbsoluteTracking;
-            const Vec3 looks{-m.m[0][2], 0.0, -m.m[2][2]};
-            if (Length(looks) > 0.2) {  // not looking straight up or down
-                rest_forward_ = Unit(looks);
-            }
-            const Vec3 right = Cross(rest_forward_, Vec3{0.0, 1.0, 0.0});
-            const Vec3 middle = Vec3{m.m[0][3], m.m[1][3] - rest_config_.below_m, m.m[2][3]} +
-                                rest_forward_ * rest_config_.forward_m;
-            for (int h = 0; h < 2; ++h) {
-                rest[h].valid = true;
-                rest[h].position = middle + right * (h == 0 ? -rest_config_.side_m : rest_config_.side_m);
-            }
-        }
+        const Headset headset = ReadHeadset();
         Vec3 camera;
         int cameras = 0;
         const bool camera_valid = psms_->Camera(&camera, &cameras);
@@ -324,7 +278,7 @@ void MoveControllers::Run()
                     DriverLog("Hands: no Move for the %s hand", kHandNames[h]);
                 }
                 ids_[h] = ids[h];
-                hands_[h] = MoveHand(h == 0, pitch_degrees_);
+                hands_[h] = MoveHand(h == 0, hand_config_);
                 bulbs_[h] = HeadPositionEstimator(bulb_config_);
                 rumble_[h] = 0.0f;
                 recenter_since_[h] = -1.0;
@@ -335,15 +289,10 @@ void MoveControllers::Run()
                 devices_[h]->Update(false, HandPose{}, 0, 0.0f);
                 continue;
             }
-            // The bulb, filtered; seen while the filter follows it, from the PS Eye or the phones.
+            // The bulb, filtered; seen while the filter follows it.
             HeadPositionEstimator& bulb = bulbs_[h];
             bulb.SetCamera(camera_valid, camera, cameras);
             bulb.AddLight(move->time, move->position, move->tracking, Vec3{});
-            for (size_t i = 0; i < sightings.size(); ++i) {
-                if (owners[i] == h) {
-                    bulb.AddSighting(now, sightings[i]);
-                }
-            }
             bulb.Tick(now, true);
             MoveState filtered = *move;
             filtered.tracking = bulb.state() == HeadPositionEstimator::State::Live;
@@ -352,21 +301,8 @@ void MoveControllers::Run()
                 filtered.position = out.position;
                 filtered.velocity = out.velocity;
             }
-            hands_[h].Update(filtered, wrists, now, rest[h]);
-            const HandPose pose = hands_[h].Pose(now);
-            devices_[h]->Update(true, pose, move->buttons, move->trigger);
-            Tremor& t = tremor_[h];
-            if (pose.valid && filtered.tracking) {
-                const double rate = 1.0 - std::exp(-kLoopMilliseconds / 1000.0 / kTremorSeconds);
-                t.mean = t.started ? t.mean + (pose.position - t.mean) * rate : pose.position;
-                t.started = true;
-                if (Length(pose.velocity) < kStillSpeed) {
-                    t.squares += Dot(pose.position - t.mean, pose.position - t.mean);
-                    ++t.count;
-                }
-            } else {
-                t.started = false;  // held or on the wrist: its jumps back are not trembling
-            }
+            hands_[h].Update(filtered, now, headset);
+            devices_[h]->Update(true, hands_[h].Pose(), move->buttons, move->trigger);
             CheckRecenter(h, *move, now);
             const float rumble = devices_[h]->Rumble(now);
             if (rumble != rumble_[h]) {
@@ -383,35 +319,23 @@ void MoveControllers::Run()
     }
 }
 
-int MoveControllers::Owner(const HeadSighting& sighting, double now) const
+Headset MoveControllers::ReadHeadset()
 {
-    const Vec3 ray = sighting.model.Ray(sighting.u, sighting.v);
-    double gaps[2] = {1e9, 1e9};
-    for (int h = 0; h < 2; ++h) {
-        // Where the hand was when the camera took the frame, a fifth of a second ago.
-        const HandPose pose = hands_[h].Pose(now);
-        const Vec3 then = pose.position - pose.velocity * std::clamp(now - sighting.time, 0.0, 0.5);
-        const Vec3 to = then - sighting.model.position;
-        if (ids_[h] >= 0 && pose.valid && Dot(to, ray) > kMinViewDistanceM) {
-            gaps[h] = Length(to - ray * Dot(to, ray));
-        }
+    Headset headset;
+    vr::TrackedDevicePose_t head{};
+    vr::VRServerDriverHost()->GetRawTrackedDevicePoses(0.0f, &head, 1);
+    if (!head.bPoseIsValid) {
+        return headset;
     }
-    const int nearest = gaps[0] <= gaps[1] ? 0 : 1;
-    if (gaps[nearest] > kOwnerMaxGapM) {
-        // The bulb of the one hand not followed, if the other is clearly elsewhere; its filter
-        // moves there only when two cameras agree on it.
-        int lost = -1, count = 0;
-        for (int h = 0; h < 2; ++h) {
-            if (ids_[h] >= 0 && bulbs_[h].state() != HeadPositionEstimator::State::Live) {
-                lost = h;
-                ++count;
-            }
-        }
-        return count == 1 && gaps[lost] < kLostOwnerMaxGapM && gaps[1 - lost] > kOwnerMaxGapM + kOwnerMarginM
-                   ? lost
-                   : -1;
+    const vr::HmdMatrix34_t& m = head.mDeviceToAbsoluteTracking;
+    const Vec3 looks{-m.m[0][2], 0.0, -m.m[2][2]};
+    if (Length(looks) > 0.2) {  // not looking straight up or down
+        forward_ = Unit(looks);
     }
-    return gaps[1 - nearest] < gaps[nearest] + kOwnerMarginM ? -1 : nearest;
+    headset.valid = true;
+    headset.eyes = Vec3{m.m[0][3], m.m[1][3], m.m[2][3]};
+    headset.forward = forward_;
+    return headset;
 }
 
 void MoveControllers::CheckRecenter(int hand, const MoveState& move, double now)
@@ -441,53 +365,41 @@ void MoveControllers::CheckRecenter(int hand, const MoveState& move, double now)
 
 void MoveControllers::LogReport()
 {
-    std::string text = "Hands:", misfit;
+    std::string text = "Hands:";
     for (int h = 0; h < 2; ++h) {
         const MoveHand::Stats stats = hands_[h].TakeStats();
         const HeadPositionEstimator::Stats bulb = bulbs_[h].TakeStats();
-        const int views = bulb.sightings + bulb.sightings_rejected;
-        if (views >= kMisfitViews && bulb.sightings_rejected > kMisfitShare * views) {
-            char part[96];
-            std::snprintf(part, sizeof(part), "%s%s %d of %d", misfit.empty() ? "" : ", ", kHandNames[h],
-                          bulb.sightings_rejected, views);
-            misfit += part;
-        }
-        const int total = stats.tracking + stats.from_wrist + stats.at_rest + stats.held;
+        const int total = stats.tracking + stats.at_rest + stats.held;
         char part[640];
         if (ids_[h] < 0 || total == 0) {
             std::snprintf(part, sizeof(part), "%s %s no Move", h > 0 ? ";" : "", kHandNames[h]);
         } else {
-            const Vec3 offset = hands_[h].BulbFromWrist();
-            Tremor& t = tremor_[h];
-            char still[64] = "never held still";
-            if (t.count > 0) {
-                std::snprintf(still, sizeof(still), "held still it trembles %.1f mm",
-                              std::sqrt(t.squares / t.count) * 1000.0);
+            char still[200] = "never held still";
+            if (stats.still > 0) {
+                const double seconds = std::max(stats.still_seconds, 1e-3);
+                std::snprintf(still, sizeof(still),
+                              "held still %.0f%% of the time: its bulb shook up to %.0f mm and its rotation %.1f "
+                              "degrees, the controller drifted %.1f mm and %.2f degrees a second",
+                              100.0 * stats.still / total, stats.shake_m * 1000.0, stats.shake_degrees,
+                              stats.drift_m * 1000.0 / seconds, stats.drift_degrees / seconds);
             }
-            t.squares = 0.0;
-            t.count = 0;
             std::snprintf(part, sizeof(part),
-                          "%s %s Move %d, %.0f%% of the time seen by the PS Eye or the phones, %.0f%% on the %s "
-                          "wrist, %.0f%% in front of the headset, %.0f%% held where it was (%d jumps not believed, %d "
-                          "bulb readings left out, %d "
-                          "resets); %s; the PS Eye's depth of it shakes %.0f mm and sideways %.0f, agility %.2f; the "
-                          "phones' views of it: %d used, %d left out, %d too late, found %d times without the PS Eye; "
-                          "the bulb %.0f cm from the wrist",
+                          "%s %s Move %d, %.0f%% of the time on its bulb, %.0f%% in front of the headset, %.0f%% held "
+                          "where it was (%d jumps not believed, %d glimpses of it left out, %d bulb positions out of "
+                          "reach, %d bulb readings left out, %d resets); the bulb up to %.0f cm from the eyes; %s; "
+                          "the PS Eye's depth of it shakes %.0f mm and sideways %.0f, agility %.2f",
                           h > 0 ? ";" : "", kHandNames[h], ids_[h], 100.0 * stats.tracking / total,
-                          100.0 * stats.from_wrist / total, kHandNames[hands_[h].wrist()],
-                          100.0 * stats.at_rest / total, 100.0 * stats.held / total,
-                          stats.jumps, bulb.rejected + bulb.implausible, bulb.resets, still,
-                          bulb.depth_innovation_rms_m * 1000.0, bulb.lateral_innovation_rms_m * 1000.0, bulb.agility,
-                          bulb.sightings, bulb.sightings_rejected, bulb.sightings_late, bulb.sighting_starts,
-                          Length(offset) * 100.0);
+                          100.0 * stats.at_rest / total, 100.0 * stats.held / total, stats.jumps, stats.glimpses,
+                          stats.out_of_reach, bulb.rejected + bulb.implausible, bulb.resets, stats.farthest * 100.0,
+                          still, bulb.depth_innovation_rms_m * 1000.0, bulb.lateral_innovation_rms_m * 1000.0,
+                          bulb.agility);
         }
         text += part;
+        if (stats.out_of_reach > stats.tracking && stats.out_of_reach > 100) {
+            DriverLog("Hands: the PS Eye mostly puts the %s bulb farther from the headset than an arm reaches: is the "
+                      "head light's distance right (Ctrl+Alt+L)? Otherwise raise controller_reach_cm",
+                      kHandNames[h]);
+        }
     }
     DriverLog("%s", text.c_str());
-    if (!misfit.empty()) {
-        DriverLog("Hands: the phones see the bulbs away from where the PS Eye puts them (views left out: %s): the "
-                  "phones or the PS Eye moved since the phones were calibrated, or PSMoveServiceEx's room did; "
-                  "calibrate the phones again (Ctrl+Alt+C)",
-                  misfit.c_str());
-    }
 }

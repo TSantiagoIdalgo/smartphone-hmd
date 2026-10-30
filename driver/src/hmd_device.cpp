@@ -46,12 +46,6 @@ bool HoldHotkeyDown()
     return HotkeyDown('H');
 }
 
-// Ctrl+Alt+B leaves the body cameras out of the head position, and takes them in again.
-bool SightingsHotkeyDown()
-{
-    return HotkeyDown('B');
-}
-
 // Ctrl+Alt+L measures how far off PSMoveServiceEx has the light, against a Move held to it.
 bool LightDistanceHotkeyDown()
 {
@@ -66,13 +60,13 @@ constexpr double kLightMeasureMinShare = 0.6;  // of the light's samples meanwhi
 constexpr double kRumbleStartSeconds = 0.15;   // the Move says: measuring, keep still
 constexpr double kRumbleDoneSeconds = 0.6;     // and: done
 
-const char* HeadStateText(HeadPositionEstimator::State state, bool light_followed)
+const char* HeadStateText(HeadPositionEstimator::State state)
 {
     switch (state) {
     case HeadPositionEstimator::State::NeverSeen:
         return "not seen yet";
     case HeadPositionEstimator::State::Live:
-        return light_followed ? "tracked" : "out of sight; the body cameras follow the head";
+        return "tracked";
     case HeadPositionEstimator::State::Holding:
         return "lost, holding the head where it was";
     case HeadPositionEstimator::State::Frozen:
@@ -152,7 +146,7 @@ bool DisplayComponent::ComputeInverseDistortion(vr::HmdVector2_t* result, vr::EV
 // HmdDevice
 // ---------------------------------------------------------------------------
 
-HmdDevice::HmdDevice(PsmsClient* psms, HeadSightingQueue* sightings) : psms_(psms), sightings_(sightings)
+HmdDevice::HmdDevice(PsmsClient* psms) : psms_(psms)
 {
     serial_number_ = GetStringSetting("serial_number");
     model_number_ = GetStringSetting("model_number");
@@ -176,12 +170,6 @@ HmdDevice::HmdDevice(PsmsClient* psms, HeadSightingQueue* sightings) : psms_(psm
         head.camera_period_seconds = 1.0 / std::max(GetDoubleSetting("head_light_camera_fps", 60.0), 1.0);
         head.lateral_noise_m = std::max(GetDoubleSetting("head_position_lateral_noise_mm", 2.0), 0.1) / 1000.0;
         head.depth_noise_m = std::max(GetDoubleSetting("head_position_depth_noise_cm", 3.0), 0.01) / 100.0;
-        head.depth_noise_with_sightings_m =
-            std::max(GetDoubleSetting("head_position_depth_noise_with_body_cm", 30.0), 0.01) / 100.0;
-        // The body cameras, two by two, put the head along the light's line of sight, and the light's
-        // distance is learned from them.
-        head.learn_light_scale = true;
-        head.sighting_pairs = true;
         head.agility = std::max(GetDoubleSetting("head_position_agility", 1.0), 0.001);
         light_distance_scale_ = std::clamp(GetDoubleSetting("head_light_distance_scale", 1.0), 0.2, 5.0);
         head.prediction_gain = std::clamp(GetDoubleSetting("head_position_prediction", 0.8), 0.0, 1.0);
@@ -193,13 +181,6 @@ HmdDevice::HmdDevice(PsmsClient* psms, HeadSightingQueue* sightings) : psms_(psm
         if (above == 0.0 && in_front == 0.0 && right == 0.0) {
             DriverLog("Head position: head_light_*_cm are all 0; measure where the light sits on the visor");
         }
-        use_sightings_ = sightings_ != nullptr && GetBoolSetting("head_body_cameras", true);
-        if (use_sightings_) {
-            DriverLog("Head position: the body cameras steady it and follow the head when the light is out of sight; "
-                      "Ctrl+Alt+B leaves them out and takes them in again");
-        }
-    } else {
-        sightings_ = nullptr;
     }
 
     DisplayConfig config;
@@ -392,7 +373,6 @@ void HmdDevice::TrackingThread()
     double logged_prediction = -1.0;
     uint8_t buffer[1500];
     std::vector<LightSample> light_samples;
-    std::vector<HeadSighting> sightings;
 
     while (active_) {
         uint32_t sender = 0;
@@ -452,7 +432,7 @@ void HmdDevice::TrackingThread()
         }
         hold_hotkey_was_down = hold_down;
         if (position_enabled_) {
-            UpdateHeadPosition(&light_samples, &sightings);
+            UpdateHeadPosition(&light_samples);
         }
 
         const bool receiving = Clock::now() - last_sample < std::chrono::seconds(1);
@@ -470,7 +450,7 @@ void HmdDevice::TrackingThread()
     }
 }
 
-void HmdDevice::UpdateHeadPosition(std::vector<LightSample>* samples, std::vector<HeadSighting>* sightings)
+void HmdDevice::UpdateHeadPosition(std::vector<LightSample>* samples)
 {
     const double now = MonoSeconds();
     const bool freeze_down = FreezeHotkeyDown();
@@ -479,13 +459,6 @@ void HmdDevice::UpdateHeadPosition(std::vector<LightSample>* samples, std::vecto
         head_position_.SetFrozen(head_frozen_, now);
     }
     freeze_hotkey_was_down_ = freeze_down;
-    const bool sightings_down = SightingsHotkeyDown();
-    if (sightings_down && !sightings_hotkey_was_down_ && sightings_) {
-        use_sightings_ = !use_sightings_;
-        DriverLog(use_sightings_ ? "Head position: with the body cameras again (Ctrl+Alt+B)"
-                                 : "Head position: the light alone, without the body cameras (Ctrl+Alt+B)");
-    }
-    sightings_hotkey_was_down_ = sightings_down;
 
     const bool streaming = psms_->Drain(samples, &head_camera_valid_, &head_camera_, &head_cameras_);
     head_position_.SetCamera(head_camera_valid_, head_camera_, head_cameras_);
@@ -500,22 +473,12 @@ void HmdDevice::UpdateHeadPosition(std::vector<LightSample>* samples, std::vecto
             head_last_light_ = sample.position;
         }
     }
-    if (sightings_) {
-        sightings_->Drain(sightings);
-        for (const HeadSighting& sighting : *sightings) {
-            if (use_sightings_) {
-                head_position_.AddSighting(now, sighting);
-            }
-        }
-    }
     head_position_.Tick(now, streaming);
 
     const HeadPositionEstimator::State state = head_position_.state();
-    const bool light_followed = head_position_.LightFollowed(now);
-    if (state != logged_head_state_ || light_followed != logged_light_followed_) {
-        DriverLog("Head light: %s", HeadStateText(state, light_followed));
+    if (state != logged_head_state_) {
+        DriverLog("Head light: %s", HeadStateText(state));
         logged_head_state_ = state;
-        logged_light_followed_ = light_followed;
     }
     if (now >= next_head_stats_) {
         next_head_stats_ = now + kHeadStatsSeconds;
@@ -541,15 +504,6 @@ void HmdDevice::UpdateHeadPosition(std::vector<LightSample>* samples, std::vecto
                           light_distance_scale_ * (head_height_ - head_camera_.y) / (stats.eye_height_m - head_camera_.y),
                           head_height_);
             }
-        }
-        if (stats.sightings + stats.sightings_rejected + stats.sightings_late > 0) {
-            DriverLog("Head from the body cameras: %d views used, %d left out, %d too late, found %d times without "
-                      "the light; %d of %d pairs of views met on the light's line of sight (%.0f cm from it on "
-                      "average), and the light's distance from the PS Eye is taken times %.2f to match them; the "
-                      "ears %.1f cm above the neck, %.1f cm behind it and %.1f cm to its right",
-                      stats.sightings, stats.sightings_rejected, stats.sightings_late, stats.sighting_starts,
-                      stats.on_line_views, stats.paired_views, stats.line_gap_m * 100.0, stats.light_scale,
-                      stats.ears_from_neck.y * 100.0, stats.ears_from_neck.z * 100.0, stats.ears_from_neck.x * 100.0);
         }
     }
 }
@@ -617,7 +571,7 @@ void HmdDevice::MeasureLightDistance(double now, const std::vector<LightSample>&
         if (light_measure_until_ == 0.0 && now >= light_measure_deadline_) {
             light_measure_deadline_ = 0.0;
             DriverLog("Head light: no Move's bulb against the light in %.0f s, nothing measured; is a Move on (with "
-                      "body tracking or controllers_enabled), and both seen by the PS Eye?",
+                      "controllers_enabled), and both seen by the PS Eye?",
                       kLightMeasureWaitSeconds);
         }
         return;
@@ -638,7 +592,6 @@ void HmdDevice::MeasureLightDistance(double now, const std::vector<LightSample>&
     std::nth_element(light_ratios_.begin(), light_ratios_.begin() + light_ratios_.size() / 2, light_ratios_.end());
     const double ratio = light_ratios_[light_ratios_.size() / 2];
     light_distance_scale_ = std::clamp(ratio, 0.2, 5.0);
-    head_position_.ForgetLightScale();  // what the body cameras taught is in this one now
     vr::VRSettings()->SetFloat(kSettingsSection, "head_light_distance_scale", static_cast<float>(light_distance_scale_));
     DriverLog("Head light: PSMoveServiceEx had it %.2f times as far from the PS Eye as the Move; "
               "head_light_distance_scale is now %.2f (saved)",

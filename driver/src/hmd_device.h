@@ -47,9 +47,8 @@ private:
 
 class HmdDevice : public vr::ITrackedDeviceServerDriver {
 public:
-    // `psms` (shared with the body tracking, may be null) gives the head light's position, and
-    // `sightings` (may be null) where the body tracking's cameras see the head.
-    HmdDevice(PsmsClient* psms, HeadSightingQueue* sightings);
+    // `psms` (shared with the controllers, may be null) gives the head light's position.
+    explicit HmdDevice(PsmsClient* psms);
     ~HmdDevice();
 
     vr::EVRInitError Activate(uint32_t object_id) override;
@@ -64,9 +63,8 @@ public:
 private:
     // Receives the phone's packets, updates the tracker and sends each new pose to SteamVR.
     void TrackingThread();
-    // Feeds the head light's samples from PSMoveServiceEx, and the body cameras' views, to the
-    // position estimator.
-    void UpdateHeadPosition(std::vector<LightSample>* samples, std::vector<HeadSighting>* sightings);
+    // Feeds the head light's samples from PSMoveServiceEx to the position estimator.
+    void UpdateHeadPosition(std::vector<LightSample>* samples);
     // Ctrl+Alt+L, and each light sample as PSMoveServiceEx gives it while measuring.
     void MeasureLightDistance(double now, const std::vector<LightSample>& samples);
     void RecenterHead(const char* source);
@@ -93,14 +91,10 @@ private:
     // 3DoF only (Ctrl+Alt+H): the eyes stay exactly still, for VDM's playspace calibration.
     bool head_held_ = false;
 
-    // 6DoF: a light on the visor, tracked by PSMoveServiceEx, and the body cameras give the head a
-    // position.
+    // 6DoF: a light on the visor, tracked by PSMoveServiceEx, gives the head a position.
     bool position_enabled_ = false;
     bool apply_head_model_ = false;
     PsmsClient* psms_ = nullptr;
-    HeadSightingQueue* sightings_ = nullptr;
-    bool use_sightings_ = false;  // Ctrl+Alt+B turns the body cameras' views off and on
-    bool sightings_hotkey_was_down_ = false;
     HeadPositionEstimator head_position_;  // only touched by the tracking thread, like the rest
     bool head_camera_valid_ = false;
     Vec3 head_camera_;
@@ -121,7 +115,6 @@ private:
     std::vector<MoveState> moves_;
     bool freeze_hotkey_was_down_ = false;
     HeadPositionEstimator::State logged_head_state_ = HeadPositionEstimator::State::NeverSeen;
-    bool logged_light_followed_ = false;
     double next_head_stats_ = 0.0;
     std::mutex pose_mutex_;
     vr::DriverPose_t last_pose_{};

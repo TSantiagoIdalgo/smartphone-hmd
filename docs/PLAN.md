@@ -136,7 +136,7 @@ móvil necesitan tu PC.
 - Modelo del móvil (resolución de pantalla y tamaño físico).
 - Modelo de GPU de la PC (para confirmar que codifica H.264 por hardware).
 
-## 9. Pendiente para más adelante (cuando el body tracking funcione bien)
+## 9. Siguiente: timewarp en el móvil y cuadros perdidos al codificar
 
 - **Timewarp en el móvil, para que girar la cabeza se sienta fluido.** Hoy la imagen llega al
   móvil 70-115 ms después de calcularse y se muestra tal cual. La PC compensa prediciendo la cabeza
