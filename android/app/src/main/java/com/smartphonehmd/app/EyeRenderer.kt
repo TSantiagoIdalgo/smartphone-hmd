@@ -53,6 +53,7 @@ class EyeRenderer(
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val pendingFrames = AtomicInteger(0)
+    private var lastFrameMs = 0L
     private var target: DecoderTarget? = null
     private var textureId = 0
     private val texMatrix = FloatArray(16)
@@ -122,6 +123,7 @@ class EyeRenderer(
         val texture = target?.texture
         // Take every frame that arrived since the last draw, so the newest one is shown.
         var frames = pendingFrames.getAndSet(0)
+        if (frames > 0) lastFrameMs = SystemClock.elapsedRealtime()
         try {
             while (frames-- > 0) texture?.updateTexImage()
         } catch (_: RuntimeException) {
@@ -154,6 +156,9 @@ class EyeRenderer(
         drawEye(0, l)
         GLES20.glScissor(half, 0, width - half, height)
         drawEye(1, l)
+        // With the timewarp, every refresh of the screen turns the newest frame anew while the
+        // video plays, whether or not another frame arrived.
+        if (timewarp.enabled && SystemClock.elapsedRealtime() - lastFrameMs < KEEP_TURNING_MS) view.requestRender()
     }
 
     private fun drawEye(eye: Int, l: EyeLayout) {
@@ -214,6 +219,7 @@ class EyeRenderer(
 
     private companion object {
         const val TAG = "SmartphoneHMD"
+        const val KEEP_TURNING_MS = 1000L
 
         val VERTEX_SHADER = """
             attribute vec2 aPosition;

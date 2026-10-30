@@ -127,7 +127,7 @@ class MainActivity : Activity() {
         }
         renderer = EyeRenderer(videoView, pxPerMm, layout, timewarp, ::onDecoderTarget)
         videoView.setRenderer(renderer)
-        setRenderMode()
+        videoView.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
         adjustPanel = AdjustPanel(
             this, defaults, layout, streamer.predict, timewarp.enabled,
             onChange = { renderer.layout = it },
@@ -138,7 +138,6 @@ class MainActivity : Activity() {
             },
             onTimewarp = {
                 timewarp.enabled = it
-                setRenderMode()
                 prefs().edit().putBoolean(KEY_TIMEWARP, it).apply()
             },
             onDone = { setPanelOpen(false) },
@@ -228,13 +227,6 @@ class MainActivity : Activity() {
             receiver?.stop()
             receiver = null
         }
-    }
-
-    // With the timewarp, every refresh of the screen turns the newest frame anew, whether or not
-    // another one arrived; without it, only a new frame is drawn.
-    private fun setRenderMode() {
-        videoView.renderMode =
-            if (timewarp.enabled) GLSurfaceView.RENDERMODE_CONTINUOUSLY else GLSurfaceView.RENDERMODE_WHEN_DIRTY
     }
 
     private fun setPanelOpen(open: Boolean) {

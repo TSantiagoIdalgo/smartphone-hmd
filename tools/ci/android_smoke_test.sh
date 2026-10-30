@@ -97,6 +97,7 @@ alive || fail "The app closed after tapping the screen"
 view_visible 'AdjustPanel' || fail "The eye adjustment did not open"
 has_node 'Ancho de cada ojo' || fail "The eye adjustment has no sliders"
 has_node 'Anticipar el movimiento' || fail "The eye adjustment has no prediction switch"
+has_node 'timewarp' || fail "The eye adjustment has no timewarp switch"
 adb shell input keyevent 4
 sleep 2
 alive || fail "The app closed after closing the eye adjustment"
