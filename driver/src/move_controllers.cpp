@@ -374,44 +374,40 @@ void MoveControllers::CheckRecenter(int hand, const MoveState& move, double now)
               kHandNames[hand], std::remainder(off, 360.0));
 }
 
+// One line per hand: both together would pass the log's line length.
 void MoveControllers::LogReport()
 {
-    std::string text = "Hands:";
     for (int h = 0; h < 2; ++h) {
         const MoveHand::Stats stats = hands_[h].TakeStats();
         const HeadPositionEstimator::Stats bulb = bulbs_[h].TakeStats();
         const int total = stats.tracking + stats.at_rest + stats.held;
-        char part[640];
         if (ids_[h] < 0 || total == 0) {
-            std::snprintf(part, sizeof(part), "%s %s no Move", h > 0 ? ";" : "", kHandNames[h]);
-        } else {
-            char still[200] = "never held still";
-            if (stats.still > 0) {
-                const double seconds = std::max(stats.still_seconds, 1e-3);
-                std::snprintf(still, sizeof(still),
-                              "held still %.0f%% of the time: its bulb shook up to %.0f mm and its rotation %.1f "
-                              "degrees, the controller drifted %.1f mm and %.2f degrees a second",
-                              100.0 * stats.still / total, stats.shake_m * 1000.0, stats.shake_degrees,
-                              stats.drift_m * 1000.0 / seconds, stats.drift_degrees / seconds);
-            }
-            std::snprintf(part, sizeof(part),
-                          "%s %s Move %d, %.0f%% of the time on its bulb, %.0f%% in front of the headset, %.0f%% held "
-                          "where it was (%d jumps not believed, %d glimpses of it left out, %d bulb positions out of "
-                          "reach, %d bulb readings left out, %d resets); on its bulb, on average %.0f cm to the right "
-                          "of the eyes, %.0f cm in front and %.0f cm below, and across the floor up to %.0f cm from "
-                          "them; %s; the PS Eye's depth of it shakes %.0f mm and sideways %.0f, agility %.2f",
-                          h > 0 ? ";" : "", kHandNames[h], ids_[h], 100.0 * stats.tracking / total,
-                          100.0 * stats.at_rest / total, 100.0 * stats.held / total, stats.jumps, stats.glimpses,
-                          stats.out_of_reach, bulb.rejected + bulb.implausible, bulb.resets, stats.offset.x * 100.0,
-                          stats.offset.z * 100.0, -stats.offset.y * 100.0, stats.farthest * 100.0, still,
-                          bulb.depth_innovation_rms_m * 1000.0, bulb.lateral_innovation_rms_m * 1000.0, bulb.agility);
+            DriverLog("Hands: %s no Move", kHandNames[h]);
+            continue;
         }
-        text += part;
+        char still[200] = "never held still";
+        if (stats.still > 0) {
+            const double seconds = std::max(stats.still_seconds, 1e-3);
+            std::snprintf(still, sizeof(still),
+                          "held still %.0f%% of the time: its bulb shook up to %.0f mm and its rotation %.1f degrees, "
+                          "the controller drifted %.1f mm and %.2f degrees a second",
+                          100.0 * stats.still / total, stats.shake_m * 1000.0, stats.shake_degrees,
+                          stats.drift_m * 1000.0 / seconds, stats.drift_degrees / seconds);
+        }
+        DriverLog("Hands: %s Move %d, %.0f%% of the time on its bulb, %.0f%% in front of the headset, %.0f%% held where "
+                  "it was (%d jumps not believed, %d glimpses of it left out, %d bulb positions out of reach, %d bulb "
+                  "readings left out, %d resets); on its bulb, on average %.0f cm to the right of the eyes, %.0f cm in "
+                  "front and %.0f cm below, and across the floor up to %.0f cm from them; %s; the PS Eye's depth of it "
+                  "shakes %.0f mm and sideways %.0f, agility %.2f",
+                  kHandNames[h], ids_[h], 100.0 * stats.tracking / total, 100.0 * stats.at_rest / total,
+                  100.0 * stats.held / total, stats.jumps, stats.glimpses, stats.out_of_reach,
+                  bulb.rejected + bulb.implausible, bulb.resets, stats.offset.x * 100.0, stats.offset.z * 100.0,
+                  -stats.offset.y * 100.0, stats.farthest * 100.0, still, bulb.depth_innovation_rms_m * 1000.0,
+                  bulb.lateral_innovation_rms_m * 1000.0, bulb.agility);
         if (stats.out_of_reach > stats.tracking && stats.out_of_reach > 100) {
             DriverLog("Hands: the PS Eye mostly puts the %s bulb farther from the headset than an arm reaches: is the "
                       "head light's distance right (Ctrl+Alt+L)? Otherwise raise controller_reach_cm",
                       kHandNames[h]);
         }
     }
-    DriverLog("%s", text.c_str());
 }
