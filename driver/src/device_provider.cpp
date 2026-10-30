@@ -60,6 +60,7 @@ vr::EVRInitError DeviceProvider::Init(vr::IVRDriverContext* driver_context)
         hand.found_seconds = std::clamp(GetDoubleSetting("controller_found_ms", 300.0), 0.0, 2000.0) / 1000.0;
         hand.still_mm = std::clamp(GetDoubleSetting("controller_still_mm", 15.0), 0.0, 100.0);
         hand.still_degrees = std::clamp(GetDoubleSetting("controller_still_degrees", 0.6), 0.0, 10.0);
+        hand.yaw_from_motion = GetBoolSetting("controller_yaw_from_motion", true);
         controllers_ = std::make_unique<MoveControllers>(psms_.get(), bulb, hand);
         controllers_->Start();
         DriverLog("Hands: the PS Moves are controllers here; turn off VDM's controllers in SteamVR");
@@ -78,6 +79,10 @@ vr::EVRInitError DeviceProvider::Init(vr::IVRDriverContext* driver_context)
         DriverLog("Hands: held still, a hand stays put through %.0f mm and %.1f degrees of shaking "
                   "(controller_still_mm, controller_still_degrees)",
                   hand.still_mm, hand.still_degrees);
+        DriverLog(hand.yaw_from_motion ? "Hands: each Move's rotation about the vertical is corrected from how the PS "
+                                         "Eye sees it move (controller_yaw_from_motion)"
+                                       : "Hands: each Move's rotation as PSMoveServiceEx gives it "
+                                         "(controller_yaw_from_motion off)");
     }
     if (psms_) {
         psms_->Start(psms);

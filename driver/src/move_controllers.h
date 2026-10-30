@@ -9,6 +9,7 @@
 
 #include "head_position.h"
 #include "move_hand.h"
+#include "move_yaw.h"
 #include "openvr_driver.h"
 
 class PsmsClient;
@@ -77,7 +78,8 @@ private:
 //
 // Each bulb goes through the head's light filter first: like the visor's light, the PS Eye sees it
 // well sideways and poorly in depth, worse the farther it is, so it shakes; the filter smooths it
-// more while the hand keeps still, and leaves out the jumps of a bulb half hidden.
+// more while the hand keeps still, and leaves out the jumps of a bulb half hidden. Each rotation
+// has its drift about the vertical undone (see MoveYaw).
 class MoveControllers {
 public:
     // `bulb`: the filter's settings for a bulb.
@@ -107,6 +109,7 @@ private:
     Vec3 forward_{0.0, 0.0, -1.0};  // where the headset last looked, level
     HeadPositionEstimator bulbs_[2];
     MoveHand hands_[2];
+    MoveYaw yaws_[2];
     int ids_[2] = {-1, -1};
     float rumble_[2] = {0.0f, 0.0f};
     double recenter_since_[2] = {-1.0, -1.0};

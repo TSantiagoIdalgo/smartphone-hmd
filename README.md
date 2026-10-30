@@ -144,6 +144,9 @@ con la PS Eye y sus sensores; el driver solo decide qué mostrar:
 - Con la mano quieta, el mando queda quieto. La PS Eye y PSMoveServiceEx hacen temblar la bola unos
   mm y el giro una fracción de grado, y el driver no pasa ese temblor mientras el giroscopio del
   Move dice que no te mueves. Al mover la mano, el mando la sigue sin retraso.
+- Con movimientos bruscos, PSMoveServiceEx pierde la cuenta de hacia dónde apunta el Move. El
+  driver lo corrige solo: compara cómo cambia la velocidad del Move según su acelerómetro con cómo
+  la PS Eye ve moverse la bola. Tras unos segundos moviéndote, el mando vuelve a apuntar bien.
 
 Para activarlo:
 
@@ -155,7 +158,7 @@ Para activarlo:
    izquierda.
 4. Si el mando apunta hacia arriba o hacia abajo cuando el Move apunta al frente, pon
    `controller_pitch_degrees` en 90 o -90.
-5. Si un Move va girando de a poco, apúntalo a la PS Eye y mantén **Select + Start** un segundo.
+5. Si un Move queda apuntando mal, apúntalo a la PS Eye y mantén **Select + Start** un segundo.
 
 Sin el paso 6, la cabeza no sabe dónde estás y los mandos pueden quedar corridos. Para alinearlos,
 haz la **Playspace Calibration** de VDM pulsando **Ctrl+Alt+H** antes de empezarla y otra vez al
@@ -183,6 +186,7 @@ Ajustes en `default.vrsettings`, si hacen falta:
 | `controller_reach_cm` | 120 | A más distancia del visor, medida sobre el piso, la bola no se cree. `0` lo apaga |
 | `controller_still_mm`, `controller_still_degrees` | 15, 0.6 | Cuánto temblor se tapa con la mano quieta. Súbelos si aún tiembla |
 | `controller_depth_noise_cm` | 4 | Cuánto se suaviza la distancia de la bola a la PS Eye. Más alto, más suave y más lento |
+| `controller_yaw_from_motion` | true | `false`: el giro del Move queda tal como lo da PSMoveServiceEx |
 
 ## Si algo no funciona
 
@@ -201,9 +205,11 @@ Busca las líneas con `smartphone_hmd` en `Steam\logs\vrserver.txt`:
   vuelve a calibrar su posición en PSMoveServiceEx, o revisa la medida de `head_light_above_eyes_cm`.
 - `Hands:`, cada 10 segundos, por cada mano: cuánto tiempo estuvo en la bola, frente al visor o
   quieto donde se perdió. También dice cuántas veces no creyó a la bola, por un salto, por verla
-  solo un momento o por estar demasiado lejos, dónde quedó en promedio respecto de los ojos, y
-  cuánto tembló con la mano quieta. Si la bola queda casi siempre `out of reach`, la distancia de
-  la luz del visor está mal: repite el paso 6.5.
+  solo un momento o por estar demasiado lejos, dónde quedó en promedio respecto de los ojos,
+  cuánto tembló con la mano quieta y cuánto corrigió el driver hacia dónde apunta. Si la bola queda
+  casi siempre `out of reach`, la distancia de la luz del visor está mal: repite el paso 6.5.
+- `rotation reset`, al pulsar Select + Start: cuántos grados se había desviado el Move según
+  PSMoveServiceEx, y cuántos quedaban después de la corrección del driver.
 
 Si la imagen se corta o llega tarde, usa el cable USB o Wi-Fi de 5 GHz, o baja
 `video_bitrate_mbps`.

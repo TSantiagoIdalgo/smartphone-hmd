@@ -27,6 +27,7 @@ add_library(tracking STATIC
   src/chaperone.cpp
   src/head_position.cpp
   src/move_hand.cpp
+  src/move_yaw.cpp
 )
 target_include_directories(tracking PUBLIC src)
 find_package(Threads REQUIRED)

@@ -16,6 +16,7 @@
 #include "head_position.h"
 #include "head_tracker.h"
 #include "move_hand.h"
+#include "move_yaw.h"
 #include "protocol.h"
 #include "video_protocol.h"
 #include "vsync_clock.h"
@@ -1365,6 +1366,97 @@ void TestMoveHandKeepsStill()
     CHECK(turned.lag_degrees < 0.01);
 }
 
+// A Move swung about briskly 2.5 m from the PS Eye, its rotation as PSMoveServiceEx gives it
+// turned `drift(t)` about the vertical from the truth. The PS Eye's positions arrive 40 ms late,
+// 3 cm off in depth and 2 mm sideways each frame; the accelerometer sits 12 cm behind the bulb.
+// Returns the correction at each second.
+std::vector<double> RunMoveYaw(double seconds, const std::function<double(double)>& drift, bool brisk = true)
+{
+    const Vec3 camera{0.0, 1.2, -2.5}, base{0.2, 1.1, 0.0}, accel_to_bulb{0.0, 0.0, -0.12};
+    std::mt19937 random(11);
+    const auto gaussian = [&]() {
+        const double u = (static_cast<double>(random()) + 0.5) / 4294967296.0;
+        const double v = static_cast<double>(random()) / 4294967296.0;
+        return std::sqrt(-2.0 * std::log(u)) * std::cos(2.0 * kPi * v);
+    };
+    const double k = brisk ? 1.0 : 0.05;
+    const auto bulb = [&](double t) {
+        return base + Vec3{k * (0.25 * std::sin(2.0 * kPi * 1.3 * t) + 0.1 * std::sin(2.0 * kPi * 2.7 * t + 1.0)),
+                           k * 0.15 * std::sin(2.0 * kPi * 0.9 * t),
+                           k * (0.2 * std::sin(2.0 * kPi * 1.1 * t + 2.0) + 0.08 * std::sin(2.0 * kPi * 3.1 * t))};
+    };
+    const auto rotation = [&](double t) {
+        const double yaw = 0.5 * std::sin(2.0 * kPi * 0.7 * t) + k * 0.6 * std::sin(2.0 * kPi * 2.3 * t);
+        const double pitch = 0.3 * std::sin(2.0 * kPi * 1.7 * t);
+        return AxisAngle(Vec3{0, 1, 0}, yaw) * AxisAngle(Vec3{1, 0, 0}, pitch);
+    };
+    const auto accel_point = [&](double t) { return bulb(t) - Rotate(rotation(t), accel_to_bulb); };
+    MoveYaw yaw(0.040);
+    std::vector<double> corrections;
+    std::deque<std::pair<double, Vec3>> in_flight;
+    Vec3 seen = bulb(0.0);
+    const double h = 1e-3;
+    for (int step = 0; step * 0.002 < seconds; ++step) {
+        const double t = step * 0.002, now = 10.0 + t;
+        if (step % 8 == 0) {  // a camera frame, arriving 40 ms later
+            const Vec3 truth = bulb(t), along = Unit(truth - camera), side = Unit(Cross(along, Vec3{0, 1, 0}));
+            in_flight.push_back({now + 0.040, truth + along * (0.03 * gaussian()) + side * (0.002 * gaussian()) +
+                                                  Cross(side, along) * (0.002 * gaussian())});
+        }
+        while (!in_flight.empty() && in_flight.front().first <= now) {
+            seen = in_flight.front().second;
+            in_flight.pop_front();
+        }
+        MoveState move;
+        move.time = now;
+        move.tracking = true;
+        move.position = seen;
+        const Quat q = rotation(t);
+        move.orientation = Normalize(AxisAngle(Vec3{0, 1, 0}, drift(t)) * q);
+        if (step % 2 == 0) {  // the sensors, 250 times a second
+            const Vec3 a = (accel_point(t + h) - accel_point(t) * 2.0 + accel_point(t - h)) * (1.0 / (h * h));
+            const Vec3 force = (a + Vec3{0.0, 9.81, 0.0}) * (1.0 / 9.81);
+            move.accel = Rotate(Conjugate(q), force) + Vec3{0.01 * gaussian(), 0.01 * gaussian(), 0.01 * gaussian()};
+            const Quat dq = Normalize(rotation(t + h) * Conjugate(rotation(t - h)));
+            const Vec3 world_spin = Vec3{dq.x, dq.y, dq.z} * (2.0 / (2.0 * h) * (dq.w < 0.0 ? -1.0 : 1.0));
+            move.gyro = Rotate(Conjugate(q), world_spin) + Vec3{0.01 * gaussian(), 0.01 * gaussian(), 0.01 * gaussian()};
+            move.sensor_time = t;
+        } else {
+            move.accel = Vec3{};  // between samples PSMoveServiceEx repeats the last; nothing new here
+        }
+        if (Length(move.accel) > 0.0) {
+            yaw.Add(move, now);
+        } else {
+            MoveState same = move;
+            same.tracking = true;
+            yaw.Add(same, now);
+        }
+        if (step % 500 == 0) {
+            corrections.push_back(yaw.Correction());
+        }
+    }
+    return corrections;
+}
+
+void TestMoveYawFindsTheDrift()
+{
+    // No drift: it stays near none. Then PSMoveServiceEx's rotation slips 25 degrees in a flick:
+    // within some seconds of swinging, the correction undoes it.
+    const auto slip = [](double t) { return t >= 15.0 ? 25.0 * kPi / 180.0 : 0.0; };
+    const std::vector<double> c = RunMoveYaw(40.0, slip);
+    double before = 0.0;
+    for (int s = 5; s < 15; ++s) {
+        before = std::max(before, std::fabs(c[s]));
+    }
+    std::printf("move yaw: up to %.1f degrees before the slip, %.1f at 20 s, %.1f at 25 s, %.1f at 40 s\n",
+                before * 180.0 / kPi, c[20] * 180.0 / kPi, c[25] * 180.0 / kPi, c.back() * 180.0 / kPi);
+    CHECK(before < 3.0 * kPi / 180.0);
+    CHECK(std::fabs(c.back() + 25.0 * kPi / 180.0) < 3.0 * kPi / 180.0);
+    // Barely moving, nothing tells it a turn: it corrects nothing.
+    const std::vector<double> still = RunMoveYaw(30.0, slip, false);
+    CHECK(std::fabs(still.back()) < 1e-9);
+}
+
 int main()
 {
     TestParse();
@@ -1416,6 +1508,7 @@ int main()
     TestMoveHandOutOfReach();
     TestMoveHandHoldsWithoutRest();
     TestMoveHandKeepsStill();
+    TestMoveYawFindsTheDrift();
     if (g_failures == 0) {
         std::printf("All tests passed\n");
         return 0;
