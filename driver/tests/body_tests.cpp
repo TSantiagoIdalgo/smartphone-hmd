@@ -1034,6 +1034,46 @@ void TestMoveHandIgnoresBulbJumps()
     CHECK(Length(hand.Pose(time).position - move.position) < 0.01);
 }
 
+void TestMoveHandRestsInFrontOfTheHead()
+{
+    // No wrists; the PS Eye loses the bulb. Hidden a moment it stays where it was; lost longer it
+    // glides to where it rests in front of the headset, and follows it there; seen again, it goes
+    // back to the bulb.
+    MoveHand hand(false);
+    double time = 100.0;
+    const Vec3 bulb{0.3, 1.1, -0.4};
+    const auto step = [&](bool seen, const HandRest& rest) {
+        MoveState move;
+        move.time = time;
+        move.tracking = seen;
+        move.position = bulb;
+        hand.Update(move, Wrists{}, time, rest);
+        time += 0.004;
+        return hand.Pose(time - 0.004);
+    };
+    HandRest rest;
+    rest.valid = true;
+    rest.position = Vec3{0.2, 1.2, -0.3};
+    for (int i = 0; i < 100; ++i) step(true, rest);
+    HandPose pose;
+    for (int i = 0; i < 50; ++i) pose = step(false, rest);  // 0.2 s
+    CHECK(!pose.at_rest && Length(pose.position - bulb) < 1e-9);
+    double largest_step = 0.0;
+    Vec3 previous = pose.position;
+    for (int i = 0; i < 500; ++i) {  // 2 s more, the head turning and the rest with it
+        rest.position = Vec3{0.2 + 0.1 * std::sin(i * 0.01), 1.2, -0.3};
+        pose = step(false, rest);
+        largest_step = std::max(largest_step, Length(pose.position - previous));
+        previous = pose.position;
+    }
+    CHECK(pose.at_rest && Length(pose.position - rest.position) < 0.002);
+    CHECK(largest_step < 0.01);  // glides, at most 10 mm in 4 ms
+    for (int i = 0; i < 250; ++i) pose = step(true, rest);
+    CHECK(pose.tracking && Length(pose.position - bulb) < 0.002);
+    const MoveHand::Stats stats = hand.TakeStats();
+    CHECK(stats.at_rest > 400 && stats.held > 60);
+}
+
 void TestMoveHandHoldsWithoutWrist()
 {
     // Neither the bulb nor the wrist: it stays where it was, still turning, without jumping.
@@ -1079,6 +1119,7 @@ int main()
     TestMoveHandFallsBackOnWrist();
     TestMoveHandFindsItsWrist();
     TestMoveHandHoldsWithoutWrist();
+    TestMoveHandRestsInFrontOfTheHead();
     TestMoveHandIgnoresBulbJumps();
     if (g_failures == 0) {
         std::printf("All body tests passed\n");

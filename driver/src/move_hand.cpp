@@ -16,6 +16,7 @@ constexpr double kMaxBulbSpeed = 12.0;      // m/s; a hand swung hard reaches ab
 constexpr double kMinFrameSeconds = 1.0 / 30.0;  // PSMoveServiceEx's states repeat between camera frames
 constexpr double kJumpSpreadM = 0.15;       // positions after a jump this close together: one place
 constexpr double kJumpTrustSeconds = 0.3;   // staying there this long, it is believed
+constexpr double kRestAfterSeconds = 0.3;   // lost this long (not just hidden a moment), it goes to rest
 
 // Along the Move from the wrist to the bulb, in the controller's axes, until learned.
 const Vec3 kDefaultBulbFromWrist{0.0, 0.0, -0.16};
@@ -29,7 +30,7 @@ MoveHand::MoveHand(bool left, double pitch_degrees)
     offset_[0] = offset_[1] = kDefaultBulbFromWrist;
 }
 
-void MoveHand::Update(const MoveState& move, const Wrists& wrists, double now)
+void MoveHand::Update(const MoveState& move, const Wrists& wrists, double now, const HandRest& rest)
 {
     const Quat orientation = Normalize(move.orientation * move_from_controller_);
     const HandPose before = Pose(now);
@@ -86,6 +87,11 @@ void MoveHand::Update(const MoveState& move, const Wrists& wrists, double now)
         pose.position = wrists.position[wrist_] + Rotate(orientation, offset_[wrist_]);
         pose.velocity = wrists.velocity[wrist_];
         ++stats_.from_wrist;
+    } else if (rest.valid && now - followed_at_ >= kRestAfterSeconds) {
+        pose.valid = true;
+        pose.at_rest = true;
+        pose.position = rest.position;
+        ++stats_.at_rest;
     } else {
         // Where it was, turning in place.
         pose.valid = pose_.valid;
@@ -93,7 +99,11 @@ void MoveHand::Update(const MoveState& move, const Wrists& wrists, double now)
         ++stats_.held;
     }
 
-    if (pose_.valid && (pose.tracking != pose_.tracking || pose.from_wrist != pose_.from_wrist)) {
+    if (pose.tracking || pose.from_wrist) {
+        followed_at_ = now;
+    }
+    if (pose_.valid &&
+        (pose.tracking != pose_.tracking || pose.from_wrist != pose_.from_wrist || pose.at_rest != pose_.at_rest)) {
         blend_ = before.position - pose.position;
         blend_time_ = now;
     }

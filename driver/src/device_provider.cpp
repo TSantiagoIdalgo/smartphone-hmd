@@ -88,12 +88,22 @@ vr::EVRInitError DeviceProvider::Init(vr::IVRDriverContext* driver_context)
         bulb.max_speed = 10.0;
         bulb.min_eye_height = -1.0;
         bulb.max_eye_height = 3.5;
+        HandRestConfig rest;
+        rest.enabled = GetBoolSetting("controller_rest_enabled", true);
+        rest.below_m = GetDoubleSetting("controller_rest_below_cm", 50.0) / 100.0;
+        rest.forward_m = GetDoubleSetting("controller_rest_forward_cm", 30.0) / 100.0;
+        rest.side_m = GetDoubleSetting("controller_rest_side_cm", 20.0) / 100.0;
         controllers_ = std::make_unique<MoveControllers>(psms_.get(), wrists_.get(), bulb_sightings_.get(),
-                                                         GetDoubleSetting("controller_pitch_degrees", 0.0), bulb);
+                                                         GetDoubleSetting("controller_pitch_degrees", 0.0), bulb, rest);
         controllers_->Start();
         DriverLog(body ? "Hands: the PS Moves are controllers here, their bulbs followed by the phones while the PS Eye "
                          "does not see them, and by the wrists when neither does; turn off VDM's controllers in SteamVR"
                        : "Hands: the PS Moves are controllers here; turn off VDM's controllers in SteamVR");
+        if (rest.enabled) {
+            DriverLog("Hands: a Move lost a moment goes %.0f cm under the eyes, %.0f cm in front and %.0f cm to its side, "
+                      "turning with the headset (controller_rest_*)",
+                      rest.below_m * 100.0, rest.forward_m * 100.0, rest.side_m * 100.0);
+        }
     }
     if (psms_) {
         psms_->Start(psms);

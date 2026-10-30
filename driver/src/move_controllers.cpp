@@ -211,9 +211,9 @@ float MoveController::Rumble(double now)
 // ---------------------------------------------------------------------------
 
 MoveControllers::MoveControllers(PsmsClient* psms, SharedWrists* wrists, HeadSightingQueue* sightings,
-                                 double pitch_degrees, const HeadPositionConfig& bulb)
+                                 double pitch_degrees, const HeadPositionConfig& bulb, const HandRestConfig& rest)
     : psms_(psms), wrists_(wrists), sightings_(sightings), pitch_degrees_(pitch_degrees), bulb_config_(bulb),
-      bulbs_{HeadPositionEstimator(bulb), HeadPositionEstimator(bulb)}
+      rest_config_(rest), bulbs_{HeadPositionEstimator(bulb), HeadPositionEstimator(bulb)}
 {
     devices_[0] = std::make_unique<MoveController>("SMARTPHONE-HMD-MOVE-LEFT", true);
     devices_[1] = std::make_unique<MoveController>("SMARTPHONE-HMD-MOVE-RIGHT", false);
@@ -290,6 +290,26 @@ void MoveControllers::Run()
         }
 
         const Wrists wrists = wrists_ ? wrists_->Get() : Wrists{};
+        // Where each hand rests when lost: in front of the headset, as it turns.
+        HandRest rest[2];
+        vr::TrackedDevicePose_t head{};
+        if (rest_config_.enabled) {
+            vr::VRServerDriverHost()->GetRawTrackedDevicePoses(0.0f, &head, 1);
+        }
+        if (head.bPoseIsValid) {
+            const vr::HmdMatrix34_t& m = head.mDeviceToAbsoluteTracking;
+            const Vec3 looks{-m.m[0][2], 0.0, -m.m[2][2]};
+            if (Length(looks) > 0.2) {  // not looking straight up or down
+                rest_forward_ = Unit(looks);
+            }
+            const Vec3 right = Cross(rest_forward_, Vec3{0.0, 1.0, 0.0});
+            const Vec3 middle = Vec3{m.m[0][3], m.m[1][3] - rest_config_.below_m, m.m[2][3]} +
+                                rest_forward_ * rest_config_.forward_m;
+            for (int h = 0; h < 2; ++h) {
+                rest[h].valid = true;
+                rest[h].position = middle + right * (h == 0 ? -rest_config_.side_m : rest_config_.side_m);
+            }
+        }
         Vec3 camera;
         int cameras = 0;
         const bool camera_valid = psms_->Camera(&camera, &cameras);
@@ -332,7 +352,7 @@ void MoveControllers::Run()
                 filtered.position = out.position;
                 filtered.velocity = out.velocity;
             }
-            hands_[h].Update(filtered, wrists, now);
+            hands_[h].Update(filtered, wrists, now, rest[h]);
             const HandPose pose = hands_[h].Pose(now);
             devices_[h]->Update(true, pose, move->buttons, move->trigger);
             Tremor& t = tremor_[h];
@@ -432,7 +452,7 @@ void MoveControllers::LogReport()
                           bulb.sightings_rejected, views);
             misfit += part;
         }
-        const int total = stats.tracking + stats.from_wrist + stats.held;
+        const int total = stats.tracking + stats.from_wrist + stats.at_rest + stats.held;
         char part[640];
         if (ids_[h] < 0 || total == 0) {
             std::snprintf(part, sizeof(part), "%s %s no Move", h > 0 ? ";" : "", kHandNames[h]);
@@ -448,12 +468,14 @@ void MoveControllers::LogReport()
             t.count = 0;
             std::snprintf(part, sizeof(part),
                           "%s %s Move %d, %.0f%% of the time seen by the PS Eye or the phones, %.0f%% on the %s "
-                          "wrist, %.0f%% held where it was (%d jumps not believed, %d bulb readings left out, %d "
+                          "wrist, %.0f%% in front of the headset, %.0f%% held where it was (%d jumps not believed, %d "
+                          "bulb readings left out, %d "
                           "resets); %s; the PS Eye's depth of it shakes %.0f mm and sideways %.0f, agility %.2f; the "
                           "phones' views of it: %d used, %d left out, %d too late, found %d times without the PS Eye; "
                           "the bulb %.0f cm from the wrist",
                           h > 0 ? ";" : "", kHandNames[h], ids_[h], 100.0 * stats.tracking / total,
-                          100.0 * stats.from_wrist / total, kHandNames[hands_[h].wrist()], 100.0 * stats.held / total,
+                          100.0 * stats.from_wrist / total, kHandNames[hands_[h].wrist()],
+                          100.0 * stats.at_rest / total, 100.0 * stats.held / total,
                           stats.jumps, bulb.rejected + bulb.implausible, bulb.resets, still,
                           bulb.depth_innovation_rms_m * 1000.0, bulb.lateral_innovation_rms_m * 1000.0, bulb.agility,
                           bulb.sightings, bulb.sightings_rejected, bulb.sightings_late, bulb.sighting_starts,

@@ -197,7 +197,13 @@ valores.
 - Con el body tracking no hace falta: los móviles corrigen solos esa distancia mientras te ven (ver
   "La cabeza con las cámaras del cuerpo"), y Ctrl+Alt+L solo da el punto de partida.
 
-## Body tracking: cámaras y pose en la PC (en pruebas)
+## Body tracking: cámaras y pose en la PC (descartado por ahora)
+
+**Por ahora no lo uses:** en las pruebas en VRChat la cabeza y las piernas saltaban y el avatar se
+deformaba. Déjalo apagado (`"body_tracking_enabled" : false,`, como viene) y cierra
+`body_tracker.py` y la app de cámara de los móviles. Sin él, la cabeza sale solo de la luz del visor
+(ver Ctrl+Alt+L más arriba) y un mando que la PS Eye pierde va frente al visor (ver "Mandos"). Lo que
+sigue queda como referencia.
 
 Cada móvil que hace de cámara corre la app **HMD Cámara**, que manda a la PC el video de su cámara
 (H.264, unos 2 Mb/s). En la PC, `tools/body_tracker.py` encuentra tu pose en cada cuadro con el
@@ -475,6 +481,12 @@ gana, con el body tracking:
 - **Y si nadie ve la bola**, la mano sigue a tu muñeca, que ven los móviles, en vez de quedarse
   clavada. El driver aprende dónde queda la bola respecto de tu muñeca mientras ve las dos cosas, y
   también cuál muñeca sostiene cada Move.
+- **Sin body tracking (o sin muñeca)**, un Move que la PS Eye pierde más de 0,3 s (detrás de la
+  espalda, fuera de su vista) va, deslizándose, a donde descansaría la mano frente al visor:
+  `controller_rest_below_cm` (50) bajo los ojos, `controller_rest_forward_cm` (30) adelante y
+  `controller_rest_side_cm` (20) hacia su lado, siguiendo hacia donde miras pero sin inclinarse con
+  la cabeza. Su giro sigue siendo el del Move. Cuando la PS Eye lo vuelve a ver, vuelve a la bola.
+  `controller_rest_enabled` en `false` lo deja quieto donde se perdió, como antes.
 
 Viene desactivado. Para activarlo:
 
@@ -512,8 +524,8 @@ Mandos → Administrar asignaciones, como un mando Vive.
   o alejarlo de la PS Eye, al revés. `controller_prediction` (1) adelanta la mano según su velocidad
   para compensar el retraso de PSMoveServiceEx.
 - En `vrserver.txt`, `Hands:` dice qué Move quedó en cada mano y, cada 10 segundos, qué parte del
-  tiempo lo vieron la PS Eye o los móviles, cuánto siguió a la muñeca y cuánto quedó quieto donde
-  estaba (sin bola ni muñeca), cuántas lecturas de la bola dejó afuera, **cuánto tiembla el mando
+  tiempo lo vieron la PS Eye o los móviles, cuánto siguió a la muñeca, cuánto estuvo frente al visor
+  y cuánto quedó quieto donde estaba (perdido hace menos de 0,3 s), cuántas lecturas de la bola dejó afuera, **cuánto tiembla el mando
   quieto** mientras se lo ve (`held still it trembles … mm`: lo que ves en el juego; menos de 5 mm
   está bien), cuánto tiembla la profundidad que da la PS Eye y de costado, cuántas vistas de los
   móviles coincidieron con la bola (`used`) y cuántas no (`left out`), y a cuántos centímetros de la

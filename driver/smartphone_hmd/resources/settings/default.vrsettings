@@ -49,6 +49,10 @@
 		"controller_depth_noise_cm": 4.0,
 		"controller_lateral_noise_mm": 2.0,
 		"controller_agility": 5.0,
-		"controller_prediction": 1.0
+		"controller_prediction": 1.0,
+		"controller_rest_enabled": true,
+		"controller_rest_below_cm": 50.0,
+		"controller_rest_forward_cm": 30.0,
+		"controller_rest_side_cm": 20.0
 	}
 }

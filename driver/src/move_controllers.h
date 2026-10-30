@@ -83,11 +83,19 @@ private:
 // give its depth, and follow it while the PS Eye does not see it. A view is the bulb of the hand
 // nearest its line of sight, when the other hand is clearly farther; near neither, of the one
 // hand that nothing follows.
+// Where a lost Move's hand goes: in front of the headset, turning with it but not tilting.
+struct HandRestConfig {
+    bool enabled = true;
+    double below_m = 0.5;    // under the eyes
+    double forward_m = 0.3;  // in front of them
+    double side_m = 0.2;     // each hand to its side
+};
+
 class MoveControllers {
 public:
     // `pitch_degrees`: see MoveHand. `bulb`: the filter's settings for a bulb.
     MoveControllers(PsmsClient* psms, SharedWrists* wrists, HeadSightingQueue* sightings, double pitch_degrees,
-                    const HeadPositionConfig& bulb);
+                    const HeadPositionConfig& bulb, const HandRestConfig& rest = HandRestConfig{});
     ~MoveControllers();
 
     // Adds the controllers to SteamVR and starts following the Moves.
@@ -112,6 +120,8 @@ private:
     bool added_[2] = {false, false};
     // The thread only.
     HeadPositionConfig bulb_config_;
+    HandRestConfig rest_config_;
+    Vec3 rest_forward_{0.0, 0.0, -1.0};
     HeadPositionEstimator bulbs_[2];
     MoveHand hands_[2]{MoveHand(true), MoveHand(false)};
     int ids_[2] = {-1, -1};

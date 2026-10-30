@@ -8,7 +8,8 @@
 // A PS Move held in one hand, as SteamVR should see it: where PSMoveServiceEx sees its bulb
 // while the PS Eye sees it, and while it does not (behind the body, out of the camera's view,
 // hidden by the other hand) where the body cameras see the wrist holding it, with the bulb where
-// it has been from that wrist. The rotation always comes from the Move itself.
+// it has been from that wrist. Seen by neither a moment, it goes to where it rests in front of the
+// headset, if given. The rotation always comes from the Move itself.
 //
 // Which wrist holds it, and where the bulb sits from that wrist in the Move's own axes, are
 // learned while both are seen. Changing from one to the other glides over a moment.
@@ -71,10 +72,17 @@ private:
     Wrists wrists_;
 };
 
+// Where a hand goes when neither the PS Eye nor the wrist says: in front of the headset, as it turns.
+struct HandRest {
+    bool valid = false;
+    Vec3 position;
+};
+
 struct HandPose {
     bool valid = false;
     bool tracking = false;    // from the bulb
-    bool from_wrist = false;  // from the wrist; neither: held where it was
+    bool from_wrist = false;  // from the wrist
+    bool at_rest = false;     // in front of the headset; none of these: held where it was
     Vec3 position;
     Quat orientation;  // SteamVR's controller axes: -z where it points, +y its top
     Vec3 velocity;
@@ -86,6 +94,7 @@ public:
     struct Stats {
         int tracking = 0;  // updates from the bulb
         int from_wrist = 0;
+        int at_rest = 0;
         int held = 0;
         int jumps = 0;     // bulb positions not believed: farther than a hand moves
     };
@@ -98,8 +107,8 @@ public:
     // The rotation PSMoveServiceEx would give a Move whose controller has `controller` (SteamVR's).
     Quat MoveOrientation(Quat controller) const { return Normalize(controller * Conjugate(move_from_controller_)); }
 
-    // Each new state of the Move, with the wrists of the same moment.
-    void Update(const MoveState& move, const Wrists& wrists, double now);
+    // Each new state of the Move, with the wrists of the same moment and where it would rest.
+    void Update(const MoveState& move, const Wrists& wrists, double now, const HandRest& rest = HandRest{});
     HandPose Pose(double now) const;
 
     // The person's wrist that holds it: 0 left, 1 right.
@@ -126,5 +135,6 @@ private:
     double jump_since_ = 0.0;
     Vec3 blend_;
     double blend_time_ = 0.0;
+    double followed_at_ = -1e9;  // when the bulb or the wrist last said where it is
     Stats stats_;
 };
