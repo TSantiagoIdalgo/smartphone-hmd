@@ -207,6 +207,7 @@ HmdDevice::HmdDevice(PsmsClient* psms) : psms_(psms)
 #if defined(_WIN32)
     const int bitrate = vr::VRSettings()->GetInt32(kSettingsSection, "video_bitrate_mbps") * 1000000;
     video_ = std::make_unique<VideoStreamer>();
+    video_->SetFieldOfView(std::tan(config.fov_degrees * 0.5f * 3.14159265f / 180.0f));
     if (video_->Start(static_cast<int>(display_frequency_), bitrate, &adapter_luid_)) {
         virtual_display_ = std::make_unique<VirtualDisplay>(video_.get(), display_frequency_);
         config.on_desktop = false;
@@ -406,7 +407,7 @@ void HmdDevice::TrackingThread()
                     }
 #if defined(_WIN32)
                     if (video_) {
-                        video_->OnPhonePacket(sender, packet.seq);
+                        video_->OnPhonePacket(sender, packet.seq, tracker_.Orientation());
                     }
 #endif
                 }

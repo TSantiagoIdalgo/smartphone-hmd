@@ -10,32 +10,44 @@ import org.junit.Test
 class FrameAssemblerTest {
     private val frames = mutableListOf<Pair<ByteArray, Boolean>>()
     private val sensorSeqs = mutableListOf<Int>()
+    private val turns = mutableListOf<FloatArray?>()
+    private val tans = mutableListOf<Float>()
     private var losses = 0
     private val assembler = FrameAssembler(
-        onFrame = { data, size, keyframe, _, _, sensorSeq ->
+        onFrame = { data, size, keyframe, _, _, sensorSeq, turn, tanHalfFov ->
             frames.add(data.copyOf(size) to keyframe)
             sensorSeqs.add(sensorSeq)
+            turns.add(turn?.copyOf())
+            tans.add(tanHalfFov)
         },
         onLoss = { losses++ },
     )
 
     /** Same packet layout the driver's video::Packetize produces. */
-    private fun packets(frameIndex: Int, data: ByteArray, keyframe: Boolean = false, sensorSeq: Int = 0): List<ByteArray> {
+    private fun packets(
+        frameIndex: Int,
+        data: ByteArray,
+        keyframe: Boolean = false,
+        sensorSeq: Int = 0,
+        turn: FloatArray? = null,
+    ): List<ByteArray> {
         val count = maxOf(1, (data.size + FrameAssembler.MAX_PAYLOAD - 1) / FrameAssembler.MAX_PAYLOAD)
         return (0 until count).map { chunk ->
             val start = chunk * FrameAssembler.MAX_PAYLOAD
             val end = minOf(data.size, start + FrameAssembler.MAX_PAYLOAD)
             ByteBuffer.allocate(FrameAssembler.HEADER_SIZE + end - start).order(ByteOrder.LITTLE_ENDIAN).apply {
-                put("HMV1".toByteArray(Charsets.US_ASCII))
+                put("HMV2".toByteArray(Charsets.US_ASCII))
                 putInt(frameIndex)
                 putShort(chunk.toShort())
                 putShort(count.toShort())
-                put((if (keyframe) 1 else 0).toByte())
+                put(((if (keyframe) 1 else 0) or (if (turn != null) 2 else 0)).toByte())
                 put(sensorSeq.toByte())
                 put((sensorSeq shr 8).toByte())
                 put((sensorSeq shr 16).toByte())
                 putShort(1920)
                 putShort(1080)
+                for (value in turn ?: floatArrayOf(1f, 0f, 0f, 0f)) putFloat(value)
+                putFloat(1.25f)
                 put(data, start, end - start)
             }.array()
         }
@@ -94,6 +106,8 @@ class FrameAssemblerTest {
         packets(0, frameData(100, 1), keyframe = true, sensorSeq = 0xABCDEF).forEach(::send)
 
         assertEquals(listOf(0xABCDEF), sensorSeqs)
+        assertEquals(null, turns[0])
+        assertEquals(1.25f, tans[0], 0f)
         assertTrue(frames.single().second)
     }
 
@@ -113,5 +127,13 @@ class FrameAssemblerTest {
 
         assertEquals(2, frames.size)
         assertArrayEquals(frameData(100, 2), frames[1].first)
+    }
+
+    @Test
+    fun passesOnTheTurnTheFrameWasDrawnFor() {
+        packets(0, frameData(100, 1), keyframe = true, sensorSeq = 7, turn = floatArrayOf(0.5f, 0.1f, -0.2f, 0.3f))
+            .forEach(::send)
+
+        assertArrayEquals(floatArrayOf(0.5f, 0.1f, -0.2f, 0.3f), turns[0], 0f)
     }
 }

@@ -14,11 +14,16 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Sends the raw gyroscope, accelerometer and magnetometer values to the PC over UDP.
- * One packet per gyroscope sample, carrying the latest accelerometer and magnetometer values.
+ * One packet per gyroscope sample, carrying the latest accelerometer and magnetometer values; each
+ * gyroscope sample also goes to [timewarp], with its packet's seq.
  * Once a second it also reports the latency [meter] measured, so the PC can predict the head that
  * far ahead (unless [predict] is off). Sensor callbacks and sends happen on a background thread.
  */
-class SensorStreamer(private val sensorManager: SensorManager, private val meter: LatencyMeter) : SensorEventListener {
+class SensorStreamer(
+    private val sensorManager: SensorManager,
+    private val meter: LatencyMeter,
+    private val timewarp: Timewarp,
+) : SensorEventListener {
     private var thread: HandlerThread? = null
     @Volatile private var handler: Handler? = null
     private var socket: DatagramSocket? = null
@@ -117,6 +122,7 @@ class SensorStreamer(private val sensorManager: SensorManager, private val meter
             Sensor.TYPE_MAGNETIC_FIELD -> event.values.copyInto(mag, endIndex = 3)
             Sensor.TYPE_GYROSCOPE -> {
                 Protocol.writeSensors(buffer, ++seq, event.timestamp, event.values, accel, mag)
+                timewarp.onGyro(seq, event.timestamp, event.values)
                 val now = SystemClock.elapsedRealtimeNanos()
                 if (send(Protocol.SENSOR_PACKET_SIZE)) meter.sent(seq, now)
                 if (now >= nextLatencyReportNs) {

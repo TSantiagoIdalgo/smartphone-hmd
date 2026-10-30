@@ -35,6 +35,7 @@ import java.util.concurrent.Executors
  */
 class MainActivity : Activity() {
     private val meter = LatencyMeter()
+    private val timewarp = Timewarp()
     private lateinit var streamer: SensorStreamer
     private lateinit var finder: PcFinder
     private lateinit var ipField: EditText
@@ -77,8 +78,9 @@ class MainActivity : Activity() {
             window.attributes.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         }
         preferFastestRefreshRate()
-        streamer = SensorStreamer(getSystemService(Context.SENSOR_SERVICE) as SensorManager, meter)
+        streamer = SensorStreamer(getSystemService(Context.SENSOR_SERVICE) as SensorManager, meter, timewarp)
         streamer.predict = prefs().getBoolean(KEY_PREDICT, true)
+        timewarp.enabled = prefs().getBoolean(KEY_TIMEWARP, true)
         finder = PcFinder(::onPcFound)
 
         ipField = EditText(this).apply {
@@ -123,16 +125,21 @@ class MainActivity : Activity() {
             visibility = View.GONE
             setOnClickListener { if (streaming) setPanelOpen(adjustPanel.visibility != View.VISIBLE) }
         }
-        renderer = EyeRenderer(videoView, pxPerMm, layout, ::onDecoderTarget)
+        renderer = EyeRenderer(videoView, pxPerMm, layout, timewarp, ::onDecoderTarget)
         videoView.setRenderer(renderer)
-        videoView.renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
+        setRenderMode()
         adjustPanel = AdjustPanel(
-            this, defaults, layout, streamer.predict,
+            this, defaults, layout, streamer.predict, timewarp.enabled,
             onChange = { renderer.layout = it },
             onGrid = { renderer.showGrid = it },
             onPredict = {
                 streamer.predict = it
                 prefs().edit().putBoolean(KEY_PREDICT, it).apply()
+            },
+            onTimewarp = {
+                timewarp.enabled = it
+                setRenderMode()
+                prefs().edit().putBoolean(KEY_TIMEWARP, it).apply()
             },
             onDone = { setPanelOpen(false) },
         )
@@ -215,12 +222,19 @@ class MainActivity : Activity() {
         val target = decoderTarget
         if (streaming && resumed && target != null) {
             if (receiver == null) {
-                receiver = VideoReceiver(target.surface, meter, streamer::requestKeyframe).also { it.start() }
+                receiver = VideoReceiver(target.surface, meter, timewarp, streamer::requestKeyframe).also { it.start() }
             }
         } else {
             receiver?.stop()
             receiver = null
         }
+    }
+
+    // With the timewarp, every refresh of the screen turns the newest frame anew, whether or not
+    // another one arrived; without it, only a new frame is drawn.
+    private fun setRenderMode() {
+        videoView.renderMode =
+            if (timewarp.enabled) GLSurfaceView.RENDERMODE_CONTINUOUSLY else GLSurfaceView.RENDERMODE_WHEN_DIRTY
     }
 
     private fun setPanelOpen(open: Boolean) {
@@ -439,6 +453,7 @@ class MainActivity : Activity() {
         const val KEY_LENS_K1 = "lens_k1"
         const val KEY_LENS_K2 = "lens_k2"
         const val KEY_PREDICT = "predict"
+        const val KEY_TIMEWARP = "timewarp"
         const val RECONNECT_AFTER_MS = 3000L
     }
 }

@@ -70,9 +70,13 @@ void VideoStreamer::Stop()
     }
 }
 
-void VideoStreamer::OnPhonePacket(uint32_t phone_ipv4, uint32_t seq)
+void VideoStreamer::OnPhonePacket(uint32_t phone_ipv4, uint32_t seq, Quat orientation)
 {
-    phone_seq_ = seq;
+    {
+        std::lock_guard<std::mutex> lock(phone_mutex_);
+        phone_seq_ = seq;
+        phone_orientation_ = orientation;
+    }
     const bool was_active = PhoneActive();
     if (phone_ipv4_.exchange(phone_ipv4) != phone_ipv4 || !was_active) {
         keyframe_requested_ = true;  // a phone that (re)connects needs a keyframe to start decoding
@@ -90,14 +94,49 @@ bool VideoStreamer::PhoneActive() const
     return NowNs() - phone_seen_ns_.load() < 1000000000LL;
 }
 
-void VideoStreamer::OnPresent(vr::SharedTextureHandle_t texture)
+// The pose the application drew this frame with, from SteamVR's frame timings, as a turn from the
+// orientation of the newest phone packet: the phone knows where its head was at that packet.
+void VideoStreamer::OnPresent(vr::SharedTextureHandle_t texture, uint64_t frame_id)
 {
-    if (PhoneActive()) {
-        ++presented_;
-        if (capture_->Copy(texture)) {
-            ++copied_;
-            presented_seq_ = phone_seq_;
+    if (!PhoneActive()) {
+        return;
+    }
+    ++presented_;
+    if (!capture_->Copy(texture)) {
+        return;
+    }
+    ++copied_;
+    Quat orientation;
+    {
+        std::lock_guard<std::mutex> lock(phone_mutex_);
+        presented_seq_ = phone_seq_;
+        orientation = phone_orientation_;
+    }
+    presented_has_turn_ = false;
+    vr::Compositor_FrameTiming timings[4] = {};
+    timings[0].m_nSize = sizeof(vr::Compositor_FrameTiming);
+    const uint32_t count = vr::VRServerDriverHost()->GetFrameTimings(timings, 4);
+    const vr::Compositor_FrameTiming* timing = nullptr;
+    for (uint32_t i = 0; i < count && i < 4; ++i) {
+        if (timings[i].m_HmdPose.bPoseIsValid) {
+            timing = &timings[i];  // the newest valid, unless one is this frame's
+            if (timings[i].m_nFrameIndex == frame_id) {
+                ++turns_matched_;
+                break;
+            }
         }
+    }
+    if (timing) {
+        const vr::HmdMatrix34_t& m = timing->m_HmdPose.mDeviceToAbsoluteTracking;
+        Mat3 rotation;
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                rotation.m[r][c] = m.m[r][c];
+            }
+        }
+        presented_turn_ = Normalize(Conjugate(orientation) * Mat3ToQuat(rotation));
+        presented_has_turn_ = true;
+        ++turns_found_;
     }
 }
 
@@ -113,6 +152,8 @@ void VideoStreamer::OnWaitForPresent()
         frame_width_ = width;
         frame_height_ = height;
         frame_seq_ = presented_seq_;
+        frame_has_turn_ = presented_has_turn_;
+        frame_turn_ = presented_turn_;
         frame_bgra_ = bgra;
         has_frame_ = true;
         frame_ready_.notify_one();
@@ -135,12 +176,21 @@ void VideoStreamer::EncodeThread()
     uint32_t frame_index = 0;
     int64_t frame_count = 0;
     int64_t next_send_ns = 0;
-    // The phone's packet seq for recent frames, by the time stamp the encoder hands back.
-    std::array<std::pair<int64_t, uint32_t>, 8> frame_seqs{};
+    // The phone's packet seq and the render turn of recent frames, by the time stamp the encoder
+    // hands back.
+    struct Sent {
+        int64_t time_100ns = -1;
+        uint32_t seq = 0;
+        bool has_turn = false;
+        Quat turn;
+    };
+    std::array<Sent, 8> sent{};
 
     while (running_) {
         int width = 0, height = 0, source_pitch = 0;
         uint32_t seq = 0;
+        bool has_turn = false;
+        Quat turn;
         bool bgra = false;
         {
             std::unique_lock<std::mutex> lock(frame_mutex_);
@@ -153,6 +203,8 @@ void VideoStreamer::EncodeThread()
             height = frame_height_;
             source_pitch = width * 4;
             seq = frame_seq_;
+            has_turn = frame_has_turn_;
+            turn = frame_turn_;
             bgra = frame_bgra_;
             has_frame_ = false;
         }
@@ -178,7 +230,7 @@ void VideoStreamer::EncodeThread()
 
         const uint32_t phone = phone_ipv4_.load();
         const int64_t time_100ns = frame_count * 10000000LL / fps_;
-        frame_seqs[frame_count % frame_seqs.size()] = {time_100ns, seq};
+        sent[frame_count % sent.size()] = {time_100ns, seq, has_turn, turn};
         ++frame_count;
         ++encoded_;
         encoder.Encode(nv12.data(), time_100ns, keyframe_requested_.exchange(false),
@@ -189,11 +241,17 @@ void VideoStreamer::EncodeThread()
                            }
                            video::FrameInfo info;
                            info.frame_index = frame_index++;
-                           for (const auto& entry : frame_seqs) {
-                               if (entry.first == output_time_100ns) {
-                                   info.sensor_seq = entry.second;
+                           for (const Sent& entry : sent) {
+                               if (entry.time_100ns == output_time_100ns) {
+                                   info.sensor_seq = entry.seq;
+                                   info.has_render_turn = entry.has_turn;
+                                   info.render_turn[0] = static_cast<float>(entry.turn.w);
+                                   info.render_turn[1] = static_cast<float>(entry.turn.x);
+                                   info.render_turn[2] = static_cast<float>(entry.turn.y);
+                                   info.render_turn[3] = static_cast<float>(entry.turn.z);
                                }
                            }
+                           info.tan_half_fov = tan_half_fov_;
                            info.keyframe = keyframe;
                            info.width = static_cast<uint16_t>(width);
                            info.height = static_cast<uint16_t>(height);
@@ -231,8 +289,10 @@ void VideoStreamer::LogStats()
     const uint32_t phone = phone_ipv4_.load();
     const uint8_t* ip = reinterpret_cast<const uint8_t*>(&phone);
     DriverLog("Video: phone %u.%u.%u.%u, %d presented, %d copied, %d texture busy, %d encoded, %d out (%d key), "
-              "%d packets, %lld KB sent, %d send errors, brightness %d",
+              "%d packets, %lld KB sent, %d send errors, brightness %d; %d with the pose they were drawn for (%d "
+              "matched to their frame)",
               ip[0], ip[1], ip[2], ip[3], presented_.exchange(0), copied_.exchange(0), acquire_timeouts,
               encoded_.exchange(0), encoded_out_.exchange(0), keyframes_out_.exchange(0), packets_sent_.exchange(0),
-              static_cast<long long>(bytes_sent_.exchange(0) / 1024), send_errors_.exchange(0), last_luma_.load());
+              static_cast<long long>(bytes_sent_.exchange(0) / 1024), send_errors_.exchange(0), last_luma_.load(),
+              turns_found_.exchange(0), turns_matched_.exchange(0));
 }

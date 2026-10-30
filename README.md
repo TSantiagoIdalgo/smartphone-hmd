@@ -90,6 +90,10 @@ teléfono. Ajusta con el móvil fuera del visor, pulsa **Listo** y compruébalo 
    terminar.
 5. **Anticipar el movimiento de la cabeza** viene marcado: la PC dibuja cada imagen donde estará la
    cabeza cuando llegue al móvil. Si la imagen se adelanta en los giros bruscos, desmárcalo.
+6. **Girar la imagen con la cabeza (timewarp)** viene marcado: justo antes de mostrar cada imagen,
+   el móvil la gira lo que giró tu cabeza desde que la PC la dibujó, con su propio giroscopio. Así
+   la vista sigue a la cabeza sin el retraso del video, también mientras la siguiente imagen tarda.
+   En un giro brusco puede asomar un borde negro a un costado, que se llena con la imagen siguiente.
 
 **Restablecer** vuelve a la imagen a pantalla completa.
 
@@ -188,8 +192,9 @@ Ajustes en `default.vrsettings`, si hacen falta:
 
 Busca las líneas con `smartphone_hmd` en `Steam\logs\vrserver.txt`:
 
-- `Video:`, cada 5 segundos: cuántas imágenes se capturan, codifican y envían. Mientras no llega
-  video, el móvil muestra cuántos paquetes recibe.
+- `Video:`, cada 5 segundos: cuántas imágenes se capturan, codifican y envían, y cuántas llevan la
+  orientación de la cabeza con que se dibujaron (sin ella el timewarp no las gira). Mientras no
+  llega video, el móvil muestra cuántos paquetes recibe.
 - `Phone latency`: cuánto tarda la imagen en llegar al móvil y cuánto se anticipa la cabeza.
 - `Phone:`, cada 10 segundos: si se perdieron datos del móvil por el camino, cuánto estuvo quieto
   en la mesa y cuánto se desvía su giroscopio. Si dice `its gyroscope's bias was not learned`, deja

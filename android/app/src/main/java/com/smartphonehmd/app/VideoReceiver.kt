@@ -13,11 +13,12 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * Receives the PC's H.264 video over UDP and shows it on [surface]. When a frame is lost it waits
  * for the next keyframe and asks the PC for one through [requestKeyframe]. Each frame shown is
- * timed with [meter].
+ * timed with [meter], and what the PC says it was drawn for goes to [timewarp].
  */
 class VideoReceiver(
     private val surface: Surface,
     private val meter: LatencyMeter,
+    private val timewarp: Timewarp,
     private val requestKeyframe: () -> Unit,
 ) {
     @Volatile private var running = false
@@ -101,7 +102,10 @@ class VideoReceiver(
         }
     }
 
-    private fun onFrame(data: ByteArray, size: Int, keyframe: Boolean, width: Int, height: Int, sensorSeq: Int) {
+    private fun onFrame(
+        data: ByteArray, size: Int, keyframe: Boolean, width: Int, height: Int, sensorSeq: Int, turn: FloatArray?,
+        tanHalfFov: Float,
+    ) {
         framesComplete.incrementAndGet()
         if (keyframe) keyframes.incrementAndGet()
         if (waitingForKeyframe && !keyframe) return
@@ -132,6 +136,7 @@ class VideoReceiver(
                 queuedSeqs[queuedNext] = sensorSeq
                 queuedNext = (queuedNext + 1) % QUEUED_FRAMES
             }
+            timewarp.onFrame(timeUs, sensorSeq, turn, tanHalfFov)
             decoder.queueInputBuffer(index, 0, size, timeUs, 0)
         } catch (e: Exception) {
             lastError = e.message ?: e.toString()

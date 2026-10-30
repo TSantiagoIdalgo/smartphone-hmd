@@ -136,7 +136,15 @@ móvil necesitan tu PC.
 - Modelo del móvil (resolución de pantalla y tamaño físico).
 - Modelo de GPU de la PC (para confirmar que codifica H.264 por hardware).
 
-## 9. Siguiente: timewarp en el móvil y cuadros perdidos al codificar
+## 9. Timewarp en el móvil y cuadros perdidos al codificar
+
+Hecho el timewarp: cada cuadro lleva la orientación con que SteamVR lo dibujó (de sus
+`Compositor_FrameTiming`), como giro desde la del último paquete del móvil que la PC tenía; el móvil
+guarda la orientación de cada paquete que envía, integrada de su giroscopio, y en cada refresco de
+pantalla gira el cuadro lo que la cabeza giró desde entonces. Falta, si los bordes negros molestan,
+dibujar con algo de margen alrededor. Los cuadros perdidos al codificar bajaron a un 5 %.
+
+Lo que se había planeado:
 
 - **Timewarp en el móvil, para que girar la cabeza se sienta fluido.** Hoy la imagen llega al
   móvil 70-115 ms después de calcularse y se muestra tal cual. La PC compensa prediciendo la cabeza

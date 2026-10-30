@@ -6,11 +6,16 @@ import java.nio.ByteOrder
 /**
  * Rebuilds H.264 frames from the PC's UDP video packets (format in the driver's video_protocol.h).
  * Calls [onFrame] for every complete frame and [onLoss] when a frame went missing. `sensorSeq` is
- * the low 24 bits of the newest sensor packet the PC had when it drew the frame (0 if unknown).
- * Not thread-safe: use it from the receiving thread only.
+ * the low 24 bits of the newest sensor packet the PC had when it drew the frame (0 if unknown);
+ * `turn` (w, x, y, z) how the head was turned for the frame from that packet's rotation, or null if
+ * the PC did not know; `tanHalfFov` how wide each eye's frame is. Not thread-safe: use it from the
+ * receiving thread only.
  */
 class FrameAssembler(
-    private val onFrame: (data: ByteArray, size: Int, keyframe: Boolean, width: Int, height: Int, sensorSeq: Int) -> Unit,
+    private val onFrame: (
+        data: ByteArray, size: Int, keyframe: Boolean, width: Int, height: Int, sensorSeq: Int, turn: FloatArray?,
+        tanHalfFov: Float,
+    ) -> Unit,
     private val onLoss: () -> Unit,
 ) {
     private var buffer = ByteArray(512 * 1024)
@@ -24,10 +29,12 @@ class FrameAssembler(
     private var width = 0
     private var height = 0
     private var sensorSeq = 0
+    private var turn: FloatArray? = null
+    private var tanHalfFov = 1f
 
     fun addPacket(packet: ByteArray, length: Int) {
         if (length < HEADER_SIZE || packet[0] != 'H'.code.toByte() || packet[1] != 'M'.code.toByte() ||
-            packet[2] != 'V'.code.toByte() || packet[3] != '1'.code.toByte()
+            packet[2] != 'V'.code.toByte() || packet[3] != '2'.code.toByte()
         ) {
             return
         }
@@ -60,7 +67,7 @@ class FrameAssembler(
 
         if (chunksReceived == chunkCount) {
             complete = true
-            onFrame(buffer, frameSize, keyframe, width, height, sensorSeq)
+            onFrame(buffer, frameSize, keyframe, width, height, sensorSeq, turn, tanHalfFov)
         }
     }
 
@@ -70,10 +77,13 @@ class FrameAssembler(
         chunksReceived = 0
         frameSize = 0
         complete = false
-        keyframe = (header.get(12).toInt() and FLAG_KEYFRAME) != 0
+        val flags = header.get(12).toInt()
+        keyframe = (flags and FLAG_KEYFRAME) != 0
         sensorSeq = header.getInt(12) ushr 8
         width = header.getShort(16).toInt() and 0xFFFF
         height = header.getShort(18).toInt() and 0xFFFF
+        turn = if ((flags and FLAG_RENDER_TURN) != 0) FloatArray(4) { header.getFloat(20 + 4 * it) } else null
+        tanHalfFov = header.getFloat(36)
         if (received.size < count) received = BooleanArray(count) else received.fill(false, 0, count)
     }
 
@@ -82,9 +92,10 @@ class FrameAssembler(
     }
 
     companion object {
-        const val HEADER_SIZE = 20
+        const val HEADER_SIZE = 40
         const val MAX_PAYLOAD = 1400
         const val FLAG_KEYFRAME = 1
+        const val FLAG_RENDER_TURN = 2
         private const val LATE_WINDOW = 30L
     }
 }

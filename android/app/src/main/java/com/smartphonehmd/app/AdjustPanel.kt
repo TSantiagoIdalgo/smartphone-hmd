@@ -16,16 +16,19 @@ import kotlin.math.roundToInt
  * [onChange] at once, so the video behind the panel shows it live. [defaults] is the unadjusted
  * full-screen layout; the size sliders go up to twice its values. [onGrid] turns on a grid that
  * stays after the panel closes, to check the lens correction from inside the headset. [onPredict]
- * turns the PC's head-movement prediction on or off, next to the measured latency it is based on.
+ * turns the PC's head-movement prediction on or off, next to the measured latency it is based on,
+ * and [onTimewarp] the phone's own turning of each frame to where the head is.
  */
 class AdjustPanel(
     context: Context,
     private val defaults: EyeLayout,
     initial: EyeLayout,
     predict: Boolean,
+    timewarp: Boolean,
     private val onChange: (EyeLayout) -> Unit,
     onGrid: (Boolean) -> Unit,
     onPredict: (Boolean) -> Unit,
+    onTimewarp: (Boolean) -> Unit,
     onDone: () -> Unit,
 ) : ScrollView(context) {
     var eyeLayout = initial
@@ -72,6 +75,12 @@ class AdjustPanel(
             setTextColor(Color.WHITE)
             isChecked = predict
             setOnCheckedChangeListener { _, checked -> onPredict(checked) }
+        })
+        column.addView(CheckBox(context).apply {
+            text = "Girar la imagen con la cabeza mientras llega la siguiente (timewarp)"
+            setTextColor(Color.WHITE)
+            isChecked = timewarp
+            setOnCheckedChangeListener { _, checked -> onTimewarp(checked) }
         })
         for (slider in sliders) {
             val label = text("")

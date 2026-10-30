@@ -14,7 +14,7 @@ double VirtualDisplay::Now() const
 
 void VirtualDisplay::Present(const vr::PresentInfo_t* present_info, uint32_t)
 {
-    streamer_->OnPresent(present_info->backbufferTextureHandle);
+    streamer_->OnPresent(present_info->backbufferTextureHandle, present_info->nFrameId);
 }
 
 void VirtualDisplay::WaitForPresent()

@@ -6,6 +6,7 @@ import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import java.nio.ByteBuffer
@@ -24,13 +25,14 @@ class DecoderTarget(val texture: SurfaceTexture, val surface: Surface) {
 
 /**
  * Draws the side-by-side video with each eye in its own rectangle from [layout], pre-bent so the
- * headset's lens straightens it. Whenever OpenGL (re)starts it makes a new [DecoderTarget] and
- * hands it to [onTarget] on the main thread.
+ * headset's lens straightens it, and turned by [timewarp] for where the head is now. Whenever
+ * OpenGL (re)starts it makes a new [DecoderTarget] and hands it to [onTarget] on the main thread.
  */
 class EyeRenderer(
     private val view: GLSurfaceView,
     private val pxPerMm: Float,
     layout: EyeLayout,
+    private val timewarp: Timewarp,
     private val onTarget: (DecoderTarget) -> Unit,
 ) : GLSurfaceView.Renderer {
     @Volatile var layout = layout
@@ -54,6 +56,7 @@ class EyeRenderer(
     private var target: DecoderTarget? = null
     private var textureId = 0
     private val texMatrix = FloatArray(16)
+    private val warpMatrix = FloatArray(9)
     private val vertices = ByteBuffer.allocateDirect(16 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
     private var width = 0
     private var height = 0
@@ -67,6 +70,8 @@ class EyeRenderer(
     private var uLens = 0
     private var uEye = 0
     private var uGrid = 0
+    private var uWarp = 0
+    private var uTan = 0
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         program = try {
@@ -84,6 +89,8 @@ class EyeRenderer(
         uLens = GLES20.glGetUniformLocation(program, "uLens")
         uEye = GLES20.glGetUniformLocation(program, "uEye")
         uGrid = GLES20.glGetUniformLocation(program, "uGrid")
+        uWarp = GLES20.glGetUniformLocation(program, "uWarp")
+        uTan = GLES20.glGetUniformLocation(program, "uTan")
 
         val ids = IntArray(1)
         GLES20.glGenTextures(1, ids, 0)
@@ -127,6 +134,7 @@ class EyeRenderer(
         if (program == 0 || texture == null || width == 0) return
 
         texture.getTransformMatrix(texMatrix)
+        val tan = timewarp.matrix(texture.timestamp, SystemClock.elapsedRealtimeNanos(), warpMatrix)
         val l = layout
         GLES20.glUseProgram(program)
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
@@ -136,6 +144,8 @@ class EyeRenderer(
         GLES20.glUniform2f(uHalfMm, l.widthMm / 2f, l.heightMm / 2f)
         GLES20.glUniform2f(uLens, l.k1, l.k2)
         GLES20.glUniform1f(uGrid, if (showGrid) 1f else 0f)
+        GLES20.glUniformMatrix3fv(uWarp, 1, false, warpMatrix, 0)
+        GLES20.glUniform1f(uTan, if (tan > 0f) tan else 1f)
 
         // Each eye stays on its own half of the screen, like the headset's divider.
         GLES20.glEnable(GLES20.GL_SCISSOR_TEST)
@@ -217,8 +227,10 @@ class EyeRenderer(
 
         // Barrel distortion that cancels the lens' pincushion: a point r from the lens centre shows
         // the image from r * (1 + k1 r² + k2 r⁴), with r in units of 30 mm (about a cheap lens'
-        // radius) so k1 and k2 keep their effect when the eye is resized. Texture coordinates need
-        // high precision: a 2400-pixel-wide video blurs with mediump.
+        // radius) so k1 and k2 keep their effect when the eye is resized. That point looks along a
+        // direction from the eye (uTan the tangent of half the eye's angle), which uWarp turns into
+        // the head the frame was drawn for. Texture coordinates need high precision: a
+        // 2400-pixel-wide video blurs with mediump.
         val FRAGMENT_SHADER = """
             #extension GL_OES_EGL_image_external : require
             #ifdef GL_FRAGMENT_PRECISION_HIGH
@@ -232,14 +244,19 @@ class EyeRenderer(
             uniform vec2 uLens;
             uniform float uEye;
             uniform float uGrid;
+            uniform mat3 uWarp;
+            uniform float uTan;
             varying vec2 vMm;
             void main() {
                 float r2 = dot(vMm, vMm) / 900.0;
                 vec2 source = vMm * (1.0 + uLens.x * r2 + uLens.y * r2 * r2) / uHalfMm;
-                if (abs(source.x) > 1.0 || abs(source.y) > 1.0) {
+                vec3 ray = uWarp * vec3(source * uTan, -1.0);
+                vec2 drawn = ray.xy / (-ray.z * uTan);
+                if (abs(source.x) > 1.0 || abs(source.y) > 1.0 || ray.z > -0.01 || abs(drawn.x) > 1.0 ||
+                    abs(drawn.y) > 1.0) {
                     gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
                 } else {
-                    vec2 uv = vec2((uEye + 0.5 + 0.5 * source.x) * 0.5, 0.5 + 0.5 * source.y);
+                    vec2 uv = vec2((uEye + 0.5 + 0.5 * drawn.x) * 0.5, 0.5 + 0.5 * drawn.y);
                     vec4 color = texture2D(uTexture, (uTexMatrix * vec4(uv, 0.0, 1.0)).xy);
                     vec2 line = abs(fract(source * 5.0 + 0.5) - 0.5);
                     if (uGrid > 0.5 && min(line.x, line.y) < 0.02) color = vec4(0.0, 1.0, 0.0, 1.0);
