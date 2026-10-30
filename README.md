@@ -194,8 +194,8 @@ valores.
   far`; si no pudo, `vrserver.txt` dice por qué).
   También puedes corregir el tamaño de la bola en la configuración del visor virtual de
   PSMoveServiceEx, y entonces dejar `head_light_distance_scale` en 1.
-- Con el body tracking, los móviles también ayudan a la cabeza: ver "La cabeza con las cámaras del
-  cuerpo".
+- Con el body tracking no hace falta: los móviles corrigen solos esa distancia mientras te ven (ver
+  "La cabeza con las cámaras del cuerpo"), y Ctrl+Alt+L solo da el punto de partida.
 
 ## Body tracking: cámaras y pose en la PC (en pruebas)
 
@@ -387,7 +387,9 @@ y cuántos se descartan (por no encajar, o por llegar más viejos que lo que ya 
 cuadros el modelo de pose tenía la izquierda y la derecha al revés (unos pocos es normal; casi
 todos quiere decir que el cuerpo quedó dado vuelta: el driver lo corrige solo en unos segundos,
 cuando la cabeza y las puntas de los pies coinciden en que la cadera mira hacia atrás, y lo dice
-con `Body: the hips faced away…`); y
+con `Body: the hips faced away…`), y cuántas veces un móvil dibujó una pierna encima de la otra
+(`a leg drawn on the other`: el pie tapado por la otra pierna, que el modelo de pose pone sobre el
+que ve; ese punto se deja afuera en vez de hacer temblar el pie); y
 `Body trackers` por tracker (cadera, pie izquierdo, pie derecho) a qué
 altura del piso estuvo en promedio, la más baja y la más alta, cuánto se apartó de su lugar
 promedio y qué parte del tiempo tuvo posición. Quieto, lo que se aparta es su temblor: debe quedar
@@ -420,36 +422,41 @@ Con el body tracking y la luz del visor encendidos, los móviles también ven tu
 entre las orejas) y el driver la usa junto con la luz:
 
 - **Quieta de verdad, y sobre tu cuerpo.** La PS Eye sola ve muy bien hacia los lados pero mal en
-  profundidad (la saca del tamaño de la luz): la cabeza se mueve adelante y atrás sin que te muevas,
-  y puede quedar hasta un metro más lejos de lo que estás. Mientras los móviles te ven, de la luz se
-  toma solo la dirección desde la PS Eye y la profundidad sale de los móviles; si al empezar la luz
-  dice otra distancia, la cabeza pasa a donde la ven los móviles, sobre la línea de la luz. Si lo que
-  ven los móviles no coincide con la luz (se movieron desde que los calibraste), la profundidad
-  vuelve a ser la de la luz. Además,
-  cuando estás quieto el driver suaviza más (aprende cuánto te mueves), con o sin móviles.
+  profundidad (la saca del tamaño de la luz, y PSMoveServiceEx la pone de 2 a 5 veces más lejos según
+  el momento): la cabeza se mueve adelante y atrás sin que te muevas, y puede quedar más de un metro
+  detrás de donde estás, con los mandos muy adelante. Mientras los dos móviles te ven, el driver toma
+  donde se cruzan sus líneas de visión sobre la línea de la luz: eso dice a qué distancia de la PS Eye
+  está la cabeza, y de lo demás se encarga la luz. Tomarlos de a dos importa: con el visor tapando
+  las orejas, cada móvil las pone a otra altura, y por separado se contradecían y hacían ir y venir
+  la cabeza. Con eso aprende también cuánto más lejos pone PSMoveServiceEx la luz y la corrige sola,
+  así que cuando un móvil deja de verte la distancia sigue bien (Ctrl+Alt+L hace falta solo sin
+  móviles). Si donde se cruzan no cae sobre la línea de la luz (los móviles se movieron desde que los
+  calibraste), no se usan. Además, cuando estás quieto el driver suaviza más (aprende cuánto te
+  mueves), con o sin móviles.
 - **De espaldas a la PS Eye.** Si la cámara deja de ver la luz (giras 180°, la tapas), la cabeza
   sigue a donde la ven los móviles en vez de quedarse clavada; al volver a ver la luz pasa a ella
   suavemente. Sin la luz, la posición llega unos 0,15 s más tarde y algo menos fina, pero no salta.
 
 Viene activado cuando están las dos cosas. **Ctrl+Alt+B** lo apaga (la primera vez que lo pulsas)
 y lo vuelve a encender, para comparar; `vrserver.txt` dice cuál quedó (`the light alone` es
-apagado). No lo dejes apagado: si PSMoveServiceEx pone la luz lejos, la cabeza queda detrás del
-cuerpo y de los Moves. En `vrserver.txt`:
+apagado). **No lo pulses al jugar** (está al lado de Ctrl+Alt+C y Ctrl+Alt+L): apagado, si
+PSMoveServiceEx pone la luz lejos, la cabeza queda detrás del cuerpo y de los Moves. En
+`vrserver.txt`:
 
 - `Head light: out of sight; the body cameras follow the head` cuando la siguen solo los móviles.
 - Cada 10 segundos, `Head from the body cameras:` cuántas vistas de los móviles usó, cuántas
-  descartó y cuántas llegaron tarde; cuántas veces puso la cabeza donde la ven los móviles (sin la
-  luz, o a otra distancia que la de la luz); a cuántos cm de donde la ven pone la luz la cabeza (si
-  son decenas, la distancia de PSMoveServiceEx está mal: ver `head_light_distance_scale`); y dónde
-  aprendió que están tus orejas respecto del cuello. La línea de estadísticas de `Head light:`
+  descartó y cuántas llegaron tarde; cuántas veces encontró la cabeza sin la luz; cuántos pares de
+  vistas se cruzaron sobre la línea de la luz y a cuántos cm de ella en promedio (unos pocos; si casi
+  ninguno, los móviles no coinciden con la PS Eye: calíbralos de nuevo); por cuánto multiplica la
+  distancia de la luz para que coincida (`times 0.45`: PSMoveServiceEx la ponía a más del doble); y
+  dónde aprendió que están tus orejas respecto del cuello. La línea de estadísticas de `Head light:`
   termina con `agility`: baja (0,01-0,1) quieto, sube al moverte.
 
 Ajustes de `default.vrsettings`:
 
-- `head_position_depth_noise_with_body_cm` (100): cuánto se cree en la profundidad de la PS Eye
-  mientras los móviles ven la cabeza. Alto, la profundidad sale de los móviles: más quieta y sobre
-  tu cuerpo, pero unos 0,15 s más lenta al acercarte o alejarte de la PS Eye. Más bajo (9, como
-  antes), más de la PS Eye: solo si su distancia es buena.
+- `head_position_depth_noise_with_body_cm` (30): cuánto se cree en la profundidad de la luz (ya
+  corregida) mientras los móviles ven la cabeza. Más alto, la profundidad sale más de los móviles:
+  más quieta, pero unos 0,15 s más lenta al acercarte o alejarte de la PS Eye.
 - `head_body_cameras` (true): `false` no usa los móviles para la cabeza.
 
 ## Mandos: los PS Move desde este driver (opcional)

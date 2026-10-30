@@ -527,6 +527,10 @@ HeadPositionConfig TestHeadConfig()
     HeadPositionConfig config;
     config.eyes_from_light = Vec3{0.0, -0.10, 0.03};  // light 10 cm above, 3 cm behind the eyes
     config.eyes_from_neck = Vec3{0.0, 0.075, -0.08};
+    // As the driver has it with the body cameras on.
+    config.depth_noise_with_sightings_m = 0.3;
+    config.learn_light_scale = true;
+    config.sighting_pairs = true;
     return config;
 }
 
@@ -560,6 +564,7 @@ struct HeadSimulation {
     double body_age = 0.15;
     double body_pixel_noise = 3.0;
     Vec3 body_moved;  // how far the body cameras went since they were calibrated
+    std::vector<Vec3> body_ears_off{Vec3{}, Vec3{}};  // where each camera's pose model puts the ears wrong
     Vec3 ears_from_neck{0.0, 0.06, 0.01};  // where the pose model really puts them
     std::function<bool(double)> body_visible;
     std::vector<double> last_body_frame{100.0, 100.0 + 1.0 / 60.0};
@@ -663,7 +668,8 @@ struct HeadSimulation {
                 CameraModel moved = body_cameras[c];
                 moved.position = moved.position + body_moved;
                 if ((!body_visible || body_visible(frame_t)) &&
-                    moved.Project(then.neck + Rotate(then.rotation, ears_from_neck), &sighting.u, &sighting.v)) {
+                    moved.Project(then.neck + Rotate(then.rotation, ears_from_neck) + body_ears_off[c], &sighting.u,
+                                  &sighting.v)) {
                     sighting.u += body_pixel_noise * Gaussian();
                     sighting.v += body_pixel_noise * Gaussian();
                     body_in_flight.push_back(sighting);
@@ -1039,6 +1045,7 @@ void TestHeadLateSightingReplayed()
     HeadSimulation sim;
     HeadPositionConfig config = TestHeadConfig();
     config.depth_noise_with_sightings_m = config.depth_noise_m;
+    config.sighting_pairs = false;  // one view alone counts
     const CameraModel camera = sim.body_cameras[0];
     HeadSighting sighting;
     sighting.time = 1.0 + 20 / 60.0 - 0.041;
@@ -1145,8 +1152,8 @@ void TestHeadBodyCamerasMoved()
 void TestHeadBodyFixesLightDepth()
 {
     // PSMoveServiceEx puts the light half as far again from the PS Eye as it is, wandering 10 cm
-    // more: the body cameras' views disagree with it, until the head is put where they see it, on
-    // the light's line of sight.
+    // more: where the body cameras meet on the light's line of sight, the head is, and the light's
+    // distance is learned to match.
     HeadSimulation sim;
     sim.interpolated = true;
     sim.depth_noise = 0.03;
@@ -1155,11 +1162,11 @@ void TestHeadBodyFixesLightDepth()
     sim.depth_wander = 0.1;
     sim.body = true;
     const HeadRun run = sim.Run(10.0, StandStill, nullptr, 2.0);
-    CHECK(run.rms < 0.03);
     const HeadPositionEstimator::Stats stats = sim.estimator.TakeStats();
-    CHECK(stats.light_depth_resets >= 1);
-    CHECK(stats.light_offset_m > 0.3);
-    CHECK(stats.sightings > 10 * stats.sightings_rejected);
+    CHECK(run.rms < 0.03);
+    CHECK(std::fabs(stats.light_scale - 1.0 / 1.5) < 0.03);
+    CHECK(stats.on_line_views > 0.95 * stats.paired_views);
+    CHECK(stats.sightings > 5 * stats.sightings_rejected);
     // Without them, the head is that far off.
     HeadSimulation alone = sim;
     alone.estimator = HeadPositionEstimator(TestHeadConfig());
@@ -1172,7 +1179,7 @@ void TestHeadBodyFixesLightTooFar()
     // As in a test: the PS Eye below the head, PSMoveServiceEx putting the light twice as far as it
     // is, wandering 30 cm more, so that it is often over 4 m from the PS Eye (impossible, alone);
     // and the pose model's ears 5 cm higher and 3 cm further forward than first guessed. The body
-    // cameras come in after the light: the head goes where they see it, as soon as their views
+    // cameras come in after the light: the head goes where they meet, as soon as their views
     // arrive, and their ears are learned in a couple of seconds.
     HeadSimulation sim;
     sim.camera = Vec3{0.0, 1.25, -1.8};
@@ -1187,13 +1194,34 @@ void TestHeadBodyFixesLightTooFar()
     sim.body = true;
     sim.Run(3.0, StandStill);
     const HeadPositionEstimator::Stats first = sim.estimator.TakeStats();
-    CHECK(first.light_depth_resets >= 1);
+    CHECK(std::fabs(first.light_scale - 0.5) < 0.05);
     // The forward 3 cm of the ears cannot be learned from the light's depth, so some of it stays.
     const HeadRun run = sim.Run(5.0, StandStill, nullptr, 0.0);
     CHECK(run.rms < 0.04);
     const HeadPositionEstimator::Stats after = sim.estimator.TakeStats();
     CHECK(after.sightings > 10 * after.sightings_rejected);
     CHECK(std::abs(after.ears_from_neck.y - sim.ears_from_neck.y) < 0.01);
+}
+
+void TestHeadBodyFixesFarLightEarsApart()
+{
+    // As in a VRChat test: PSMoveServiceEx puts the light twice as far as it is, wandering 10 cm,
+    // and with the headset over the ears each phone's pose model puts them at another height, 7 cm
+    // above and below. Each view alone disagrees with the other camera's; where the two meet is on
+    // the light's line of sight, and the head goes there.
+    HeadSimulation sim;
+    sim.camera = Vec3{0.0, 1.25, -1.2};
+    sim.interpolated = true;
+    sim.depth_noise = 0.03;
+    sim.lateral_noise = 0.002;
+    sim.light_scale = 2.0;
+    sim.depth_wander = 0.1;
+    sim.body_ears_off = {Vec3{0.0, 0.07, 0.0}, Vec3{0.0, -0.07, 0.0}};
+    sim.Run(2.0, StandStill);
+    sim.body = true;
+    const HeadRun run = sim.Run(10.0, StandStill, nullptr, 4.0);
+    CHECK(run.rms < 0.03);
+    CHECK(std::fabs(sim.estimator.TakeStats().light_scale - 0.5) < 0.03);
 }
 
 void TestHeadBodyFollowsWithoutLight()
@@ -1552,6 +1580,7 @@ int main()
     TestHeadBodyCamerasMoved();
     TestHeadBodyFixesLightDepth();
     TestHeadBodyFixesLightTooFar();
+    TestHeadBodyFixesFarLightEarsApart();
     TestHeadBodyFollowsWithoutLight();
     TestHeadBodyStartsWithoutLight();
     TestHeadLearnsEars();

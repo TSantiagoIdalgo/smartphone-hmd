@@ -177,7 +177,11 @@ HmdDevice::HmdDevice(PsmsClient* psms, HeadSightingQueue* sightings) : psms_(psm
         head.lateral_noise_m = std::max(GetDoubleSetting("head_position_lateral_noise_mm", 2.0), 0.1) / 1000.0;
         head.depth_noise_m = std::max(GetDoubleSetting("head_position_depth_noise_cm", 3.0), 0.01) / 100.0;
         head.depth_noise_with_sightings_m =
-            std::max(GetDoubleSetting("head_position_depth_noise_with_body_cm", 100.0), 0.01) / 100.0;
+            std::max(GetDoubleSetting("head_position_depth_noise_with_body_cm", 30.0), 0.01) / 100.0;
+        // The body cameras, two by two, put the head along the light's line of sight, and the light's
+        // distance is learned from them.
+        head.learn_light_scale = true;
+        head.sighting_pairs = true;
         head.agility = std::max(GetDoubleSetting("head_position_agility", 1.0), 0.001);
         light_distance_scale_ = std::clamp(GetDoubleSetting("head_light_distance_scale", 1.0), 0.2, 5.0);
         head.prediction_gain = std::clamp(GetDoubleSetting("head_position_prediction", 0.8), 0.0, 1.0);
@@ -540,12 +544,12 @@ void HmdDevice::UpdateHeadPosition(std::vector<LightSample>* samples, std::vecto
         }
         if (stats.sightings + stats.sightings_rejected + stats.sightings_late > 0) {
             DriverLog("Head from the body cameras: %d views used, %d left out, %d too late, found %d times without "
-                      "the light and %d times at another depth than the light's; the light puts the head %.0f cm "
-                      "from where they see it; the ears %.1f cm above the neck, %.1f cm behind it and %.1f cm to its "
-                      "right",
+                      "the light; %d of %d pairs of views met on the light's line of sight (%.0f cm from it on "
+                      "average), and the light's distance from the PS Eye is taken times %.2f to match them; the "
+                      "ears %.1f cm above the neck, %.1f cm behind it and %.1f cm to its right",
                       stats.sightings, stats.sightings_rejected, stats.sightings_late, stats.sighting_starts,
-                      stats.light_depth_resets, stats.light_offset_m * 100.0, stats.ears_from_neck.y * 100.0,
-                      stats.ears_from_neck.z * 100.0, stats.ears_from_neck.x * 100.0);
+                      stats.on_line_views, stats.paired_views, stats.line_gap_m * 100.0, stats.light_scale,
+                      stats.ears_from_neck.y * 100.0, stats.ears_from_neck.z * 100.0, stats.ears_from_neck.x * 100.0);
         }
     }
 }
@@ -634,6 +638,7 @@ void HmdDevice::MeasureLightDistance(double now, const std::vector<LightSample>&
     std::nth_element(light_ratios_.begin(), light_ratios_.begin() + light_ratios_.size() / 2, light_ratios_.end());
     const double ratio = light_ratios_[light_ratios_.size() / 2];
     light_distance_scale_ = std::clamp(ratio, 0.2, 5.0);
+    head_position_.ForgetLightScale();  // what the body cameras taught is in this one now
     vr::VRSettings()->SetFloat(kSettingsSection, "head_light_distance_scale", static_cast<float>(light_distance_scale_));
     DriverLog("Head light: PSMoveServiceEx had it %.2f times as far from the PS Eye as the Move; "
               "head_light_distance_scale is now %.2f (saved)",

@@ -354,8 +354,8 @@ void BodyTracking::LogReport(double now)
     const BodyFilter::Stats& f = report.filter;
     if (f.updates + f.outliers > 0) {
         DriverLog("Body: %d points used, %d left out as wrong, %d too old, %d frames with left and right swapped, %d "
-                  "joints (re)started",
-                  f.updates, f.outliers, f.late, f.swapped, f.started);
+                  "joints (re)started, %d times a leg drawn on the other",
+                  f.updates, f.outliers, f.late, f.swapped, f.started, f.collapsed);
     }
     if (spreads_[0].count + spreads_[1].count + spreads_[2].count > 0) {
         static const char* const kNames[3] = {"hips", "left foot", "right foot"};

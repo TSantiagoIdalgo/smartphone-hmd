@@ -52,6 +52,13 @@ struct HeadPositionConfig {
     // calibration is never as good as the PS Eye's own view of the bulb, and two views a couple of
     // cm off it would pull the bulb back and forth; they also arrive 0.2 s late.
     bool sightings_only_without_light = false;
+    // For the head's light, whose size PSMoveServiceEx misjudges: its distance from the PS Eye is
+    // scaled to where the body cameras see the head, learned over a few seconds.
+    bool learn_light_scale = false;
+    // With the light followed, the body cameras' views go in two by two: where two cameras meet,
+    // on the light's line of sight, is how far along it the head is. Their own disagreements (each
+    // pose model's ears a little off) cancel out, and the light keeps the rest.
+    bool sighting_pairs = false;
 };
 
 // A body camera's view of the head: where it saw the point midway between the ears. Or, for a
@@ -121,9 +128,12 @@ public:
         int sightings_late = 0;  // older than the measurements kept
         int sighting_starts = 0;  // the head found by two cameras, without the light
         Vec3 ears_from_neck;     // as learned
-        double light_offset_m = 0.0;  // how far apart the light and the views put the head, RMS
         int light_depth_resets = 0;  // views left out until the head was put where they see it,
                                      // on the light's line of sight
+        int paired_views = 0;    // views that met another camera's at about the same time...
+        int on_line_views = 0;   // ...near the light's line of sight
+        double line_gap_m = 0.0;  // how far from it, on average
+        double light_scale = 1.0;  // the light's distance times this: where the body cameras see the head
         double agility = 0.0;    // its scale on average: below 1 the head is smoothed more
     };
 
@@ -133,6 +143,12 @@ public:
     void AddOrientation(double time, Quat orientation);
     // The camera position in the world, used to tell depth noise from sideways noise.
     void SetCamera(bool valid, Vec3 position, int cameras);
+    // The light's distance was measured again: learn its scale from 1.
+    void ForgetLightScale()
+    {
+        light_scale_ = 1.0;
+        light_scale_views_ = 0.0;
+    }
     // How far past now the output rotation is predicted; the pivot is extrapolated as far.
     void SetHorizon(double seconds) { horizon_ = seconds; }
     // A light sample. `tracking` false means the camera lost it.
@@ -206,9 +222,12 @@ private:
     void Keep(size_t index, double time, const Measurement& m);
     void ForgetSteps();
     // The light's own neck pivot at `time`, between two of its steps.
+    bool LineGap(const HeadSighting& sighting, Quat orientation, double* gap, double* depth_ratio,
+                 Vec3* on_line = nullptr) const;
     bool LightAt(double time, Vec3* pivot) const;
     void LearnEars(const HeadSighting& sighting, Quat orientation);
     // Starts the head where two cameras' newest views meet.
+    void AddPair(double now, double time, Vec3 pivot);
     bool StartFromSightings(double now);
 
     HeadPositionConfig config_;
@@ -251,6 +270,7 @@ private:
     Vec3 ears_from_neck_;
     double last_sighting_time_ = -1e9;  // when the newest view used arrived
     double last_view_time_ = -1e9;      // when the newest view arrived, used or not
+    double last_line_view_time_ = -1e9;  // ... that passed by the light's line of sight
     double ears_views_ = 0.0;           // views the ears were learned from
     std::vector<HeadSighting> recent_;  // each camera's newest view
     std::deque<double> rejected_sightings_;
@@ -265,6 +285,7 @@ private:
     double depth_innovation_sum_ = 0.0;
     double lateral_innovation_sum_ = 0.0;
     double agility_sum_ = 0.0;
-    double light_offset_sum_ = 0.0;
-    int light_offset_count_ = 0;
+    double line_gap_sum_ = 0.0;
+    double light_scale_ = 1.0;          // learned, on top of what the light was already scaled by
+    double light_scale_views_ = 0.0;
 };

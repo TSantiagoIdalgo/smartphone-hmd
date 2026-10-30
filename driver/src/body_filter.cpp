@@ -15,6 +15,7 @@ constexpr double kTogetherRadians = 60.0 * 3.14159265358979 / 180.0;
 constexpr double kMaxLateSeconds = 0.15;    // frames this far behind the filter are too old to use
 constexpr double kStartWindowSeconds = 0.1;  // two cameras' frames this close start a joint
 constexpr double kStartMaxGapM = 0.08;      // if their rays pass this close
+constexpr double kSamePixels = 10.0;         // a left and a right point this close, at 640 across: one place
 constexpr double kHoldSeconds = 0.5;
 constexpr double kLostSeconds = 5.0;
 constexpr int kMissesToRestart = 10;
@@ -248,6 +249,31 @@ void BodyFilter::Add(BodyView view)
             std::swap(view.visibility[j], view.visibility[j + 1]);
         }
         ++stats_.swapped;
+    }
+    // A foot hidden behind the other leg: the pose model often puts it on the visible one. Where
+    // a leg's left and right points fall on the same place, that is only the joint the filter
+    // expects there; the other is left out of this frame.
+    const double same = kSamePixels * std::max(camera.width, camera.height) / 640.0;
+    for (int j = kLeftKnee; j <= kLeftToe; j += 2) {
+        const double du = view.u[j] - view.u[j + 1], dv = view.v[j] - view.v[j + 1];
+        if (!seen(j) || !seen(j + 1) || du * du + dv * dv > same * same) {
+            continue;
+        }
+        double distance[2];
+        for (int k = 0; k < 2; ++k) {
+            const int joint = j + k;
+            distance[k] = joints_[joint].live ? Update(&joints_[joint], joint, camera, view.time, view.u[joint],
+                                                       view.v[joint], view.visibility[joint], false)
+                                              : -1.0;
+            if (distance[k] < 0.0) {
+                distance[k] = 1e9;
+            }
+        }
+        view.visibility[distance[0] <= distance[1] ? j + 1 : j] = 0.0;
+        if (distance[0] >= 1e9 && distance[1] >= 1e9) {
+            view.visibility[j] = 0.0;
+        }
+        ++stats_.collapsed;
     }
 
     bool missing = false;

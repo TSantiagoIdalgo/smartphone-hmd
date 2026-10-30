@@ -411,6 +411,33 @@ void TestBodyFootHiddenFromOneCamera()
     CHECK(sim.Error(kLeftAnkle, lifted(sim.time), sim.time) < 0.015);
 }
 
+void TestBodyFootDrawnOnTheOther()
+{
+    // Standing still, the right camera has the left foot hidden behind the right leg, and in 60% of
+    // its frames the pose model puts it on the right foot: the left foot stays where it is.
+    BodySimulation sim;
+    sim.Run(1.5, StandingStill);
+    sim.filter.TakeStats();
+    std::mt19937 pick(3);
+    const auto drawn = [&](BodyView* view) {
+        if (view->camera == 1 && pick() % 10 < 6) {
+            for (int j : {kLeftAnkle, kLeftHeel, kLeftToe}) {
+                view->u[j] = view->u[j + 1] + Gaussian(sim.random, 2.0);
+                view->v[j] = view->v[j + 1] + Gaussian(sim.random, 2.0);
+                view->visibility[j] = 0.7;
+            }
+        }
+    };
+    double worst = 0.0;
+    for (int i = 0; i < 26 * 4; ++i) {
+        sim.Run(1.0 / 26.0, StandingStill, drawn);
+        worst = std::fmax(worst, sim.Error(kLeftAnkle, Person{}, sim.time));
+    }
+    CHECK(worst < 0.03);
+    CHECK(sim.Error(kRightAnkle, Person{}, sim.time) < 0.015);
+    CHECK(sim.filter.TakeStats().collapsed > 100);
+}
+
 void TestBodyLeftAndRightMixedUp()
 {
     BodySimulation sim;
@@ -1030,6 +1057,7 @@ int main()
     TestBodyStandingStill();
     TestBodyTurnsAndWalks();
     TestBodyFootHiddenFromOneCamera();
+    TestBodyFootDrawnOnTheOther();
     TestBodyLeftAndRightMixedUp();
     TestBodyLateFrames();
     TestBodyTurnedRoundIsSwappedBack();

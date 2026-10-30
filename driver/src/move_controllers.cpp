@@ -27,9 +27,9 @@ constexpr double kOwnerMarginM = 0.1;
 constexpr double kLostOwnerMaxGapM = 0.8;
 constexpr double kMinViewDistanceM = 0.3;
 // For the log: how much a controller trembles while held still and seen, about its average of the
-// last half second.
-constexpr double kStillSpeed = 0.1;  // m/s
-constexpr double kTremorSeconds = 0.5;
+// last quarter second; slower than this, moving it slowly would count.
+constexpr double kStillSpeed = 0.03;  // m/s
+constexpr double kTremorSeconds = 0.25;
 // The phones' calibration no longer fits the PS Eye when this share of their views of a bulb miss
 // it, out of at least this many in a report.
 constexpr double kMisfitShare = 1.0 / 3.0;

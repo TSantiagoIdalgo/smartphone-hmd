@@ -85,6 +85,7 @@ public:
         int swapped = 0;  // frames whose left and right were the wrong way round
         int late = 0;     // points older than what their joint already had: left out
         int started = 0;  // joints found again after not being followed
+        int collapsed = 0;  // a leg's left and right points on the same place in a frame: one left out
     };
 
     explicit BodyFilter(const BodyFilterConfig& config = BodyFilterConfig());
