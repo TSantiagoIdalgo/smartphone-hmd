@@ -11,6 +11,7 @@ constexpr double kGate = 16.0;              // squared Mahalanobis distance; abo
 constexpr double kResetWindowSeconds = 0.25;  // this many outliers this close together...
 constexpr size_t kResetCount = 5;
 constexpr double kResetSpreadM = 0.05;      // ...and this close to each other mean the head really moved
+constexpr double kImpossibleJumpM = 0.5;    // from where it should be, between two camera frames
 constexpr double kLostAfterSeconds = 0.15;
 constexpr double kMaxExtrapolationSeconds = 0.10;
 constexpr double kMaxExtrapolationM = 0.08;
@@ -294,9 +295,12 @@ void HeadPositionEstimator::AddLight(double time, Vec3 light, bool tracking, Vec
     // While the body cameras see the head, the light gives its direction from the PS Eye and they
     // its depth: a depth that puts the eyes where none are does not make the direction wrong. As
     // soon as their views arrive, before any fits: a far-off depth would otherwise keep them out.
-    const bool sightings = time - last_view_time_ <= kSightingsLostSeconds;
-    if (!sightings && (eye_height < config_.min_eye_height || eye_height > config_.max_eye_height ||
-                       (camera_valid_ && (distance < kMinCameraDistance || distance > kMaxCameraDistance)))) {
+    // Its depth is let go only while their views fit, though: views that all miss (cameras that
+    // moved since their calibration) fix nothing, and the depth would wander off.
+    const bool views = time - last_view_time_ <= kSightingsLostSeconds;
+    const bool sightings = time - last_sighting_time_ <= kSightingsLostSeconds;
+    if (!views && (eye_height < config_.min_eye_height || eye_height > config_.max_eye_height ||
+                   (camera_valid_ && (distance < kMinCameraDistance || distance > kMaxCameraDistance)))) {
         ++stats_.implausible;
         return;
     }
@@ -337,6 +341,13 @@ void HeadPositionEstimator::AddLight(double time, Vec3 light, bool tracking, Vec
     if (mahalanobis > kGate) {
         Measurement missed = m;
         missed.missed = true;
+        // For a bulb the PS Eye follows or the phones see, a jump nobody makes between two frames
+        // (a ball half hidden, put far away) does not make the filter readier to follow; if it
+        // lasts, the reset below takes it in.
+        if (config_.sightings_only_without_light && (sightings || LightFollowed(time)) &&
+            Length(innovation) > kImpossibleJumpM) {
+            missed.weight = 0.0;
+        }
         Apply(missed);
         Keep(index, measured_at, missed);
         ++stats_.rejected;
@@ -344,9 +355,7 @@ void HeadPositionEstimator::AddLight(double time, Vec3 light, bool tracking, Vec
         while (rejected_.front().time < time - kResetWindowSeconds) {
             rejected_.pop_front();
         }
-        // While the body cameras' views arrive they hold it: a jump of the light alone (a ball half
-        // hidden, put far away) is not believed.
-        if (rejected_.size() < kResetCount || time - last_view_time_ <= kSightingsLostSeconds) {
+        if (rejected_.size() < kResetCount) {
             return;
         }
         Vec3 mean;
@@ -357,6 +366,14 @@ void HeadPositionEstimator::AddLight(double time, Vec3 light, bool tracking, Vec
             if (Length(r.pivot - mean) > kResetSpreadM) {
                 return;
             }
+        }
+        // While the body cameras' views fit they hold it: a jump of the light alone (a ball half
+        // hidden, put far away) is not believed. A bulb's light still is across its line of sight,
+        // which the PS Eye sees well: there the views were off, not the light.
+        const Vec3 off = mean - pivot_;
+        const Vec3 across = off - m.blind * Dot(off, m.blind);
+        if (sightings && (!config_.sightings_only_without_light || Length(across) <= kResetSpreadM)) {
+            return;
         }
         // Not noise: the head (or the PSMoveServiceEx frame) really moved.
         m.pivot = mean;
@@ -513,6 +530,19 @@ void HeadPositionEstimator::AddSighting(double now, const HeadSighting& sighting
     const double mahalanobis = Correct(m, false);
     if (mahalanobis < 0.0) {
         Restore(current);
+        return;
+    }
+    // A bulb the PS Eye follows stays where the PS Eye puts it: a view that fits only tells that it
+    // is still there, which keeps a jump of the light from being believed and the views ready for
+    // when the PS Eye loses it.
+    if (config_.sightings_only_without_light && LightFollowed(now)) {
+        Restore(current);
+        if (mahalanobis > kGate) {
+            ++stats_.sightings_rejected;
+        } else {
+            last_sighting_time_ = now;
+            ++stats_.sightings;
+        }
         return;
     }
     if (mahalanobis > kGate) {

@@ -347,7 +347,9 @@ salgas entero, de la cabeza a los pies, y en `vrserver.txt` que `Body trackers` 
   profundidad sale varias veces peor: a medio metro uno del otro, el cuerpo tiembla y se va adelante
   y atrás varios centímetros.
 
-**Calibrar las cámaras** (una vez, y otra si mueves un móvil):
+**Calibrar las cámaras** (una vez, y otra si mueves un móvil o la PS Eye, o si recalibras la PS Eye
+en PSMoveServiceEx: la línea `Head position: 1 camera(s), the first at (x, y, z) cm` de
+`vrserver.txt` dice dónde la pone PSMoveServiceEx, y si cambia, los móviles quedan corridos):
 
 1. Pon los dos móviles fijos como en el dibujo. Abre la app en los dos y en la PC
    `python tools\body_tracker.py --ball-color magenta`, con el color de la bola del Move con que
@@ -421,7 +423,9 @@ entre las orejas) y el driver la usa junto con la luz:
   profundidad (la saca del tamaño de la luz): la cabeza se mueve adelante y atrás sin que te muevas,
   y puede quedar hasta un metro más lejos de lo que estás. Mientras los móviles te ven, de la luz se
   toma solo la dirección desde la PS Eye y la profundidad sale de los móviles; si al empezar la luz
-  dice otra distancia, la cabeza pasa a donde la ven los móviles, sobre la línea de la luz. Además,
+  dice otra distancia, la cabeza pasa a donde la ven los móviles, sobre la línea de la luz. Si lo que
+  ven los móviles no coincide con la luz (se movieron desde que los calibraste), la profundidad
+  vuelve a ser la de la luz. Además,
   cuando estás quieto el driver suaviza más (aprende cuánto te mueves), con o sin móviles.
 - **De espaldas a la PS Eye.** Si la cámara deja de ver la luz (giras 180°, la tapas), la cabeza
   sigue a donde la ven los móviles en vez de quedarse clavada; al volver a ver la luz pasa a ella
@@ -454,11 +458,13 @@ El driver puede publicar los dos PS Move como mandos en vez del Virtual Device M
 gana, con el body tracking:
 
 - **Los móviles también ven las bolas.** Con las cámaras calibradas, cada móvil busca la bola
-  encendida junto a cada mano y el driver la suma a la de la PS Eye, como con la cabeza: la
-  profundidad sale de los móviles (la de la PS Eye es la que tiembla) y, cuando la PS Eye deja de ver
-  la bola (detrás del cuerpo, fuera de su vista, tapada por la otra mano), la siguen los móviles,
-  unos 0,2 s más tarde. Cada vista va a la mano cuya bola pasa más cerca de esa línea de visión, si
-  la otra mano está claramente más lejos.
+  encendida junto a cada mano. Mientras la PS Eye ve la bola, el mando es de la PS Eye: lo que ven los
+  móviles solo confirma que sigue ahí (así no se cree a la PS Eye cuando una bola tapada a medias la
+  hace saltar lejos). Cuando la PS Eye deja de verla (detrás del cuerpo, fuera de su vista, tapada
+  por la otra mano), la siguen los móviles, unos 0,2 s más tarde. No fijan la profundidad con la PS
+  Eye viéndola: una calibración de los móviles apenas 2 cm corrida hacía que el mando saltara de lo
+  que decía un móvil a lo que decía el otro. Cada vista va a la mano cuya bola pasa más cerca de esa
+  línea de visión, si la otra mano está claramente más lejos.
 - **Y si nadie ve la bola**, la mano sigue a tu muñeca, que ven los móviles, en vez de quedarse
   clavada. El driver aprende dónde queda la bola respecto de tu muñeca mientras ve las dos cosas, y
   también cuál muñeca sostiene cada Move.
@@ -493,18 +499,19 @@ Mandos → Administrar asignaciones, como un mando Vive.
   `controller_pitch_degrees` en 90 o -90.
 - **Temblor**: la posición de cada bola pasa por el mismo filtro que la luz del visor. La PS Eye ve
   bien de costado y mal en profundidad, peor cuanto más lejos; el filtro suaviza más con la mano
-  quieta, sigue de cerca al moverla y deja afuera los saltos de una bola tapada a medias. Mientras
-  los móviles la ven, la profundidad es la suya: `controller_depth_noise_with_body_cm` (100) es
-  cuánto se cree entonces en la de la PS Eye (más bajo, una bola tapada a medias, que la PS Eye
-  pone lejos, arrastra el mando). Si aún tiembla quieto, sube
-  `controller_depth_noise_cm` (2, sin los móviles) o baja `controller_agility` (10); si va atrasado
-  al moverlo, al revés. `controller_prediction` (1) adelanta la mano según su velocidad para
-  compensar el retraso de PSMoveServiceEx.
+  quieta, sigue de cerca al moverla y deja afuera los saltos de una bola tapada a medias.
+  `controller_depth_noise_cm` (4) es cuánto tiembla la profundidad que da PSMoveServiceEx: si el
+  mando aún tiembla quieto, súbelo (6, 8) o baja `controller_agility` (5); si se atrasa al acercarlo
+  o alejarlo de la PS Eye, al revés. `controller_prediction` (1) adelanta la mano según su velocidad
+  para compensar el retraso de PSMoveServiceEx.
 - En `vrserver.txt`, `Hands:` dice qué Move quedó en cada mano y, cada 10 segundos, qué parte del
   tiempo lo vieron la PS Eye o los móviles, cuánto siguió a la muñeca y cuánto quedó quieto donde
   estaba (sin bola ni muñeca), cuántas lecturas de la bola dejó afuera, **cuánto tiembla el mando
-  quieto** (`held still it trembles … mm`: lo que ves en el juego; menos de 5 mm está bien), cuánto
-  tiembla la profundidad que da la PS Eye y de costado, cuántas vistas de los móviles usó y cuántas
-  descartó, y a cuántos
-  centímetros de la muñeca aprendió que está la bola (unos 15-20 cm). En `body_tracker.py`, "bola
+  quieto** mientras se lo ve (`held still it trembles … mm`: lo que ves en el juego; menos de 5 mm
+  está bien), cuánto tiembla la profundidad que da la PS Eye y de costado, cuántas vistas de los
+  móviles coincidieron con la bola (`used`) y cuántas no (`left out`), y a cuántos centímetros de la
+  muñeca aprendió que está la bola (unos 15-20 cm). Si más de un tercio de las vistas no coinciden,
+  avisa `the phones see the bulbs away from where the PS Eye puts them`: los móviles o la PS Eye se
+  movieron desde que calibraste los móviles (o cambió la sala de PSMoveServiceEx, por ejemplo al
+  recalibrar allí la PS Eye); calibra los móviles otra vez (Ctrl+Alt+C). En `body_tracker.py`, "bola
   del Move en N%" dice en qué parte de los cuadros encontró alguna.

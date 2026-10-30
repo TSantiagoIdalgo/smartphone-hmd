@@ -26,10 +26,14 @@ constexpr double kOwnerMarginM = 0.1;
 // Near neither hand: a hand whose bulb nobody follows may have moved that far since.
 constexpr double kLostOwnerMaxGapM = 0.8;
 constexpr double kMinViewDistanceM = 0.3;
-// For the log: how much a controller trembles while held still, about its average of the last
-// half second.
+// For the log: how much a controller trembles while held still and seen, about its average of the
+// last half second.
 constexpr double kStillSpeed = 0.1;  // m/s
 constexpr double kTremorSeconds = 0.5;
+// The phones' calibration no longer fits the PS Eye when this share of their views of a bulb miss
+// it, out of at least this many in a report.
+constexpr double kMisfitShare = 1.0 / 3.0;
+constexpr int kMisfitViews = 30;
 
 const char* const kHandNames[2] = {"left", "right"};
 
@@ -331,8 +335,8 @@ void MoveControllers::Run()
             hands_[h].Update(filtered, wrists, now);
             const HandPose pose = hands_[h].Pose(now);
             devices_[h]->Update(true, pose, move->buttons, move->trigger);
-            if (pose.valid) {
-                Tremor& t = tremor_[h];
+            Tremor& t = tremor_[h];
+            if (pose.valid && filtered.tracking) {
                 const double rate = 1.0 - std::exp(-kLoopMilliseconds / 1000.0 / kTremorSeconds);
                 t.mean = t.started ? t.mean + (pose.position - t.mean) * rate : pose.position;
                 t.started = true;
@@ -340,6 +344,8 @@ void MoveControllers::Run()
                     t.squares += Dot(pose.position - t.mean, pose.position - t.mean);
                     ++t.count;
                 }
+            } else {
+                t.started = false;  // held or on the wrist: its jumps back are not trembling
             }
             CheckRecenter(h, *move, now);
             const float rumble = devices_[h]->Rumble(now);
@@ -415,10 +421,17 @@ void MoveControllers::CheckRecenter(int hand, const MoveState& move, double now)
 
 void MoveControllers::LogReport()
 {
-    std::string text = "Hands:";
+    std::string text = "Hands:", misfit;
     for (int h = 0; h < 2; ++h) {
         const MoveHand::Stats stats = hands_[h].TakeStats();
         const HeadPositionEstimator::Stats bulb = bulbs_[h].TakeStats();
+        const int views = bulb.sightings + bulb.sightings_rejected;
+        if (views >= kMisfitViews && bulb.sightings_rejected > kMisfitShare * views) {
+            char part[96];
+            std::snprintf(part, sizeof(part), "%s%s %d of %d", misfit.empty() ? "" : ", ", kHandNames[h],
+                          bulb.sightings_rejected, views);
+            misfit += part;
+        }
         const int total = stats.tracking + stats.from_wrist + stats.held;
         char part[640];
         if (ids_[h] < 0 || total == 0) {
@@ -449,4 +462,10 @@ void MoveControllers::LogReport()
         text += part;
     }
     DriverLog("%s", text.c_str());
+    if (!misfit.empty()) {
+        DriverLog("Hands: the phones see the bulbs away from where the PS Eye puts them (views left out: %s): the "
+                  "phones or the PS Eye moved since the phones were calibrated, or PSMoveServiceEx's room did; "
+                  "calibrate the phones again (Ctrl+Alt+C)",
+                  misfit.c_str());
+    }
 }

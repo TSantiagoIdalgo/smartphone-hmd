@@ -117,7 +117,7 @@ private:
     int ids_[2] = {-1, -1};
     float rumble_[2] = {0.0f, 0.0f};
     double recenter_since_[2] = {-1.0, -1.0};
-    // How much each controller trembles while held still, for the log.
+    // How much each controller trembles while held still and seen, for the log.
     struct Tremor {
         bool started = false;
         Vec3 mean;

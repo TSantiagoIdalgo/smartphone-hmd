@@ -48,6 +48,10 @@ struct HeadPositionConfig {
     // Midway between the ears, where the body cameras see the head, from the neck: head axes, m. A
     // first guess, learned against the light while both see the head.
     Vec3 ears_from_neck{0.0, 0.06, 0.01};
+    // For a Move's bulb: the body cameras' views follow it only while the PS Eye does not. Their
+    // calibration is never as good as the PS Eye's own view of the bulb, and two views a couple of
+    // cm off it would pull the bulb back and forth; they also arrive 0.2 s late.
+    bool sightings_only_without_light = false;
 };
 
 // A body camera's view of the head: where it saw the point midway between the ears. Or, for a
