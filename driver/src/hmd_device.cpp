@@ -131,7 +131,7 @@ void DisplayComponent::GetEyeOutputViewport(vr::EVREye eye, uint32_t* x, uint32_
 void DisplayComponent::GetProjectionRaw(vr::EVREye, float* left, float* right, float* top, float* bottom)
 {
     // Symmetric frustum per eye. Values are tangents of the half angles; top is negative in OpenVR.
-    const float half_tan = std::tan(config_.fov_degrees * 0.5f * 3.14159265f / 180.0f);
+    const float half_tan = std::tan((config_.fov_degrees * 0.5f + config_.margin_degrees) * 3.14159265f / 180.0f);
     *left = -half_tan;
     *right = half_tan;
     *top = -half_tan;
@@ -207,10 +207,17 @@ HmdDevice::HmdDevice(PsmsClient* psms) : psms_(psms)
 #if defined(_WIN32)
     const int bitrate = vr::VRSettings()->GetInt32(kSettingsSection, "video_bitrate_mbps") * 1000000;
     video_ = std::make_unique<VideoStreamer>();
-    video_->SetFieldOfView(std::tan(config.fov_degrees * 0.5f * 3.14159265f / 180.0f));
     if (video_->Start(static_cast<int>(display_frequency_), bitrate, &adapter_luid_)) {
         virtual_display_ = std::make_unique<VirtualDisplay>(video_.get(), display_frequency_);
         config.on_desktop = false;
+        config.margin_degrees = static_cast<float>(
+            std::clamp(GetDoubleSetting("timewarp_margin_degrees", 5.0), 0.0, 89.0 - config.fov_degrees * 0.5));
+        const float to_radians = 3.14159265f / 180.0f;
+        video_->SetFieldOfView(std::tan((config.fov_degrees * 0.5f + config.margin_degrees) * to_radians),
+                               std::tan(config.fov_degrees * 0.5f * to_radians));
+        DriverLog("Video: each eye drawn %.0f degrees wide, %.0f of them shown; the rest is room for the phone's "
+                  "timewarp (timewarp_margin_degrees)",
+                  config.fov_degrees + 2.0f * config.margin_degrees, config.fov_degrees);
     } else {
         DriverLog("Video streaming unavailable; showing the HMD in a desktop window instead");
         video_.reset();

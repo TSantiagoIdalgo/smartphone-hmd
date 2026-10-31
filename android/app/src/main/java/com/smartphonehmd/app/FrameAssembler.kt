@@ -8,13 +8,14 @@ import java.nio.ByteOrder
  * Calls [onFrame] for every complete frame and [onLoss] when a frame went missing. `sensorSeq` is
  * the low 24 bits of the newest sensor packet the PC had when it drew the frame (0 if unknown);
  * `turn` (w, x, y, z) how the head was turned for the frame from that packet's rotation, or null if
- * the PC did not know; `tanHalfFov` how wide each eye's frame is. Not thread-safe: use it from the
- * receiving thread only.
+ * the PC did not know; `tanDrawn` how wide each eye's frame is (the tangent of half its angle) and
+ * `tanShown` how much of it to show, the rest a margin for the timewarp. Not thread-safe: use it from
+ * the receiving thread only.
  */
 class FrameAssembler(
     private val onFrame: (
         data: ByteArray, size: Int, keyframe: Boolean, width: Int, height: Int, sensorSeq: Int, turn: FloatArray?,
-        tanHalfFov: Float,
+        tanDrawn: Float, tanShown: Float,
     ) -> Unit,
     private val onLoss: () -> Unit,
 ) {
@@ -30,11 +31,12 @@ class FrameAssembler(
     private var height = 0
     private var sensorSeq = 0
     private var turn: FloatArray? = null
-    private var tanHalfFov = 1f
+    private var tanDrawn = 1f
+    private var tanShown = 1f
 
     fun addPacket(packet: ByteArray, length: Int) {
         if (length < HEADER_SIZE || packet[0] != 'H'.code.toByte() || packet[1] != 'M'.code.toByte() ||
-            packet[2] != 'V'.code.toByte() || packet[3] != '2'.code.toByte()
+            packet[2] != 'V'.code.toByte() || packet[3] != '3'.code.toByte()
         ) {
             return
         }
@@ -67,7 +69,7 @@ class FrameAssembler(
 
         if (chunksReceived == chunkCount) {
             complete = true
-            onFrame(buffer, frameSize, keyframe, width, height, sensorSeq, turn, tanHalfFov)
+            onFrame(buffer, frameSize, keyframe, width, height, sensorSeq, turn, tanDrawn, tanShown)
         }
     }
 
@@ -83,7 +85,8 @@ class FrameAssembler(
         width = header.getShort(16).toInt() and 0xFFFF
         height = header.getShort(18).toInt() and 0xFFFF
         turn = if ((flags and FLAG_RENDER_TURN) != 0) FloatArray(4) { header.getFloat(20 + 4 * it) } else null
-        tanHalfFov = header.getFloat(36)
+        tanDrawn = header.getFloat(36)
+        tanShown = header.getFloat(40)
         if (received.size < count) received = BooleanArray(count) else received.fill(false, 0, count)
     }
 
@@ -92,7 +95,7 @@ class FrameAssembler(
     }
 
     companion object {
-        const val HEADER_SIZE = 40
+        const val HEADER_SIZE = 44
         const val MAX_PAYLOAD = 1400
         const val FLAG_KEYFRAME = 1
         const val FLAG_RENDER_TURN = 2

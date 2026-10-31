@@ -34,7 +34,7 @@ void Packetize(const FrameInfo& info, const uint8_t* data, size_t size, const Se
         return;  // a frame this large means something is badly wrong; drop it
     }
     uint8_t packet[kHeaderSize + kMaxPayload];
-    std::memcpy(packet, "HMV2", 4);
+    std::memcpy(packet, "HMV3", 4);
     PutU32(packet + 4, info.frame_index);
     PutU16(packet + 10, static_cast<uint16_t>(chunk_count));
     packet[12] = (info.keyframe ? kFlagKeyframe : 0) | (info.has_render_turn ? kFlagRenderTurn : 0);
@@ -46,7 +46,8 @@ void Packetize(const FrameInfo& info, const uint8_t* data, size_t size, const Se
     for (int i = 0; i < 4; ++i) {
         PutF32(packet + 20 + 4 * i, info.render_turn[i]);
     }
-    PutF32(packet + 36, info.tan_half_fov);
+    PutF32(packet + 36, info.tan_drawn);
+    PutF32(packet + 40, info.tan_shown);
 
     for (size_t chunk = 0; chunk < chunk_count; ++chunk) {
         const size_t offset = chunk * kMaxPayload;

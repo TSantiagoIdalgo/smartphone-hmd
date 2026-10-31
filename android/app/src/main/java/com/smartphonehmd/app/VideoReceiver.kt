@@ -104,7 +104,7 @@ class VideoReceiver(
 
     private fun onFrame(
         data: ByteArray, size: Int, keyframe: Boolean, width: Int, height: Int, sensorSeq: Int, turn: FloatArray?,
-        tanHalfFov: Float,
+        tanDrawn: Float, tanShown: Float,
     ) {
         framesComplete.incrementAndGet()
         if (keyframe) keyframes.incrementAndGet()
@@ -136,7 +136,7 @@ class VideoReceiver(
                 queuedSeqs[queuedNext] = sensorSeq
                 queuedNext = (queuedNext + 1) % QUEUED_FRAMES
             }
-            timewarp.onFrame(timeUs, sensorSeq, turn, tanHalfFov)
+            timewarp.onFrame(timeUs, sensorSeq, turn, tanDrawn, tanShown)
             decoder.queueInputBuffer(index, 0, size, timeUs, 0)
         } catch (e: Exception) {
             lastError = e.message ?: e.toString()

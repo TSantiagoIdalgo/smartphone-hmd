@@ -328,7 +328,8 @@ void TestPacketize()
     info.has_render_turn = true;
     info.render_turn[0] = 0.5f;
     info.render_turn[2] = -0.25f;
-    info.tan_half_fov = 1.25f;
+    info.tan_drawn = 1.25f;
+    info.tan_shown = 1.0f;
 
     std::vector<std::vector<uint8_t>> packets;
     video::Packetize(info, frame.data(), frame.size(),
@@ -338,7 +339,7 @@ void TestPacketize()
     std::vector<uint8_t> rebuilt;
     for (size_t i = 0; i < packets.size(); ++i) {
         const std::vector<uint8_t>& p = packets[i];
-        CHECK(std::memcmp(p.data(), "HMV2", 4) == 0);
+        CHECK(std::memcmp(p.data(), "HMV3", 4) == 0);
         CHECK(p[4] == 0x04 && p[5] == 0x03 && p[6] == 0x02 && p[7] == 0x01);
         CHECK(p[8] == i && p[9] == 0);
         CHECK(p[10] == 3 && p[11] == 0);
@@ -346,10 +347,11 @@ void TestPacketize()
         CHECK(p[13] == 0x56 && p[14] == 0x34 && p[15] == 0x12);  // low 24 bits of the sensor seq
         CHECK((p[16] | p[17] << 8) == 1920);
         CHECK((p[18] | p[19] << 8) == 1080);
-        float turn[4], tan_half_fov;
+        float turn[4], tans[2];
         std::memcpy(turn, p.data() + 20, 16);
-        std::memcpy(&tan_half_fov, p.data() + 36, 4);
-        CHECK(turn[0] == 0.5f && turn[1] == 0.0f && turn[2] == -0.25f && turn[3] == 0.0f && tan_half_fov == 1.25f);
+        std::memcpy(tans, p.data() + 36, 8);
+        CHECK(turn[0] == 0.5f && turn[1] == 0.0f && turn[2] == -0.25f && turn[3] == 0.0f);
+        CHECK(tans[0] == 1.25f && tans[1] == 1.0f);
         rebuilt.insert(rebuilt.end(), p.begin() + video::kHeaderSize, p.end());
     }
     CHECK(packets[0].size() == video::kHeaderSize + video::kMaxPayload);

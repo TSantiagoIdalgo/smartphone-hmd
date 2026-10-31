@@ -5,8 +5,8 @@
 #include <functional>
 
 // UDP video packets from the PC to the phone. Each H.264 frame is split into chunks of at most
-// kMaxPayload bytes, each with this 40-byte little-endian header:
-//   0  char[4] "HMV2"
+// kMaxPayload bytes, each with this 44-byte little-endian header:
+//   0  char[4] "HMV3"
 //   4  u32     frame_index
 //   8  u16     chunk_index
 //  10  u16     chunk_count
@@ -19,12 +19,14 @@
 //              one the PC had from packet sensor_seq, in head axes (+x right, +y up, +z back).
 //              With its own record of that packet's moment, the phone turns the frame by however
 //              much the head turned since (timewarp).
-//  36  f32     tan_half_fov: each eye's frame spans this tangent of half its angle, across and up
+//  36  f32     tan_drawn: each eye's frame spans this tangent of half its angle, across and up...
+//  40  f32     tan_shown: ...of which the phone shows this much; the rest is a margin for the
+//              timewarp to turn into
 // Every chunk except the last one carries exactly kMaxPayload bytes.
 namespace video {
 
 constexpr uint16_t kVideoPort = 9945;
-constexpr size_t kHeaderSize = 40;
+constexpr size_t kHeaderSize = 44;
 constexpr size_t kMaxPayload = 1400;
 constexpr uint8_t kFlagKeyframe = 1;
 constexpr uint8_t kFlagRenderTurn = 2;
@@ -37,7 +39,8 @@ struct FrameInfo {
     uint16_t height = 0;
     bool has_render_turn = false;
     float render_turn[4] = {1.0f, 0.0f, 0.0f, 0.0f};  // w, x, y, z
-    float tan_half_fov = 1.0f;
+    float tan_drawn = 1.0f;
+    float tan_shown = 1.0f;
 };
 
 using SendFunction = std::function<void(const uint8_t* data, size_t size)>;

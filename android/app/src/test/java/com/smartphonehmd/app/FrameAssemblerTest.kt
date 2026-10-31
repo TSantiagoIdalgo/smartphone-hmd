@@ -11,14 +11,14 @@ class FrameAssemblerTest {
     private val frames = mutableListOf<Pair<ByteArray, Boolean>>()
     private val sensorSeqs = mutableListOf<Int>()
     private val turns = mutableListOf<FloatArray?>()
-    private val tans = mutableListOf<Float>()
+    private val tans = mutableListOf<Pair<Float, Float>>()
     private var losses = 0
     private val assembler = FrameAssembler(
-        onFrame = { data, size, keyframe, _, _, sensorSeq, turn, tanHalfFov ->
+        onFrame = { data, size, keyframe, _, _, sensorSeq, turn, tanDrawn, tanShown ->
             frames.add(data.copyOf(size) to keyframe)
             sensorSeqs.add(sensorSeq)
             turns.add(turn?.copyOf())
-            tans.add(tanHalfFov)
+            tans.add(tanDrawn to tanShown)
         },
         onLoss = { losses++ },
     )
@@ -36,7 +36,7 @@ class FrameAssemblerTest {
             val start = chunk * FrameAssembler.MAX_PAYLOAD
             val end = minOf(data.size, start + FrameAssembler.MAX_PAYLOAD)
             ByteBuffer.allocate(FrameAssembler.HEADER_SIZE + end - start).order(ByteOrder.LITTLE_ENDIAN).apply {
-                put("HMV2".toByteArray(Charsets.US_ASCII))
+                put("HMV3".toByteArray(Charsets.US_ASCII))
                 putInt(frameIndex)
                 putShort(chunk.toShort())
                 putShort(count.toShort())
@@ -48,6 +48,7 @@ class FrameAssemblerTest {
                 putShort(1080)
                 for (value in turn ?: floatArrayOf(1f, 0f, 0f, 0f)) putFloat(value)
                 putFloat(1.25f)
+                putFloat(1f)
                 put(data, start, end - start)
             }.array()
         }
@@ -107,7 +108,7 @@ class FrameAssemblerTest {
 
         assertEquals(listOf(0xABCDEF), sensorSeqs)
         assertEquals(null, turns[0])
-        assertEquals(1.25f, tans[0], 0f)
+        assertEquals(1.25f to 1f, tans[0])
         assertTrue(frames.single().second)
     }
 

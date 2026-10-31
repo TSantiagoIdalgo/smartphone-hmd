@@ -23,6 +23,8 @@ struct DisplayConfig {
     int32_t render_width = 1280;
     int32_t render_height = 1440;
     float fov_degrees = 90.0f;
+    // Drawn this much wider on every side than the phone shows, for the timewarp to turn into.
+    float margin_degrees = 0.0f;
     // False when frames go to the phone through VirtualDisplay instead of a desktop window.
     bool on_desktop = true;
 };
